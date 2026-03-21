@@ -1,7 +1,16 @@
 package main
 
-import "fmt"
+import (
+	"log"
+	"net/http"
+
+	"github.com/colingraydon/continuum/api"
+)
+
 
 func main() {
-	fmt.Println("hello world");
+	mux := api.NewServer();
+	if err := http.ListenAndServe(":8080", mux); err != nil {
+		log.Fatalf("Server failed to start with err: %v", err);
+	}
 }
