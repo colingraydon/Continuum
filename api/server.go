@@ -13,5 +13,6 @@ func NewServer(r *ring.Ring) *http.ServeMux {
 	mux.HandleFunc("DELETE /nodes/", h.RemoveNode)
 	mux.HandleFunc("GET /nodes", h.GetNodes)
 	mux.HandleFunc("GET /keys/", h.GetNode)
+	mux.HandleFunc("GET /stats", h.GetStats)
 	return mux
 }

@@ -1,19 +1,24 @@
 package ring
 
-import "sync"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 type Ring struct {
-	mu       sync.RWMutex
-	tree     *Tree
-	nodes    map[string]*Node
-	replicas int
+	mu        sync.RWMutex
+	tree      *Tree
+	nodes     map[string]*Node
+	replicas  int
+	keyCounts map[string]*atomic.Int64
 }
 
 func NewRing(replicas int) *Ring {
 	return &Ring{
-		tree:     NewTree(),
-		nodes:    make(map[string]*Node),
-		replicas: replicas,
+		tree:      NewTree(),
+		nodes:     make(map[string]*Node),
+		replicas:  replicas,
+		keyCounts: make(map[string]*atomic.Int64),
 	}
 }
 
@@ -23,6 +28,7 @@ func (r *Ring) AddNode(id, address string) {
 
 	node := NewNode(id, address)
 	r.nodes[id] = node
+	r.keyCounts[id] = &atomic.Int64{}
 	r.tree.Insert(node, r.replicas)
 }
 
@@ -37,6 +43,7 @@ func (r *Ring) RemoveNode(id string) {
 
 	r.tree.Remove(node, r.replicas)
 	delete(r.nodes, id)
+	delete(r.keyCounts, id)
 }
 
 func (r *Ring) GetNode(key string) (*Node, bool) {
@@ -53,6 +60,7 @@ func (r *Ring) GetNode(key string) (*Node, bool) {
 		return nil, false
 	}
 
+	r.keyCounts[vnode.Node.ID].Add(1)
 	return vnode.Node, true
 }
 

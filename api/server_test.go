@@ -23,6 +23,7 @@ func TestRoutes(t *testing.T) {
 		{"get node by key", http.MethodGet, "/keys/mykey", http.StatusServiceUnavailable},
 		{"remove node missing id", http.MethodDelete, "/nodes/", http.StatusBadRequest},
 		{"not found", http.MethodGet, "/nonexistent", http.StatusNotFound},
+		{"get stats", http.MethodGet, "/stats", http.StatusOK},
 	}
 
 	for _, tt := range tests {
