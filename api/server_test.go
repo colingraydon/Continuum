@@ -4,28 +4,35 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/colingraydon/continuum/internal/ring"
 )
 
 func TestRoutes(t *testing.T) {
-	srv := NewServer(); 
+	// Arrange
+	srv := NewServer(ring.NewRing(50))
 
 	tests := []struct {
-		name	string
-		method  string
-		path	string
-		status	int
-	} {
-		{"hello route", http.MethodGet, "/hello", http.StatusOK},
+		name   string
+		method string
+		path   string
+		status int
+	}{
+		{"add node", http.MethodPost, "/nodes", http.StatusBadRequest},
+		{"get nodes", http.MethodGet, "/nodes", http.StatusOK},
+		{"get node by key", http.MethodGet, "/keys/mykey", http.StatusServiceUnavailable},
+		{"remove node missing id", http.MethodDelete, "/nodes/", http.StatusBadRequest},
+		{"not found", http.MethodGet, "/nonexistent", http.StatusNotFound},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Arrange
-			req := httptest.NewRequest(tt.method, tt.path, nil);
+			req := httptest.NewRequest(tt.method, tt.path, nil)
 			w := httptest.NewRecorder()
 
 			// Act
-			srv.ServeHTTP(w, req);
+			srv.ServeHTTP(w, req)
 
 			// Assert
 			if w.Code != tt.status {

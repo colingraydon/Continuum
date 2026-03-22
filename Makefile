@@ -1,4 +1,4 @@
-.PHONY: build run test bench lint docker clean
+.PHONY: build run test test-race e2e bench lint docker clean
 
 build:
 	go build -o bin/continuum ./cmd/continuum
@@ -7,7 +7,10 @@ run:
 	go run ./cmd/continuum
 
 test:
-	go test -v -race ./...
+	go test -v ./...
+
+e2e:
+	go test -v ./api/... -run E2E
 
 bench:
 	go test -bench=. -benchmem ./benchmarks/
@@ -23,7 +26,7 @@ docker:
 	docker build -t continuum .
 
 docker-run:
-	docker-compose up
+	docker compose up
 
 clean:
 	rm -rf bin/ coverage.out

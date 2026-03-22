@@ -1,22 +1,218 @@
 package api
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/colingraydon/continuum/internal/ring"
 )
 
-func TestHello(t *testing.T) {
-	//Arrange
-	req := httptest.NewRequest(http.MethodGet, "/hello", nil);
-	w := httptest.NewRecorder();
+func newTestHandler() *Handler {
+	return NewHandler(ring.NewRing(10))
+}
+
+func TestAddNode(t *testing.T) {
+	// Arrange
+	h := newTestHandler()
+	body := `{"id": "node1", "address": "10.0.0.1"}`
+	req := httptest.NewRequest(http.MethodPost, "/nodes", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
 
 	// Act
-	hello(w, req)
+	h.AddNode(w, req)
 
 	// Assert
-	expected := "Hello world!";
-	if w.Body.String() != expected {
-		t.Errorf("Expected body %q, got %q", expected, w.Body.String());
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected 201, got %d", w.Code)
+	}
+	var resp NodeResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp.ID != "node1" || resp.Address != "10.0.0.1" {
+		t.Errorf("unexpected response: %+v", resp)
+	}
+}
+
+func TestAddNodeInvalidBody(t *testing.T) {
+	// Arrange
+	h := newTestHandler()
+	req := httptest.NewRequest(http.MethodPost, "/nodes", bytes.NewBufferString("not json"))
+	w := httptest.NewRecorder()
+
+	// Act
+	h.AddNode(w, req)
+
+	// Assert
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestAddNodeMissingID(t *testing.T) {
+	// Arrange
+	h := newTestHandler()
+	body := `{"address": "10.0.0.1"}`
+	req := httptest.NewRequest(http.MethodPost, "/nodes", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+
+	// Act
+	h.AddNode(w, req)
+
+	// Assert
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestAddNodeMissingAddress(t *testing.T) {
+	// Arrange
+	h := newTestHandler()
+	body := `{"id": "node1"}`
+	req := httptest.NewRequest(http.MethodPost, "/nodes", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+
+	// Act
+	h.AddNode(w, req)
+
+	// Assert
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestRemoveNode(t *testing.T) {
+	// Arrange
+	h := newTestHandler()
+	h.ring.AddNode("node1", "10.0.0.1")
+	req := httptest.NewRequest(http.MethodDelete, "/nodes/node1", nil)
+	w := httptest.NewRecorder()
+
+	// Act
+	h.RemoveNode(w, req)
+
+	// Assert
+	if w.Code != http.StatusNoContent {
+		t.Errorf("expected 204, got %d", w.Code)
+	}
+	if h.ring.NodeCount() != 0 {
+		t.Errorf("expected 0 nodes, got %d", h.ring.NodeCount())
+	}
+}
+
+func TestRemoveNodeMissingID(t *testing.T) {
+	// Arrange
+	h := newTestHandler()
+	req := httptest.NewRequest(http.MethodDelete, "/nodes/", nil)
+	w := httptest.NewRecorder()
+
+	// Act
+	h.RemoveNode(w, req)
+
+	// Assert
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestGetNodes(t *testing.T) {
+	// Arrange
+	h := newTestHandler()
+	h.ring.AddNode("node1", "10.0.0.1")
+	h.ring.AddNode("node2", "10.0.0.2")
+	req := httptest.NewRequest(http.MethodGet, "/nodes", nil)
+	w := httptest.NewRecorder()
+
+	// Act
+	h.GetNodes(w, req)
+
+	// Assert
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	var resp []NodeResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp) != 2 {
+		t.Errorf("expected 2 nodes, got %d", len(resp))
+	}
+}
+
+func TestGetNodesEmpty(t *testing.T) {
+	// Arrange
+	h := newTestHandler()
+	req := httptest.NewRequest(http.MethodGet, "/nodes", nil)
+	w := httptest.NewRecorder()
+
+	// Act
+	h.GetNodes(w, req)
+
+	// Assert
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	var resp []NodeResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp) != 0 {
+		t.Errorf("expected 0 nodes, got %d", len(resp))
+	}
+}
+
+func TestGetNode(t *testing.T) {
+	// Arrange
+	h := newTestHandler()
+	h.ring.AddNode("node1", "10.0.0.1")
+	req := httptest.NewRequest(http.MethodGet, "/keys/mykey", nil)
+	w := httptest.NewRecorder()
+
+	// Act
+	h.GetNode(w, req)
+
+	// Assert
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	var resp NodeResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp.ID != "node1" {
+		t.Errorf("expected node1, got %s", resp.ID)
+	}
+}
+
+func TestGetNodeEmptyRing(t *testing.T) {
+	// Arrange
+	h := newTestHandler()
+	req := httptest.NewRequest(http.MethodGet, "/keys/mykey", nil)
+	w := httptest.NewRecorder()
+
+	// Act
+	h.GetNode(w, req)
+
+	// Assert
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", w.Code)
+	}
+}
+
+func TestGetNodeMissingKey(t *testing.T) {
+	// Arrange
+	h := newTestHandler()
+	req := httptest.NewRequest(http.MethodGet, "/keys/", nil)
+	w := httptest.NewRecorder()
+
+	// Act
+	h.GetNode(w, req)
+
+	// Assert
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
 	}
 }
