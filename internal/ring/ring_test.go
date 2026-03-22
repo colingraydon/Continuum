@@ -254,3 +254,46 @@ func TestGetNodesEmpty(t *testing.T) {
 		t.Errorf("expected 0 nodes, got %d", len(nodes))
 	}
 }
+
+func TestSetUpdateCallback(t *testing.T) {
+	// Arrange
+	r := NewRing(150)
+	var capturedNodeCount, capturedVNodeCount int
+	r.SetUpdateCallback(func(nodeCount, vnodeCount int) {
+		capturedNodeCount = nodeCount
+		capturedVNodeCount = vnodeCount
+	})
+
+	// Act
+	r.AddNode("node1", "10.0.0.1")
+
+	// Assert
+	if capturedNodeCount != 1 {
+		t.Errorf("expected node count 1, got %d", capturedNodeCount)
+	}
+	if capturedVNodeCount != 150 {
+		t.Errorf("expected vnode count 150, got %d", capturedVNodeCount)
+	}
+}
+
+func TestSetUpdateCallbackOnRemove(t *testing.T) {
+	// Arrange
+	r := NewRing(150)
+	r.AddNode("node1", "10.0.0.1")
+	var capturedNodeCount, capturedVNodeCount int
+	r.SetUpdateCallback(func(nodeCount, vnodeCount int) {
+		capturedNodeCount = nodeCount
+		capturedVNodeCount = vnodeCount
+	})
+
+	// Act
+	r.RemoveNode("node1")
+
+	// Assert
+	if capturedNodeCount != 0 {
+		t.Errorf("expected node count 0, got %d", capturedNodeCount)
+	}
+	if capturedVNodeCount != 0 {
+		t.Errorf("expected vnode count 0, got %d", capturedVNodeCount)
+	}
+}
