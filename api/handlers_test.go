@@ -275,3 +275,122 @@ func TestGetStatsEmptyRing(t *testing.T) {
 		t.Errorf("expected 0 variance, got %f", stats.Variance)
 	}
 }
+
+func TestGetReplicationNodes(t *testing.T) {
+	// Arrange
+	h := newTestHandler()
+	h.ring.AddNode("node1", "10.0.0.1")
+	h.ring.AddNode("node2", "10.0.0.2")
+	h.ring.AddNode("node3", "10.0.0.3")
+	body := `{"key": "somekey", "factor": 3}`
+	req := httptest.NewRequest(http.MethodPost, "/replicate", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+
+	// Act
+	h.GetReplicationNodes(w, req)
+
+	// Assert
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	var resp ReplicateResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp.Key != "somekey" {
+		t.Errorf("expected somekey, got %s", resp.Key)
+	}
+	if len(resp.Nodes) != 3 {
+		t.Errorf("expected 3 nodes, got %d", len(resp.Nodes))
+	}
+}
+
+func TestGetReplicationNodesInvalidBody(t *testing.T) {
+	// Arrange
+	h := newTestHandler()
+	req := httptest.NewRequest(http.MethodPost, "/replicate", bytes.NewBufferString("not json"))
+	w := httptest.NewRecorder()
+
+	// Act
+	h.GetReplicationNodes(w, req)
+
+	// Assert
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestGetReplicationNodesMissingKey(t *testing.T) {
+	// Arrange
+	h := newTestHandler()
+	body := `{"factor": 3}`
+	req := httptest.NewRequest(http.MethodPost, "/replicate", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+
+	// Act
+	h.GetReplicationNodes(w, req)
+
+	// Assert
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestGetReplicationNodesInvalidFactor(t *testing.T) {
+	// Arrange
+	h := newTestHandler()
+	body := `{"key": "somekey", "factor": 0}`
+	req := httptest.NewRequest(http.MethodPost, "/replicate", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+
+	// Act
+	h.GetReplicationNodes(w, req)
+
+	// Assert
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestGetReplicationNodesEmptyRing(t *testing.T) {
+	// Arrange
+	h := newTestHandler()
+	body := `{"key": "somekey", "factor": 3}`
+	req := httptest.NewRequest(http.MethodPost, "/replicate", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+
+	// Act
+	h.GetReplicationNodes(w, req)
+
+	// Assert
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", w.Code)
+	}
+}
+
+func TestGetReplicationNodesDistinct(t *testing.T) {
+	// Arrange
+	h := newTestHandler()
+	h.ring.AddNode("node1", "10.0.0.1")
+	h.ring.AddNode("node2", "10.0.0.2")
+	h.ring.AddNode("node3", "10.0.0.3")
+	body := `{"key": "somekey", "factor": 3}`
+	req := httptest.NewRequest(http.MethodPost, "/replicate", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+
+	// Act
+	h.GetReplicationNodes(w, req)
+
+	// Assert
+	var resp ReplicateResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	seen := make(map[string]bool)
+	for _, node := range resp.Nodes {
+		if seen[node.ID] {
+			t.Errorf("duplicate node %s in replication set", node.ID)
+		}
+		seen[node.ID] = true
+	}
+}
