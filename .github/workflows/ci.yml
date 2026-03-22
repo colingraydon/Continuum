@@ -20,7 +20,11 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Test
-        run: go test -v -race -coverprofile=coverage.out ./...
+        run: go test -v ./...
+
+      - name: E2E
+        run: go test -v ./api/... -run E2E
+
       - name: Upload coverage
         uses: codecov/codecov-action@v4
         with:

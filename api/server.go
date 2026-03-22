@@ -1,13 +1,17 @@
 package api
 
 import (
-	"fmt"
 	"net/http"
+
+	"github.com/colingraydon/continuum/internal/ring"
 )
 
-func NewServer() *http.ServeMux {
-	fmt.Println("Starting server on 8080...");
-	mux := http.NewServeMux();
-	mux.HandleFunc("/hello", hello);
-	return mux;
+func NewServer(r *ring.Ring) *http.ServeMux {
+	h := NewHandler(r)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /nodes", h.AddNode)
+	mux.HandleFunc("DELETE /nodes/", h.RemoveNode)
+	mux.HandleFunc("GET /nodes", h.GetNodes)
+	mux.HandleFunc("GET /keys/", h.GetNode)
+	return mux
 }
