@@ -92,6 +92,7 @@ func (h *Handler) GetNode(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	RecordKeyLookup()
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(NodeResponse{ID: node.ID, Address: node.Address}); err != nil {
 		http.Error(w, "failed to write response", http.StatusInternalServerError)
@@ -100,6 +101,7 @@ func (h *Handler) GetNode(w http.ResponseWriter, req *http.Request) {
 
 func (h *Handler) GetStats(w http.ResponseWriter, req *http.Request) {
 	stats := h.ring.GetStats()
+	RecordVariance(stats.Variance)
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(stats); err != nil {
 		http.Error(w, "failed to write response", http.StatusInternalServerError)

@@ -11,6 +11,7 @@ type Ring struct {
 	nodes     map[string]*Node
 	replicas  int
 	keyCounts map[string]*atomic.Int64
+	onUpdate  func(nodeCount, vnodeCount int)
 }
 
 func NewRing(replicas int) *Ring {
@@ -19,7 +20,15 @@ func NewRing(replicas int) *Ring {
 		nodes:     make(map[string]*Node),
 		replicas:  replicas,
 		keyCounts: make(map[string]*atomic.Int64),
+		onUpdate:  func(nodeCount, vnodeCount int) {},
 	}
+}
+
+
+func (r *Ring) SetUpdateCallback(fn func(nodeCount, vnodeCount int)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onUpdate = fn
 }
 
 func (r *Ring) AddNode(id, address string) {
@@ -30,6 +39,7 @@ func (r *Ring) AddNode(id, address string) {
 	r.nodes[id] = node
 	r.keyCounts[id] = &atomic.Int64{}
 	r.tree.Insert(node, r.replicas)
+	r.onUpdate(len(r.nodes), r.tree.Tree.Size())
 }
 
 func (r *Ring) RemoveNode(id string) {
@@ -44,6 +54,7 @@ func (r *Ring) RemoveNode(id string) {
 	r.tree.Remove(node, r.replicas)
 	delete(r.nodes, id)
 	delete(r.keyCounts, id)
+	r.onUpdate(len(r.nodes), r.tree.Tree.Size())
 }
 
 func (r *Ring) GetNode(key string) (*Node, bool) {

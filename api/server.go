@@ -4,9 +4,10 @@ import (
 	"net/http"
 
 	"github.com/colingraydon/continuum/internal/ring"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-func NewServer(r *ring.Ring) *http.ServeMux {
+func NewServer(r *ring.Ring) http.Handler {
 	h := NewHandler(r)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /nodes", h.AddNode)
@@ -15,5 +16,6 @@ func NewServer(r *ring.Ring) *http.ServeMux {
 	mux.HandleFunc("GET /keys/", h.GetNode)
 	mux.HandleFunc("GET /stats", h.GetStats)
 	mux.HandleFunc("POST /replicate", h.GetReplicationNodes)
-	return mux
+	mux.Handle("GET /metrics", promhttp.Handler())
+	return metricsMiddleware(mux)
 }

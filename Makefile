@@ -30,3 +30,12 @@ docker-run:
 
 clean:
 	rm -rf bin/ coverage.out
+
+grafana:
+	open http://localhost:3000
+
+prometheus:
+	open http://localhost:9090
+
+metrics:
+	open http://localhost:8080/metrics

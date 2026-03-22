@@ -37,6 +37,10 @@ func main() {
 	cfg := loadConfig()
 
 	r := ring.NewRing(cfg.replicas)
+	r.SetUpdateCallback(func(nodeCount, vnodeCount int) {
+		api.UpdateRingMetrics(nodeCount, vnodeCount)
+	})
+
 	for _, n := range cfg.defaultNodes {
 		r.AddNode(n.ID, n.Address)
 	}
