@@ -4,8 +4,8 @@ import "testing"
 
 func TestNewNode(t *testing.T) {
 	// Arrange
-	var id string = "myNode"
-	var address string = "1.2.3.4"
+	id := "myNode"
+	address := "1.2.3.4"
 
 	// Act
 	node := NewNode(id, address)

@@ -225,3 +225,32 @@ func TestGetReplicationNodesFewerNodesThanFactor(t *testing.T) {
 		t.Errorf("expected 2 nodes, got %d", len(nodes))
 	}
 }
+
+func TestGetNodes(t *testing.T) {
+	// Arrange
+	ring := NewRing(150)
+	ring.AddNode("node1", "10.0.0.1")
+	ring.AddNode("node2", "10.0.0.2")
+	ring.AddNode("node3", "10.0.0.3")
+
+	// Act
+	nodes := ring.GetNodes()
+
+	// Assert
+	if len(nodes) != 3 {
+		t.Errorf("expected 3 nodes, got %d", len(nodes))
+	}
+}
+
+func TestGetNodesEmpty(t *testing.T) {
+	// Arrange
+	ring := NewRing(150)
+
+	// Act
+	nodes := ring.GetNodes()
+
+	// Assert
+	if len(nodes) != 0 {
+		t.Errorf("expected 0 nodes, got %d", len(nodes))
+	}
+}

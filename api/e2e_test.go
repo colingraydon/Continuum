@@ -18,17 +18,29 @@ func newTestServer(t *testing.T) *httptest.Server {
 	return srv
 }
 
+func postNode(t *testing.T, url, body string) *http.Response {
+	t.Helper()
+	resp, err := http.Post(url, "application/json", bytes.NewBufferString(body))
+	if err != nil {
+		t.Fatalf("failed to post node: %v", err)
+	}
+	return resp
+}
+
+func closeBody(t *testing.T, resp *http.Response) {
+	t.Helper()
+	if err := resp.Body.Close(); err != nil {
+		t.Errorf("failed to close body: %v", err)
+	}
+}
+
 func TestE2EAddAndGetNode(t *testing.T) {
 	// Arrange
 	srv := newTestServer(t)
 
 	// Act
-	body := `{"id": "node1", "address": "10.0.0.1"}`
-	resp, err := http.Post(fmt.Sprintf("%s/nodes", srv.URL), "application/json", bytes.NewBufferString(body))
-	if err != nil {
-		t.Fatalf("failed to add node: %v", err)
-	}
-	defer resp.Body.Close()
+	resp := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), `{"id": "node1", "address": "10.0.0.1"}`)
+	defer closeBody(t, resp)
 
 	// Assert
 	if resp.StatusCode != http.StatusCreated {
@@ -40,7 +52,7 @@ func TestE2EAddAndGetNode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get node: %v", err)
 	}
-	defer resp2.Body.Close()
+	defer closeBody(t, resp2)
 
 	// Assert
 	if resp2.StatusCode != http.StatusOK {
@@ -58,16 +70,19 @@ func TestE2EAddAndGetNode(t *testing.T) {
 func TestE2EAddAndRemoveNode(t *testing.T) {
 	// Arrange
 	srv := newTestServer(t)
-	body := `{"id": "node1", "address": "10.0.0.1"}`
-	http.Post(fmt.Sprintf("%s/nodes", srv.URL), "application/json", bytes.NewBufferString(body))
+	resp0 := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), `{"id": "node1", "address": "10.0.0.1"}`)
+	defer closeBody(t, resp0)
 
 	// Act
-	req, _ := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s/nodes/node1", srv.URL), nil)
+	req, err := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s/nodes/node1", srv.URL), nil)
+	if err != nil {
+		t.Fatalf("failed to create delete request: %v", err)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("failed to remove node: %v", err)
 	}
-	defer resp.Body.Close()
+	defer closeBody(t, resp)
 
 	// Assert
 	if resp.StatusCode != http.StatusNoContent {
@@ -75,8 +90,12 @@ func TestE2EAddAndRemoveNode(t *testing.T) {
 	}
 
 	// Assert
-	resp2, _ := http.Get(fmt.Sprintf("%s/keys/mykey", srv.URL))
-	defer resp2.Body.Close()
+	resp2, err := http.Get(fmt.Sprintf("%s/keys/mykey", srv.URL))
+	if err != nil {
+		t.Fatalf("failed to get node: %v", err)
+	}
+	defer closeBody(t, resp2)
+
 	if resp2.StatusCode != http.StatusServiceUnavailable {
 		t.Errorf("expected 503 after removal, got %d", resp2.StatusCode)
 	}
@@ -87,7 +106,8 @@ func TestE2EGetNodes(t *testing.T) {
 	srv := newTestServer(t)
 	for i := 1; i <= 3; i++ {
 		body := fmt.Sprintf(`{"id": "node%d", "address": "10.0.0.%d"}`, i, i)
-		http.Post(fmt.Sprintf("%s/nodes", srv.URL), "application/json", bytes.NewBufferString(body))
+		r := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), body)
+		defer closeBody(t, r)
 	}
 
 	// Act
@@ -95,7 +115,7 @@ func TestE2EGetNodes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get nodes: %v", err)
 	}
-	defer resp.Body.Close()
+	defer closeBody(t, resp)
 
 	// Assert
 	if resp.StatusCode != http.StatusOK {
@@ -115,15 +135,21 @@ func TestE2EKeyConsistency(t *testing.T) {
 	srv := newTestServer(t)
 	for i := 1; i <= 3; i++ {
 		body := fmt.Sprintf(`{"id": "node%d", "address": "10.0.0.%d"}`, i, i)
-		http.Post(fmt.Sprintf("%s/nodes", srv.URL), "application/json", bytes.NewBufferString(body))
+		r := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), body)
+		defer closeBody(t, r)
 	}
 
 	// Act
 	getNode := func() string {
-		resp, _ := http.Get(fmt.Sprintf("%s/keys/mykey", srv.URL))
-		defer resp.Body.Close()
+		resp, err := http.Get(fmt.Sprintf("%s/keys/mykey", srv.URL))
+		if err != nil {
+			t.Fatalf("failed to get node: %v", err)
+		}
+		defer closeBody(t, resp)
 		var node NodeResponse
-		json.NewDecoder(resp.Body).Decode(&node)
+		if err := json.NewDecoder(resp.Body).Decode(&node); err != nil {
+			t.Errorf("failed to decode response: %v", err)
+		}
 		return node.ID
 	}
 

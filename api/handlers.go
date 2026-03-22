@@ -40,7 +40,7 @@ func (h *Handler) AddNode(w http.ResponseWriter, req *http.Request) {
 	h.ring.AddNode(body.ID, body.Address)
 
 	w.WriteHeader(http.StatusCreated)
-	if err := json.NewEncoder(w).Encode(NodeResponse{ID: body.ID, Address: body.Address}); err != nil {
+	if err := json.NewEncoder(w).Encode(NodeResponse(body)); err != nil {
 		http.Error(w, "failed to write response", http.StatusInternalServerError)
 	}
 }
