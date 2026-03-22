@@ -25,6 +25,7 @@ func TestRoutes(t *testing.T) {
 		{"not found", http.MethodGet, "/nonexistent", http.StatusNotFound},
 		{"get stats", http.MethodGet, "/stats", http.StatusOK},
 		{"replicate", http.MethodPost, "/replicate", http.StatusBadRequest},
+		{"health", http.MethodGet, "/health", http.StatusOK},
 	}
 
 	for _, tt := range tests {

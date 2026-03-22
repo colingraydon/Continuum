@@ -142,3 +142,10 @@ func (h *Handler) GetReplicationNodes(w http.ResponseWriter, req *http.Request) 
 		http.Error(w, "failed to write response", http.StatusInternalServerError)
 	}
 }
+
+func (h *Handler) Health(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]string{"status": "ok"}); err != nil {
+		http.Error(w, "failed to write response", http.StatusInternalServerError)
+	}
+}

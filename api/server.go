@@ -16,6 +16,7 @@ func NewServer(r *ring.Ring) http.Handler {
 	mux.HandleFunc("GET /keys/", h.GetNode)
 	mux.HandleFunc("GET /stats", h.GetStats)
 	mux.HandleFunc("POST /replicate", h.GetReplicationNodes)
+	mux.HandleFunc("GET /health", h.Health)
 	mux.Handle("GET /metrics", promhttp.Handler())
 	return metricsMiddleware(mux)
 }
