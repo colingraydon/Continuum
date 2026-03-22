@@ -14,5 +14,6 @@ func NewServer(r *ring.Ring) *http.ServeMux {
 	mux.HandleFunc("GET /nodes", h.GetNodes)
 	mux.HandleFunc("GET /keys/", h.GetNode)
 	mux.HandleFunc("GET /stats", h.GetStats)
+	mux.HandleFunc("POST /replicate", h.GetReplicationNodes)
 	return mux
 }

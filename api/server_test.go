@@ -24,6 +24,7 @@ func TestRoutes(t *testing.T) {
 		{"remove node missing id", http.MethodDelete, "/nodes/", http.StatusBadRequest},
 		{"not found", http.MethodGet, "/nonexistent", http.StatusNotFound},
 		{"get stats", http.MethodGet, "/stats", http.StatusOK},
+		{"replicate", http.MethodPost, "/replicate", http.StatusBadRequest},
 	}
 
 	for _, tt := range tests {

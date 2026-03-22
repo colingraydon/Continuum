@@ -196,3 +196,36 @@ func TestE2EGetStats(t *testing.T) {
 		t.Error("expected least loaded to be set")
 	}
 }
+
+func TestE2EGetReplicationNodes(t *testing.T) {
+	// Arrange
+	srv := newTestServer(t)
+	for i := 1; i <= 3; i++ {
+		body := fmt.Sprintf(`{"id": "node%d", "address": "10.0.0.%d"}`, i, i)
+		r := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), body)
+		defer closeBody(t, r)
+	}
+
+	// Act
+	body := `{"key": "somekey", "factor": 3}`
+	resp, err := http.Post(fmt.Sprintf("%s/replicate", srv.URL), "application/json", bytes.NewBufferString(body))
+	if err != nil {
+		t.Fatalf("failed to get replication nodes: %v", err)
+	}
+	defer closeBody(t, resp)
+
+	// Assert
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+	var result ReplicateResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(result.Nodes) != 3 {
+		t.Errorf("expected 3 nodes, got %d", len(result.Nodes))
+	}
+	if result.Key != "somekey" {
+		t.Errorf("expected somekey, got %s", result.Key)
+	}
+}

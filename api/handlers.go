@@ -26,6 +26,16 @@ type NodeResponse struct {
 	Address string `json:"address"`
 }
 
+type ReplicateRequest struct {
+	Key    string `json:"key"`
+	Factor int    `json:"factor"`
+}
+
+type ReplicateResponse struct {
+	Key   string         `json:"key"`
+	Nodes []NodeResponse `json:"nodes"`
+}
+
 func (h *Handler) AddNode(w http.ResponseWriter, req *http.Request) {
 	var body AddNodeRequest
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
@@ -92,6 +102,41 @@ func (h *Handler) GetStats(w http.ResponseWriter, req *http.Request) {
 	stats := h.ring.GetStats()
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(stats); err != nil {
+		http.Error(w, "failed to write response", http.StatusInternalServerError)
+	}
+}
+
+func (h *Handler) GetReplicationNodes(w http.ResponseWriter, req *http.Request) {
+	var body ReplicateRequest
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if body.Key == "" {
+		http.Error(w, "key is required", http.StatusBadRequest)
+		return
+	}
+	if body.Factor < 1 {
+		http.Error(w, "factor must be at least 1", http.StatusBadRequest)
+		return
+	}
+
+	nodes := h.ring.GetReplicationNodes(body.Key, body.Factor)
+	if len(nodes) == 0 {
+		http.Error(w, "no nodes available", http.StatusServiceUnavailable)
+		return
+	}
+
+	resp := ReplicateResponse{
+		Key:   body.Key,
+		Nodes: make([]NodeResponse, 0, len(nodes)),
+	}
+	for _, n := range nodes {
+		resp.Nodes = append(resp.Nodes, NodeResponse{ID: n.ID, Address: n.Address})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		http.Error(w, "failed to write response", http.StatusInternalServerError)
 	}
 }
