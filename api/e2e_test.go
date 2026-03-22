@@ -161,3 +161,38 @@ func TestE2EKeyConsistency(t *testing.T) {
 		t.Errorf("expected consistent lookup, got %s then %s", first, second)
 	}
 }
+
+func TestE2EGetStats(t *testing.T) {
+	// Arrange
+	srv := newTestServer(t)
+	for i := 1; i <= 3; i++ {
+		body := fmt.Sprintf(`{"id": "node%d", "address": "10.0.0.%d"}`, i, i)
+		r := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), body)
+		defer closeBody(t, r)
+	}
+
+	// Act
+	resp, err := http.Get(fmt.Sprintf("%s/stats", srv.URL))
+	if err != nil {
+		t.Fatalf("failed to get stats: %v", err)
+	}
+	defer closeBody(t, resp)
+
+	// Assert
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+	var stats ring.RingStats
+	if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if stats.TotalNodes != 3 {
+		t.Errorf("expected 3 nodes, got %d", stats.TotalNodes)
+	}
+	if stats.MostLoaded == "" {
+		t.Error("expected most loaded to be set")
+	}
+	if stats.LeastLoaded == "" {
+		t.Error("expected least loaded to be set")
+	}
+}

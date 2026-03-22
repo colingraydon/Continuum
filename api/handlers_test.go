@@ -216,3 +216,62 @@ func TestGetNodeMissingKey(t *testing.T) {
 		t.Errorf("expected 400, got %d", w.Code)
 	}
 }
+
+func TestGetStats(t *testing.T) {
+	// Arrange
+	h := newTestHandler()
+	h.ring.AddNode("node1", "10.0.0.1")
+	h.ring.AddNode("node2", "10.0.0.2")
+	h.ring.AddNode("node3", "10.0.0.3")
+	req := httptest.NewRequest(http.MethodGet, "/stats", nil)
+	w := httptest.NewRecorder()
+
+	// Act
+	h.GetStats(w, req)
+
+	// Assert
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	var stats ring.RingStats
+	if err := json.NewDecoder(w.Body).Decode(&stats); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if stats.TotalNodes != 3 {
+		t.Errorf("expected 3 nodes, got %d", stats.TotalNodes)
+	}
+	if stats.TotalVNodes != 30 {
+		t.Errorf("expected 30 vnodes, got %d", stats.TotalVNodes)
+	}
+	if stats.MostLoaded == "" {
+		t.Error("expected most loaded to be set")
+	}
+	if stats.LeastLoaded == "" {
+		t.Error("expected least loaded to be set")
+	}
+}
+
+func TestGetStatsEmptyRing(t *testing.T) {
+	// Arrange
+	h := newTestHandler()
+	req := httptest.NewRequest(http.MethodGet, "/stats", nil)
+	w := httptest.NewRecorder()
+
+	// Act
+	h.GetStats(w, req)
+
+	// Assert
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	var stats ring.RingStats
+	if err := json.NewDecoder(w.Body).Decode(&stats); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if stats.TotalNodes != 0 {
+		t.Errorf("expected 0 nodes, got %d", stats.TotalNodes)
+	}
+	if stats.Variance != 0 {
+		t.Errorf("expected 0 variance, got %f", stats.Variance)
+	}
+}
