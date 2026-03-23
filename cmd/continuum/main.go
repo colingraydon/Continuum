@@ -27,11 +27,7 @@ func loadConfig() config {
 
 	return config{
 		replicas: replicas,
-		defaultNodes: []*ring.Node{
-			{ID: "node1", Address: "10.0.0.1"},
-			{ID: "node2", Address: "10.0.0.2"},
-			{ID: "node3", Address: "10.0.0.3"},
-		},
+		defaultNodes: []*ring.Node{},
 	}
 }
 

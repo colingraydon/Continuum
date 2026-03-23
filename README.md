@@ -22,6 +22,18 @@ A composition layer that combines ring statistics (vnode distribution, key count
 ### HTTP API (`api`)
 The transport layer. Exposes ring operations over HTTP, instruments all requests via Prometheus middleware, and wires the ring, health checker, and aggregator together. Handlers are thin - they delegate to the appropriate internal package and serialize the response.
 
+### Health Checker Lifecycle
+
+Nodes transition through three states: healthy → suspect → dead. The checker runs every 5 seconds (configurable via `Config.Interval`) and pings each node's `/health` endpoint with a 2 second timeout.
+
+- A single failed ping marks a node **suspect**
+- Three consecutive failures (configurable via `Config.FailureThreshold`) marks it **dead** and removes it from the ring
+- A successful ping at any point resets the node to **healthy** immediately
+
+At default settings, a node takes a minimum of 15 seconds to be removed from the ring (3 failures × 5 second interval). Recovery is immediate on the next successful ping.
+
+The `OnStatusChange` callback is intentionally generic - it is the integration point for a future gossip protocol where peer reports would replace direct HTTP pings, with no changes required to the health checker itself.
+
 ### Request flow
 
 A key lookup (`GET /keys/:key`) flows like this:
@@ -122,6 +134,21 @@ curl -X POST http://localhost:8080/replicate \
   -d '{"key": "user:123", "factor": 3}'
 ```
 
+### Health check
+```bash
+curl http://localhost:8080/health
+```
+```json
+{
+  "status": "ok",
+  "total_nodes": 3,
+  "healthy_nodes": 3,
+  "suspect_nodes": 0,
+  "dead_nodes": 0,
+  "uptime": "4h32m10s"
+}
+```
+
 ### Get ring stats
 ```bash
 curl http://localhost:8080/stats
@@ -131,6 +158,9 @@ curl http://localhost:8080/stats
 {
   "total_nodes": 3,
   "total_vnodes": 450,
+  "healthy_nodes": 2,
+  "suspect_nodes": 1,
+  "dead_nodes": 0,
   "distribution": [
     {
       "node_id": "node1",
@@ -208,13 +238,16 @@ make coverage  # generate coverage report
 | `continuum_ring_vnode_count` | Gauge | Current virtual node count |
 | `continuum_ring_key_lookups_total` | Counter | Total key lookups performed |
 | `continuum_ring_distribution_variance` | Gauge | Key distribution variance across nodes |
-
+| `continuum_ring_healthy_nodes` | Gauge | Current number of healthy nodes |
+| `continuum_ring_suspect_nodes` | Gauge | Current number of suspect nodes |
+| `continuum_ring_dead_nodes` | Gauge | Current number of dead nodes |
 ---
 
 ## What's Next
 
 - **Architecture Diagram** - use Lucid to generate an architectural diagram for the readme
-- **Gossip protocol** - nodes discover each other and converge on ring state without a central coordinator
-- **Node health checks** - background goroutine pings nodes and removes dead ones automatically
-- **Persistence** - ring state survives restarts
-- **Weighted nodes** - nodes with higher capacity receive proportionally more vnodes
+- **Gossip protocol** - nodes discover each other and converge on ring state without a central coordinator. The `OnStatusChange` callback in the health checker is already designed as the integration point - gossip peer reports would replace direct HTTP pings with no changes to the health checker itself.
+- **Peer routing** - when a key lookup arrives at a Continuum instance that doesn't own the key, forward the request to the correct peer rather than returning the node address. This is how Cassandra handles request routing.
+- **Persistence** - ring state survives restarts via a simple JSON snapshot on shutdown and reload on startup.
+- **Weighted nodes** - nodes with higher capacity receive proportionally more vnodes, allowing heterogeneous clusters.
+- **Cassandra-ification** - run multiple Continuum instances as peers that gossip, health check each other, and route requests between themselves. This is the architecture Cassandra uses - every node is equal, any node can serve any request.
