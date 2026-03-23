@@ -5,15 +5,23 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/colingraydon/continuum/internal/health"
 	"github.com/colingraydon/continuum/internal/ring"
+	"github.com/colingraydon/continuum/internal/stats"
 )
 
 type Handler struct {
-	ring *ring.Ring
+	ring       *ring.Ring
+	checker    *health.Checker
+	aggregator *stats.Aggregator
 }
 
-func NewHandler(r *ring.Ring) *Handler {
-	return &Handler{ring: r}
+func NewHandler(r *ring.Ring, c *health.Checker) *Handler {
+	return &Handler{
+		ring: r, 
+		checker: c,
+		aggregator: stats.NewAggregator(r, c),
+	}
 }
 
 type AddNodeRequest struct {
@@ -24,6 +32,7 @@ type AddNodeRequest struct {
 type NodeResponse struct {
 	ID      string `json:"id"`
 	Address string `json:"address"`
+	Status  string `json:"status"`
 }
 
 type ReplicateRequest struct {
@@ -48,9 +57,12 @@ func (h *Handler) AddNode(w http.ResponseWriter, req *http.Request) {
 	}
 
 	h.ring.AddNode(body.ID, body.Address)
+	h.checker.AddNode(body.ID, body.Address)
 
 	w.WriteHeader(http.StatusCreated)
-	if err := json.NewEncoder(w).Encode(NodeResponse(body)); err != nil {
+	
+	node := NodeResponse{ID: body.ID, Address: body.Address, Status: "healthy"}
+	if err := json.NewEncoder(w).Encode(node); err != nil {		
 		http.Error(w, "failed to write response", http.StatusInternalServerError)
 	}
 }
@@ -63,6 +75,7 @@ func (h *Handler) RemoveNode(w http.ResponseWriter, req *http.Request) {
 	}
 
 	h.ring.RemoveNode(id)
+	h.checker.RemoveNode(id)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -70,9 +83,13 @@ func (h *Handler) GetNodes(w http.ResponseWriter, req *http.Request) {
 	nodes := h.ring.GetNodes()
 	resp := make([]NodeResponse, 0, len(nodes))
 	for _, n := range nodes {
-		resp = append(resp, NodeResponse{ID: n.ID, Address: n.Address})
+		status, _ := h.checker.GetStatus(n.ID)
+		resp = append(resp, NodeResponse{
+			ID:      n.ID,
+			Address: n.Address,
+			Status:  status.String(),
+		})
 	}
-
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		http.Error(w, "failed to write response", http.StatusInternalServerError)
@@ -93,17 +110,20 @@ func (h *Handler) GetNode(w http.ResponseWriter, req *http.Request) {
 	}
 
 	RecordKeyLookup()
+	status, _ := h.checker.GetStatus(node.ID)
+	resp := NodeResponse{ID: node.ID, Address: node.Address, Status: status.String()}
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(NodeResponse{ID: node.ID, Address: node.Address}); err != nil {
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		http.Error(w, "failed to write response", http.StatusInternalServerError)
 	}
 }
 
 func (h *Handler) GetStats(w http.ResponseWriter, req *http.Request) {
-	stats := h.ring.GetStats()
-	RecordVariance(stats.Variance)
+	s := h.aggregator.GetStats()
+	RecordVariance(s.Variance)
+	RecordHealthStats(s.HealthyNodes, s.SuspectNodes, s.DeadNodes)
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(stats); err != nil {
+	if err := json.NewEncoder(w).Encode(s); err != nil {
 		http.Error(w, "failed to write response", http.StatusInternalServerError)
 	}
 }
@@ -134,7 +154,8 @@ func (h *Handler) GetReplicationNodes(w http.ResponseWriter, req *http.Request) 
 		Nodes: make([]NodeResponse, 0, len(nodes)),
 	}
 	for _, n := range nodes {
-		resp.Nodes = append(resp.Nodes, NodeResponse{ID: n.ID, Address: n.Address})
+		status, _ := h.checker.GetStatus(n.ID)
+		resp.Nodes = append(resp.Nodes, NodeResponse{ID: n.ID, Address: n.Address, Status: status.String()})
 	}
 
 	w.Header().Set("Content-Type", "application/json")

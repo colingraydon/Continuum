@@ -50,6 +50,27 @@ var (
 			Help: "Current variance of key distribution across nodes",
 		},
 	)
+
+	ringHealthyNodes = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "continuum_ring_healthy_nodes",
+			Help: "Current number of healthy nodes in the ring",
+		},
+	)
+	
+	ringSuspectNodes = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "continuum_ring_suspect_nodes",
+			Help: "Current number of suspect nodes in the ring",
+		},
+	)
+	
+	ringDeadNodes = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "continuum_ring_dead_nodes",
+			Help: "Current number of dead nodes in the ring",
+		},
+	)
 )
 
 func UpdateRingMetrics(nodeCount, vnodeCount int) {
@@ -63,4 +84,10 @@ func RecordKeyLookup() {
 
 func RecordVariance(variance float64) {
 	ringVariance.Set(variance)
+}
+
+func RecordHealthStats(healthy, suspect, dead int) {
+	ringHealthyNodes.Set(float64(healthy))
+	ringSuspectNodes.Set(float64(suspect))
+	ringDeadNodes.Set(float64(dead))
 }

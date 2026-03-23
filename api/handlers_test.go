@@ -7,11 +7,16 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/colingraydon/continuum/internal/health"
 	"github.com/colingraydon/continuum/internal/ring"
 )
 
+func newTestChecker() *health.Checker {
+	return health.NewChecker(health.DefaultConfig(), nil)
+}
+
 func newTestHandler() *Handler {
-	return NewHandler(ring.NewRing(10))
+	return NewHandler(ring.NewRing(10), newTestChecker())
 }
 
 func TestAddNode(t *testing.T) {

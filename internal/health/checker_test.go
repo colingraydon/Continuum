@@ -99,7 +99,7 @@ func TestNodeStatusStringUnknown(t *testing.T) {
 }
 
 func TestHealthyNodeStaysHealthy(t *testing.T) {
-	// Arrange — spin up a real test server that returns 200
+	// Arrange
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -109,7 +109,7 @@ func TestHealthyNodeStaysHealthy(t *testing.T) {
 	c.AddNode("node1", srv.Listener.Addr().String())
 
 	// Act
-	c.checkNode("node1")
+	c.CheckNode("node1")
 
 	// Assert
 	status, _ := c.GetStatus("node1")
@@ -124,7 +124,7 @@ func TestFailingNodeBecomesSuspect(t *testing.T) {
 	c.AddNode("node1", "localhost:19999")
 
 	// Act
-	c.checkNode("node1")
+	c.CheckNode("node1")
 
 	// Assert
 	status, _ := c.GetStatus("node1")
@@ -139,9 +139,9 @@ func TestFailingNodeBecomesDead(t *testing.T) {
 	c.AddNode("node1", "localhost:19999")
 
 	// Act
-	c.checkNode("node1")
-	c.checkNode("node1")
-	c.checkNode("node1")
+	c.CheckNode("node1")
+	c.CheckNode("node1")
+	c.CheckNode("node1")
 
 	// Assert
 	status, _ := c.GetStatus("node1")
@@ -160,14 +160,14 @@ func TestRecoveryResetsToHealthy(t *testing.T) {
 	c := NewChecker(newTestConfig(), nil)
 	c.AddNode("node1", "localhost:19999")
 
-	c.checkNode("node1")
+	c.CheckNode("node1")
 
 	c.mu.Lock()
 	c.nodes["node1"].Address = srv.Listener.Addr().String()
 	c.mu.Unlock()
 
 	// Act
-	c.checkNode("node1")
+	c.CheckNode("node1")
 
 	// Assert
 	status, _ := c.GetStatus("node1")
@@ -187,7 +187,7 @@ func TestOnStatusChangeCalledOnFailure(t *testing.T) {
 	c.AddNode("node1", "localhost:19999")
 
 	// Act
-	c.checkNode("node1")
+	c.CheckNode("node1")
 
 	// Assert
 	if calledID != "node1" {
@@ -210,14 +210,14 @@ func TestOnStatusChangeCalledOnRecovery(t *testing.T) {
 		lastStatus = status
 	})
 	c.AddNode("node1", "localhost:19999")
-	c.checkNode("node1") // make suspect
+	c.CheckNode("node1") // make suspect
 
 	c.mu.Lock()
 	c.nodes["node1"].Address = srv.Listener.Addr().String()
 	c.mu.Unlock()
 
 	// Act
-	c.checkNode("node1")
+	c.CheckNode("node1")
 
 	// Assert
 	if lastStatus != StatusHealthy {
@@ -239,8 +239,8 @@ func TestOnStatusChangeNotCalledWhenStatusUnchanged(t *testing.T) {
 	c.AddNode("node1", srv.Listener.Addr().String())
 
 	// Act
-	c.checkNode("node1")
-	c.checkNode("node1")
+	c.CheckNode("node1")
+	c.CheckNode("node1")
 
 	// Assert
 	if callCount != 0 {
@@ -298,7 +298,7 @@ func TestNonOKResponseCountsAsFailure(t *testing.T) {
 	c.AddNode("node1", srv.Listener.Addr().String())
 
 	// Act
-	c.checkNode("node1")
+	c.CheckNode("node1")
 
 	// Assert
 	status, _ := c.GetStatus("node1")

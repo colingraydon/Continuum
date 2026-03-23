@@ -60,7 +60,7 @@ func main() {
 	checker.Start(ctx)
 	defer checker.Stop()
 
-	mux := api.NewServer(r)
+	mux := api.NewServer(r, checker)
 
 	log.Printf("Starting server on :8080 with %d replicas and %d default nodes", cfg.replicas, len(cfg.defaultNodes))
 	if err := http.ListenAndServe(":8080", mux); err != nil {

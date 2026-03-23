@@ -130,11 +130,11 @@ func (c *Checker) checkAll() {
 	c.mu.RUnlock()
 
 	for _, id := range ids {
-		c.checkNode(id)
+		c.CheckNode(id)
 	}
 }
 
-func (c *Checker) checkNode(id string) {
+func (c *Checker) CheckNode(id string) {
 	c.mu.RLock()
 	node, exists := c.nodes[id]
 	if !exists {

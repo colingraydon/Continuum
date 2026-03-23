@@ -6,10 +6,36 @@ Continuum implements the core data routing layer used in distributed systems lik
 
 ---
 
+## Architecture
+
+Continuum is organized into four layers:
+
+### Core Ring (`internal/ring`)
+The distributed systems engine. Implements the hash ring with a Red-Black Tree, virtual nodes, murmur3 hashing, and atomic key counters. Has no knowledge of HTTP, health, or metrics - it is a pure data routing library.
+
+### Health Checker (`internal/health`)
+A standalone component that periodically pings each node's `/health` endpoint and tracks a three-state lifecycle: healthy → suspect → dead. Designed to plug directly into a gossip protocol - the `OnStatusChange` callback is the integration point where gossip peer reports would replace direct HTTP pings.
+
+### Stats Aggregator (`internal/stats`)
+A composition layer that combines ring statistics (vnode distribution, key counts, variance) with health status (healthy/suspect/dead node counts) into a single unified view. Keeps the ring package free of health concerns.
+
+### HTTP API (`api`)
+The transport layer. Exposes ring operations over HTTP, instruments all requests via Prometheus middleware, and wires the ring, health checker, and aggregator together. Handlers are thin - they delegate to the appropriate internal package and serialize the response.
+
+### Request flow
+
+A key lookup (`GET /keys/:key`) flows like this:
+
+1. Request hits `metricsMiddleware` - records latency and request count
+2. `GetNode` handler extracts the key from the path
+3. `ring.GetNode(key)` hashes the key with murmur3, finds the ceiling vnode in the RBT, increments the atomic key counter, returns the physical node
+4. `checker.GetStatus(nodeID)` returns the node's current health status
+5. Response is serialized with node ID, address, and status
+
 ### How key lookup works
 
 1. Hash the key using Murmur3 to get a position on the ring (0 to 2^32)
-2. Find the first virtual node with hash ≥ key hash using a Red-Black Tree ceiling lookup — O(log n)
+2. Find the first virtual node with hash ≥ key hash using a Red-Black Tree ceiling lookup - O(log n)
 3. If no vnode found, wrap around to the first vnode on the ring
 4. Return the physical node that vnode belongs to
 
@@ -59,7 +85,7 @@ Murmur3 is faster than cryptographic hashes (MD5, SHA) and has better distributi
 
 ### sync.RWMutex
 
-The ring uses `sync.RWMutex` rather than a plain mutex or lock-free structure. `RWMutex` allows unlimited concurrent readers with exclusive writers — correct for a ring where key lookups vastly outnumber topology changes.
+The ring uses `sync.RWMutex` rather than a plain mutex or lock-free structure. `RWMutex` allows unlimited concurrent readers with exclusive writers - correct for a ring where key lookups vastly outnumber topology changes.
 
 ### Atomic Key Counters
 
@@ -71,7 +97,7 @@ The ring accepts a `SetUpdateCallback` rather than importing Prometheus directly
 
 ### Configurable Replica Count
 
-Replica count is read from the `REPLICAS` environment variable with a default of 150. This makes the binary configurable without recompilation and follows 12-factor app principles.
+Replica count is read from the `REPLICAS` environment variable with a default of 150. 
 
 ---
 
@@ -148,6 +174,11 @@ In Grafana, add `http://prometheus:9090` as a Prometheus data source and query:
 - `continuum_ring_key_lookups_total`
 - `continuum_ring_distribution_variance`
 - `rate(continuum_http_request_duration_seconds_sum[1m])`
+- `continuum_ring_healthy_nodes`
+- `continuum_ring_suspect_nodes`
+- `continuum_ring_dead_nodes`
+- `continuum_ring_vnode_count`
+- `rate(continuum_http_requests_total[1m])`
 
 ---
 
