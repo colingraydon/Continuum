@@ -61,7 +61,7 @@ func TestRemoveNonExistentNode(t *testing.T) {
 	// Arrange
 	ring := NewRing(150)
 
-	// Act + Assert — should not panic
+	// Act + Assert
 	ring.RemoveNode("nonexistent")
 }
 
@@ -142,10 +142,10 @@ func TestGetNodeMinimalKeyMovementOnAddition(t *testing.T) {
 		before[key] = node.ID
 	}
 
-	// Act — add a third node
+	// Act
 	ring.AddNode("node3", "10.0.0.3")
 
-	// Assert — only keys that moved to node3 should have changed
+	// Assert
 	moved := 0
 	for _, key := range keys {
 		node, _ := ring.GetNode(key)
@@ -220,7 +220,7 @@ func TestGetReplicationNodesFewerNodesThanFactor(t *testing.T) {
 	// Act
 	nodes := ring.GetReplicationNodes("somekey", 3)
 
-	// Assert — should return all available nodes, not panic
+	// Assert
 	if len(nodes) != 2 {
 		t.Errorf("expected 2 nodes, got %d", len(nodes))
 	}

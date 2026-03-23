@@ -104,7 +104,7 @@ func TestGetNextWrapsAround(t *testing.T) {
 	node := NewNode("node1", "10.0.0.1")
 	tree.Insert(node, 150)
 
-	// Act — pass max uint32 to force wraparound
+	// Act
 	vnode, found := tree.GetNext(^uint32(0))
 
 	// Assert
@@ -140,7 +140,7 @@ func TestComputeHash(t *testing.T) {
 	hash1 := computeHash(key)
 	hash2 := computeHash(key)
 
-	// Assert — same input should always produce same hash
+	// Assert
 	if hash1 != hash2 {
 		t.Errorf("expected deterministic hash, got %d and %d", hash1, hash2)
 	}

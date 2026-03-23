@@ -1,18 +1,20 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
 	"strconv"
 
 	"github.com/colingraydon/continuum/api"
+	"github.com/colingraydon/continuum/internal/health"
 	"github.com/colingraydon/continuum/internal/ring"
 )
 
 type config struct {
 	replicas     int
-	defaultNodes []ring.Node
+	defaultNodes []*ring.Node
 }
 
 func loadConfig() config {
@@ -25,7 +27,7 @@ func loadConfig() config {
 
 	return config{
 		replicas: replicas,
-		defaultNodes: []ring.Node{
+		defaultNodes: []*ring.Node{
 			{ID: "node1", Address: "10.0.0.1"},
 			{ID: "node2", Address: "10.0.0.2"},
 			{ID: "node3", Address: "10.0.0.3"},
@@ -41,11 +43,24 @@ func main() {
 		api.UpdateRingMetrics(nodeCount, vnodeCount)
 	})
 
+	checker := health.NewChecker(health.DefaultConfig(), func(nodeID string, status health.NodeStatus) {
+		log.Printf("node %s status changed to %s", nodeID, status)
+		if status == health.StatusDead {
+			r.RemoveNode(nodeID)
+			log.Printf("removed dead node %s from ring", nodeID)
+		}
+	})
+
 	for _, n := range cfg.defaultNodes {
 		r.AddNode(n.ID, n.Address)
+		checker.AddNode(n.ID, n.Address)
 	}
 
-	mux := api.NewServer(r)
+	ctx := context.Background()
+	checker.Start(ctx)
+	defer checker.Stop()
+
+	mux := api.NewServer(r, checker)
 
 	log.Printf("Starting server on :8080 with %d replicas and %d default nodes", cfg.replicas, len(cfg.defaultNodes))
 	if err := http.ListenAndServe(":8080", mux); err != nil {

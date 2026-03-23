@@ -6,11 +6,12 @@ import (
 	"testing"
 
 	"github.com/colingraydon/continuum/internal/ring"
+	"github.com/colingraydon/continuum/internal/health"
 )
 
 func TestRoutes(t *testing.T) {
 	// Arrange
-	srv := NewServer(ring.NewRing(50))
+	srv := NewServer(ring.NewRing(50), health.NewChecker(health.DefaultConfig(), nil))
 
 	tests := []struct {
 		name   string
@@ -25,6 +26,7 @@ func TestRoutes(t *testing.T) {
 		{"not found", http.MethodGet, "/nonexistent", http.StatusNotFound},
 		{"get stats", http.MethodGet, "/stats", http.StatusOK},
 		{"replicate", http.MethodPost, "/replicate", http.StatusBadRequest},
+		{"health", http.MethodGet, "/health", http.StatusOK},
 	}
 
 	for _, tt := range tests {

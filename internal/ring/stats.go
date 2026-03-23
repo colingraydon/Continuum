@@ -11,12 +11,15 @@ type NodeStats struct {
 }
 
 type RingStats struct {
-	TotalNodes  int          `json:"total_nodes"`
-	TotalVNodes int          `json:"total_vnodes"`
+	TotalNodes   int         `json:"total_nodes"`
+	TotalVNodes  int         `json:"total_vnodes"`
+	HealthyNodes int         `json:"healthy_nodes"`
+	SuspectNodes int         `json:"suspect_nodes"`
+	DeadNodes    int         `json:"dead_nodes"`
 	Distribution []NodeStats `json:"distribution"`
-	MostLoaded  string       `json:"most_loaded"`
-	LeastLoaded string       `json:"least_loaded"`
-	Variance    float64      `json:"variance"`
+	MostLoaded   string      `json:"most_loaded"`
+	LeastLoaded  string      `json:"least_loaded"`
+	Variance     float64     `json:"variance"`
 }
 
 func (r *Ring) GetStats() RingStats {

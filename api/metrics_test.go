@@ -9,6 +9,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/colingraydon/continuum/internal/ring"
+	"github.com/colingraydon/continuum/internal/health"
 )
 
 func resetMetrics() {
@@ -42,7 +43,7 @@ func TestMetricsNodeCountGauge(t *testing.T) {
 func TestMetricsHTTPRequestsTotal(t *testing.T) {
 	// Arrange
 	resetMetrics()
-	srv := NewServer(ring.NewRing(10))
+	srv := NewServer(ring.NewRing(10), health.NewChecker(health.DefaultConfig(), nil))
 	req := httptest.NewRequest(http.MethodGet, "/nodes", nil)
 	w := httptest.NewRecorder()
 
@@ -63,7 +64,7 @@ func TestMetricsHTTPRequestsTotal(t *testing.T) {
 func TestMetricsRequestDurationRecorded(t *testing.T) {
 	// Arrange
 	resetMetrics()
-	srv := NewServer(ring.NewRing(10))
+	srv := NewServer(ring.NewRing(10), health.NewChecker(health.DefaultConfig(), nil))
 	req := httptest.NewRequest(http.MethodGet, "/nodes", nil)
 	w := httptest.NewRecorder()
 

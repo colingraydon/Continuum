@@ -9,11 +9,12 @@ import (
 	"testing"
 
 	"github.com/colingraydon/continuum/internal/ring"
+	"github.com/colingraydon/continuum/internal/health"
 )
 
 func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer(NewServer(ring.NewRing(50)))
+	srv := httptest.NewServer(NewServer(ring.NewRing(50), health.NewChecker(health.DefaultConfig(), nil)))
 	t.Cleanup(func() { srv.Close() })
 	return srv
 }
