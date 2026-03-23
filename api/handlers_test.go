@@ -413,11 +413,20 @@ func TestHealth(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", w.Code)
 	}
-	var resp map[string]string
+	var resp map[string]any
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 	if resp["status"] != "ok" {
 		t.Errorf("expected status ok, got %s", resp["status"])
+	}
+	if _, ok := resp["total_nodes"]; !ok {
+		t.Error("expected total_nodes in response")
+	}
+	if _, ok := resp["healthy_nodes"]; !ok {
+		t.Error("expected healthy_nodes in response")
+	}
+	if _, ok := resp["uptime"]; !ok {
+		t.Error("expected uptime in response")
 	}
 }

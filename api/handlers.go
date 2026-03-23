@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/colingraydon/continuum/internal/health"
 	"github.com/colingraydon/continuum/internal/ring"
@@ -14,13 +15,15 @@ type Handler struct {
 	ring       *ring.Ring
 	checker    *health.Checker
 	aggregator *stats.Aggregator
+	startTime  time.Time
 }
 
 func NewHandler(r *ring.Ring, c *health.Checker) *Handler {
 	return &Handler{
-		ring: r, 
-		checker: c,
+		ring:  		r, 
+		checker: 	c,
 		aggregator: stats.NewAggregator(r, c),
+		startTime:  time.Now(),
 	}
 }
 
@@ -165,8 +168,17 @@ func (h *Handler) GetReplicationNodes(w http.ResponseWriter, req *http.Request) 
 }
 
 func (h *Handler) Health(w http.ResponseWriter, req *http.Request) {
+	stats := h.aggregator.GetStats()
+	resp := map[string]any{
+		"status":        "ok",
+		"total_nodes":   stats.TotalNodes,
+		"healthy_nodes": stats.HealthyNodes,
+		"suspect_nodes": stats.SuspectNodes,
+		"dead_nodes":    stats.DeadNodes,
+		"uptime": time.Since(h.startTime).String(),
+	}
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(map[string]string{"status": "ok"}); err != nil {
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		http.Error(w, "failed to write response", http.StatusInternalServerError)
 	}
 }
