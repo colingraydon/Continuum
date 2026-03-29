@@ -1,12 +1,47 @@
 version: '3.8'
 
 services:
-  continuum:
+  node1:
     build: .
     ports:
       - "8080:8080"
     environment:
       - REPLICAS=150
+      - SELF_ID=node1
+      - SELF_ADDRESS=node1
+      - GOSSIP_PORT=8081
+    networks:
+      - continuum
+
+  node2:
+    build: .
+    ports:
+      - "8082:8080"
+    environment:
+      - REPLICAS=150
+      - SELF_ID=node2
+      - SELF_ADDRESS=node2
+      - GOSSIP_PORT=8081
+      - SEED_NODES=node1
+    depends_on:
+      - node1
+    networks:
+      - continuum
+
+  node3:
+    build: .
+    ports:
+      - "8083:8080"
+    environment:
+      - REPLICAS=150
+      - SELF_ID=node3
+      - SELF_ADDRESS=node3
+      - GOSSIP_PORT=8081
+      - SEED_NODES=node1
+    depends_on:
+      - node1
+    networks:
+      - continuum
 
   prometheus:
     image: prom/prometheus:latest
@@ -14,6 +49,8 @@ services:
       - "9090:9090"
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    networks:
+      - continuum
 
   grafana:
     image: grafana/grafana:latest
@@ -21,3 +58,9 @@ services:
       - "3000:3000"
     depends_on:
       - prometheus
+    networks:
+      - continuum
+
+networks:
+  continuum:
+    driver: bridge

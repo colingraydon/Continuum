@@ -7,21 +7,31 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/colingraydon/continuum/internal/health"
+	"github.com/colingraydon/continuum/internal/gossip"
 	"github.com/colingraydon/continuum/internal/ring"
 )
 
-func newTestChecker() *health.Checker {
-	return health.NewChecker(health.DefaultConfig(), nil)
+func newTestMemberList() *gossip.MemberList {
+	return gossip.NewMemberList("self", "localhost", nil)
 }
 
-func newTestHandler() *Handler {
-	return NewHandler(ring.NewRing(10), newTestChecker())
+func newTestGossiper(t *testing.T) *gossip.Gossiper {
+	t.Helper()
+	transport, err := gossip.NewTransport("0")
+	if err != nil {
+		t.Fatalf("failed to create transport: %v", err)
+	}
+	t.Cleanup(func() { transport.Stop() })
+	return gossip.NewGossiper("self", "0", newTestMemberList(), transport)
+}
+
+func newTestHandler(t *testing.T) *Handler {
+	return NewHandler(ring.NewRing(10), newTestMemberList(), newTestGossiper(t), "self")
 }
 
 func TestAddNode(t *testing.T) {
 	// Arrange
-	h := newTestHandler()
+	h := newTestHandler(t)
 	body := `{"id": "node1", "address": "10.0.0.1"}`
 	req := httptest.NewRequest(http.MethodPost, "/nodes", bytes.NewBufferString(body))
 	w := httptest.NewRecorder()
@@ -44,7 +54,7 @@ func TestAddNode(t *testing.T) {
 
 func TestAddNodeInvalidBody(t *testing.T) {
 	// Arrange
-	h := newTestHandler()
+	h := newTestHandler(t)
 	req := httptest.NewRequest(http.MethodPost, "/nodes", bytes.NewBufferString("not json"))
 	w := httptest.NewRecorder()
 
@@ -59,7 +69,7 @@ func TestAddNodeInvalidBody(t *testing.T) {
 
 func TestAddNodeMissingID(t *testing.T) {
 	// Arrange
-	h := newTestHandler()
+	h := newTestHandler(t)
 	body := `{"address": "10.0.0.1"}`
 	req := httptest.NewRequest(http.MethodPost, "/nodes", bytes.NewBufferString(body))
 	w := httptest.NewRecorder()
@@ -75,7 +85,7 @@ func TestAddNodeMissingID(t *testing.T) {
 
 func TestAddNodeMissingAddress(t *testing.T) {
 	// Arrange
-	h := newTestHandler()
+	h := newTestHandler(t)
 	body := `{"id": "node1"}`
 	req := httptest.NewRequest(http.MethodPost, "/nodes", bytes.NewBufferString(body))
 	w := httptest.NewRecorder()
@@ -91,7 +101,7 @@ func TestAddNodeMissingAddress(t *testing.T) {
 
 func TestRemoveNode(t *testing.T) {
 	// Arrange
-	h := newTestHandler()
+	h := newTestHandler(t)
 	h.ring.AddNode("node1", "10.0.0.1")
 	req := httptest.NewRequest(http.MethodDelete, "/nodes/node1", nil)
 	w := httptest.NewRecorder()
@@ -110,7 +120,7 @@ func TestRemoveNode(t *testing.T) {
 
 func TestRemoveNodeMissingID(t *testing.T) {
 	// Arrange
-	h := newTestHandler()
+	h := newTestHandler(t)
 	req := httptest.NewRequest(http.MethodDelete, "/nodes/", nil)
 	w := httptest.NewRecorder()
 
@@ -125,7 +135,7 @@ func TestRemoveNodeMissingID(t *testing.T) {
 
 func TestGetNodes(t *testing.T) {
 	// Arrange
-	h := newTestHandler()
+	h := newTestHandler(t)
 	h.ring.AddNode("node1", "10.0.0.1")
 	h.ring.AddNode("node2", "10.0.0.2")
 	req := httptest.NewRequest(http.MethodGet, "/nodes", nil)
@@ -149,7 +159,7 @@ func TestGetNodes(t *testing.T) {
 
 func TestGetNodesEmpty(t *testing.T) {
 	// Arrange
-	h := newTestHandler()
+	h := newTestHandler(t)
 	req := httptest.NewRequest(http.MethodGet, "/nodes", nil)
 	w := httptest.NewRecorder()
 
@@ -171,8 +181,9 @@ func TestGetNodesEmpty(t *testing.T) {
 
 func TestGetNode(t *testing.T) {
 	// Arrange
-	h := newTestHandler()
+	h := newTestHandler(t)
 	h.ring.AddNode("node1", "10.0.0.1")
+	h.selfID = "node1"
 	req := httptest.NewRequest(http.MethodGet, "/keys/mykey", nil)
 	w := httptest.NewRecorder()
 
@@ -194,7 +205,7 @@ func TestGetNode(t *testing.T) {
 
 func TestGetNodeEmptyRing(t *testing.T) {
 	// Arrange
-	h := newTestHandler()
+	h := newTestHandler(t)
 	req := httptest.NewRequest(http.MethodGet, "/keys/mykey", nil)
 	w := httptest.NewRecorder()
 
@@ -209,7 +220,7 @@ func TestGetNodeEmptyRing(t *testing.T) {
 
 func TestGetNodeMissingKey(t *testing.T) {
 	// Arrange
-	h := newTestHandler()
+	h := newTestHandler(t)
 	req := httptest.NewRequest(http.MethodGet, "/keys/", nil)
 	w := httptest.NewRecorder()
 
@@ -224,7 +235,7 @@ func TestGetNodeMissingKey(t *testing.T) {
 
 func TestGetStats(t *testing.T) {
 	// Arrange
-	h := newTestHandler()
+	h := newTestHandler(t)
 	h.ring.AddNode("node1", "10.0.0.1")
 	h.ring.AddNode("node2", "10.0.0.2")
 	h.ring.AddNode("node3", "10.0.0.3")
@@ -258,7 +269,7 @@ func TestGetStats(t *testing.T) {
 
 func TestGetStatsEmptyRing(t *testing.T) {
 	// Arrange
-	h := newTestHandler()
+	h := newTestHandler(t)
 	req := httptest.NewRequest(http.MethodGet, "/stats", nil)
 	w := httptest.NewRecorder()
 
@@ -283,7 +294,7 @@ func TestGetStatsEmptyRing(t *testing.T) {
 
 func TestGetReplicationNodes(t *testing.T) {
 	// Arrange
-	h := newTestHandler()
+	h := newTestHandler(t)
 	h.ring.AddNode("node1", "10.0.0.1")
 	h.ring.AddNode("node2", "10.0.0.2")
 	h.ring.AddNode("node3", "10.0.0.3")
@@ -312,7 +323,7 @@ func TestGetReplicationNodes(t *testing.T) {
 
 func TestGetReplicationNodesInvalidBody(t *testing.T) {
 	// Arrange
-	h := newTestHandler()
+	h := newTestHandler(t)
 	req := httptest.NewRequest(http.MethodPost, "/replicate", bytes.NewBufferString("not json"))
 	w := httptest.NewRecorder()
 
@@ -327,7 +338,7 @@ func TestGetReplicationNodesInvalidBody(t *testing.T) {
 
 func TestGetReplicationNodesMissingKey(t *testing.T) {
 	// Arrange
-	h := newTestHandler()
+	h := newTestHandler(t)
 	body := `{"factor": 3}`
 	req := httptest.NewRequest(http.MethodPost, "/replicate", bytes.NewBufferString(body))
 	w := httptest.NewRecorder()
@@ -343,7 +354,7 @@ func TestGetReplicationNodesMissingKey(t *testing.T) {
 
 func TestGetReplicationNodesInvalidFactor(t *testing.T) {
 	// Arrange
-	h := newTestHandler()
+	h := newTestHandler(t)
 	body := `{"key": "somekey", "factor": 0}`
 	req := httptest.NewRequest(http.MethodPost, "/replicate", bytes.NewBufferString(body))
 	w := httptest.NewRecorder()
@@ -359,7 +370,7 @@ func TestGetReplicationNodesInvalidFactor(t *testing.T) {
 
 func TestGetReplicationNodesEmptyRing(t *testing.T) {
 	// Arrange
-	h := newTestHandler()
+	h := newTestHandler(t)
 	body := `{"key": "somekey", "factor": 3}`
 	req := httptest.NewRequest(http.MethodPost, "/replicate", bytes.NewBufferString(body))
 	w := httptest.NewRecorder()
@@ -375,7 +386,7 @@ func TestGetReplicationNodesEmptyRing(t *testing.T) {
 
 func TestGetReplicationNodesDistinct(t *testing.T) {
 	// Arrange
-	h := newTestHandler()
+	h := newTestHandler(t)
 	h.ring.AddNode("node1", "10.0.0.1")
 	h.ring.AddNode("node2", "10.0.0.2")
 	h.ring.AddNode("node3", "10.0.0.3")
@@ -402,7 +413,7 @@ func TestGetReplicationNodesDistinct(t *testing.T) {
 
 func TestHealth(t *testing.T) {
 	// Arrange
-	h := newTestHandler()
+	h := newTestHandler(t)
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
 
@@ -428,5 +439,43 @@ func TestHealth(t *testing.T) {
 	}
 	if _, ok := resp["uptime"]; !ok {
 		t.Error("expected uptime in response")
+	}
+}
+
+func TestGossip(t *testing.T) {
+	// Arrange
+	h := newTestHandler(t)
+	body := `{"members": [{"ID": "node1", "Address": "10.0.0.1", "Heartbeat": 1, "Status": 0}]}`
+	req := httptest.NewRequest(http.MethodPost, "/gossip", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Gossip(w, req)
+
+	// Assert
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	var resp []*gossip.Member
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp) < 1 {
+		t.Errorf("expected at least 1 member in response, got %d", len(resp))
+	}
+}
+
+func TestGossipInvalidBody(t *testing.T) {
+	// Arrange
+	h := newTestHandler(t)
+	req := httptest.NewRequest(http.MethodPost, "/gossip", bytes.NewBufferString("not json"))
+	w := httptest.NewRecorder()
+
+	// Act
+	h.Gossip(w, req)
+
+	// Assert
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
 	}
 }

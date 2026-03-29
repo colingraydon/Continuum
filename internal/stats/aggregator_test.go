@@ -3,14 +3,14 @@ package stats
 import (
 	"testing"
 
-	"github.com/colingraydon/continuum/internal/health"
+	"github.com/colingraydon/continuum/internal/gossip"
 	"github.com/colingraydon/continuum/internal/ring"
 )
 
 func newTestAggregator() *Aggregator {
 	r := ring.NewRing(10)
-	c := health.NewChecker(health.DefaultConfig(), nil)
-	return NewAggregator(r, c)
+	ml := gossip.NewMemberList("self", "localhost", nil)
+	return NewAggregator(r, ml)
 }
 
 func TestNewAggregator(t *testing.T) {
@@ -48,12 +48,12 @@ func TestGetStatsEmptyRing(t *testing.T) {
 func TestGetStatsHealthyNodes(t *testing.T) {
 	// Arrange
 	r := ring.NewRing(10)
-	c := health.NewChecker(health.DefaultConfig(), nil)
-	a := NewAggregator(r, c)
+	ml := gossip.NewMemberList("self", "localhost", nil)
+	a := NewAggregator(r, ml)
 	r.AddNode("node1", "10.0.0.1")
 	r.AddNode("node2", "10.0.0.2")
-	c.AddNode("node1", "10.0.0.1")
-	c.AddNode("node2", "10.0.0.2")
+	ml.Add("node1", "10.0.0.1")
+	ml.Add("node2", "10.0.0.2")
 
 	// Act
 	stats := a.GetStats()
@@ -73,11 +73,11 @@ func TestGetStatsHealthyNodes(t *testing.T) {
 func TestGetStatsSuspectNodes(t *testing.T) {
 	// Arrange
 	r := ring.NewRing(10)
-	c := health.NewChecker(health.DefaultConfig(), nil)
-	a := NewAggregator(r, c)
+	ml := gossip.NewMemberList("self", "localhost", nil)
+	a := NewAggregator(r, ml)
 	r.AddNode("node1", "10.0.0.1")
-	c.AddNode("node1", "localhost:19999")
-	c.CheckNode("node1")
+	ml.Add("node1", "10.0.0.1")
+	ml.MarkSuspect("node1")
 
 	// Act
 	stats := a.GetStats()
@@ -91,13 +91,11 @@ func TestGetStatsSuspectNodes(t *testing.T) {
 func TestGetStatsDeadNodes(t *testing.T) {
 	// Arrange
 	r := ring.NewRing(10)
-	c := health.NewChecker(health.DefaultConfig(), nil)
-	a := NewAggregator(r, c)
+	ml := gossip.NewMemberList("self", "localhost", nil)
+	a := NewAggregator(r, ml)
 	r.AddNode("node1", "10.0.0.1")
-	c.AddNode("node1", "localhost:19999")
-	c.CheckNode("node1")
-	c.CheckNode("node1")
-	c.CheckNode("node1")
+	ml.Add("node1", "10.0.0.1")
+	ml.MarkDead("node1")
 
 	// Act
 	stats := a.GetStats()
@@ -111,14 +109,14 @@ func TestGetStatsDeadNodes(t *testing.T) {
 func TestGetStatsTotalNodes(t *testing.T) {
 	// Arrange
 	r := ring.NewRing(10)
-	c := health.NewChecker(health.DefaultConfig(), nil)
-	a := NewAggregator(r, c)
+	ml := gossip.NewMemberList("self", "localhost", nil)
+	a := NewAggregator(r, ml)
 	r.AddNode("node1", "10.0.0.1")
 	r.AddNode("node2", "10.0.0.2")
 	r.AddNode("node3", "10.0.0.3")
-	c.AddNode("node1", "10.0.0.1")
-	c.AddNode("node2", "10.0.0.2")
-	c.AddNode("node3", "10.0.0.3")
+	ml.Add("node1", "10.0.0.1")
+	ml.Add("node2", "10.0.0.2")
+	ml.Add("node3", "10.0.0.3")
 
 	// Act
 	stats := a.GetStats()

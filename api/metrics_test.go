@@ -8,8 +8,8 @@ import (
 	"strings"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/colingraydon/continuum/internal/gossip"
 	"github.com/colingraydon/continuum/internal/ring"
-	"github.com/colingraydon/continuum/internal/health"
 )
 
 func resetMetrics() {
@@ -24,7 +24,7 @@ func resetMetrics() {
 func TestMetricsNodeCountGauge(t *testing.T) {
 	// Arrange
 	resetMetrics()
-	h := newTestHandler()
+	h := newTestHandler(t)
 
 	// Act
 	h.ring.AddNode("node1", "10.0.0.1")
@@ -43,7 +43,14 @@ func TestMetricsNodeCountGauge(t *testing.T) {
 func TestMetricsHTTPRequestsTotal(t *testing.T) {
 	// Arrange
 	resetMetrics()
-	srv := NewServer(ring.NewRing(10), health.NewChecker(health.DefaultConfig(), nil))
+	ml := gossip.NewMemberList("self", "localhost", nil)
+	transport, err := gossip.NewTransport("0")
+	if err != nil {
+		t.Fatalf("failed to create transport: %v", err)
+	}
+	defer transport.Stop()
+	g := gossip.NewGossiper("self", "0", ml, transport)
+	srv := NewServer(ring.NewRing(50), ml, g, "self")
 	req := httptest.NewRequest(http.MethodGet, "/nodes", nil)
 	w := httptest.NewRecorder()
 
@@ -64,7 +71,14 @@ func TestMetricsHTTPRequestsTotal(t *testing.T) {
 func TestMetricsRequestDurationRecorded(t *testing.T) {
 	// Arrange
 	resetMetrics()
-	srv := NewServer(ring.NewRing(10), health.NewChecker(health.DefaultConfig(), nil))
+	ml := gossip.NewMemberList("self", "localhost", nil)
+	transport, err := gossip.NewTransport("0")
+	if err != nil {
+		t.Fatalf("failed to create transport: %v", err)
+	}
+	defer transport.Stop()
+	g := gossip.NewGossiper("self", "0", ml, transport)
+	srv := NewServer(ring.NewRing(50), ml, g, "self")
 	req := httptest.NewRequest(http.MethodGet, "/nodes", nil)
 	w := httptest.NewRecorder()
 

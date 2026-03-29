@@ -6,17 +6,31 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings" 
 	"testing"
 
+	"github.com/colingraydon/continuum/internal/gossip"
 	"github.com/colingraydon/continuum/internal/ring"
-	"github.com/colingraydon/continuum/internal/health"
 )
 
 func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer(NewServer(ring.NewRing(50), health.NewChecker(health.DefaultConfig(), nil)))
-	t.Cleanup(func() { srv.Close() })
+	ml := gossip.NewMemberList("self", "localhost", nil)
+	transport, err := gossip.NewTransport("0")
+	if err != nil {
+		t.Fatalf("failed to create transport: %v", err)
+	}
+	g := gossip.NewGossiper("self", "0", ml, transport)
+	srv := httptest.NewServer(NewServer(ring.NewRing(50), ml, g, "self"))
+	t.Cleanup(func() {
+		srv.Close()
+		transport.Stop()
+	})
 	return srv
+}
+
+func serverAddress(srv *httptest.Server) string {
+	return strings.TrimPrefix(srv.URL, "http://")
 }
 
 func postNode(t *testing.T, url, body string) *http.Response {
@@ -36,29 +50,29 @@ func closeBody(t *testing.T, resp *http.Response) {
 }
 
 func TestE2EAddAndGetNode(t *testing.T) {
-	// Arrange
 	srv := newTestServer(t)
+	addr := serverAddress(srv)
 
-	// Act
-	resp := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), `{"id": "node1", "address": "10.0.0.1"}`)
+	resp := postNode(t,
+		fmt.Sprintf("%s/nodes", srv.URL),
+		fmt.Sprintf(`{"id": "node1", "address": "%s"}`, addr), 
+	)
 	defer closeBody(t, resp)
 
-	// Assert
 	if resp.StatusCode != http.StatusCreated {
 		t.Errorf("expected 201, got %d", resp.StatusCode)
 	}
 
-	// Act
 	resp2, err := http.Get(fmt.Sprintf("%s/keys/mykey", srv.URL))
 	if err != nil {
 		t.Fatalf("failed to get node: %v", err)
 	}
 	defer closeBody(t, resp2)
 
-	// Assert
 	if resp2.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp2.StatusCode)
 	}
+
 	var node NodeResponse
 	if err := json.NewDecoder(resp2.Body).Decode(&node); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
@@ -69,12 +83,15 @@ func TestE2EAddAndGetNode(t *testing.T) {
 }
 
 func TestE2EAddAndRemoveNode(t *testing.T) {
-	// Arrange
 	srv := newTestServer(t)
-	resp0 := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), `{"id": "node1", "address": "10.0.0.1"}`)
+	addr := serverAddress(srv)
+
+	resp0 := postNode(t,
+		fmt.Sprintf("%s/nodes", srv.URL),
+		fmt.Sprintf(`{"id": "node1", "address": "%s"}`, addr), 
+	)
 	defer closeBody(t, resp0)
 
-	// Act
 	req, err := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s/nodes/node1", srv.URL), nil)
 	if err != nil {
 		t.Fatalf("failed to create delete request: %v", err)
@@ -85,12 +102,10 @@ func TestE2EAddAndRemoveNode(t *testing.T) {
 	}
 	defer closeBody(t, resp)
 
-	// Assert
 	if resp.StatusCode != http.StatusNoContent {
 		t.Errorf("expected 204, got %d", resp.StatusCode)
 	}
 
-	// Assert
 	resp2, err := http.Get(fmt.Sprintf("%s/keys/mykey", srv.URL))
 	if err != nil {
 		t.Fatalf("failed to get node: %v", err)
@@ -103,25 +118,25 @@ func TestE2EAddAndRemoveNode(t *testing.T) {
 }
 
 func TestE2EGetNodes(t *testing.T) {
-	// Arrange
 	srv := newTestServer(t)
+	addr := serverAddress(srv) // ✅
+
 	for i := 1; i <= 3; i++ {
-		body := fmt.Sprintf(`{"id": "node%d", "address": "10.0.0.%d"}`, i, i)
+		body := fmt.Sprintf(`{"id": "node%d", "address": "%s"}`, i, addr) 
 		r := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), body)
 		defer closeBody(t, r)
 	}
 
-	// Act
 	resp, err := http.Get(fmt.Sprintf("%s/nodes", srv.URL))
 	if err != nil {
 		t.Fatalf("failed to get nodes: %v", err)
 	}
 	defer closeBody(t, resp)
 
-	// Assert
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
 	}
+
 	var nodes []NodeResponse
 	if err := json.NewDecoder(resp.Body).Decode(&nodes); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
@@ -132,21 +147,22 @@ func TestE2EGetNodes(t *testing.T) {
 }
 
 func TestE2EKeyConsistency(t *testing.T) {
-	// Arrange
 	srv := newTestServer(t)
+	addr := serverAddress(srv)
+
 	for i := 1; i <= 3; i++ {
-		body := fmt.Sprintf(`{"id": "node%d", "address": "10.0.0.%d"}`, i, i)
+		body := fmt.Sprintf(`{"id": "node%d", "address": "%s"}`, i, addr)
 		r := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), body)
 		defer closeBody(t, r)
 	}
 
-	// Act
 	getNode := func() string {
 		resp, err := http.Get(fmt.Sprintf("%s/keys/mykey", srv.URL))
 		if err != nil {
 			t.Fatalf("failed to get node: %v", err)
 		}
 		defer closeBody(t, resp)
+
 		var node NodeResponse
 		if err := json.NewDecoder(resp.Body).Decode(&node); err != nil {
 			t.Errorf("failed to decode response: %v", err)
@@ -157,32 +173,31 @@ func TestE2EKeyConsistency(t *testing.T) {
 	first := getNode()
 	second := getNode()
 
-	// Assert
 	if first != second {
 		t.Errorf("expected consistent lookup, got %s then %s", first, second)
 	}
 }
 
 func TestE2EGetStats(t *testing.T) {
-	// Arrange
 	srv := newTestServer(t)
+	addr := serverAddress(srv)
+
 	for i := 1; i <= 3; i++ {
-		body := fmt.Sprintf(`{"id": "node%d", "address": "10.0.0.%d"}`, i, i)
+		body := fmt.Sprintf(`{"id": "node%d", "address": "%s"}`, i, addr)
 		r := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), body)
 		defer closeBody(t, r)
 	}
 
-	// Act
 	resp, err := http.Get(fmt.Sprintf("%s/stats", srv.URL))
 	if err != nil {
 		t.Fatalf("failed to get stats: %v", err)
 	}
 	defer closeBody(t, resp)
 
-	// Assert
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
 	}
+
 	var stats ring.RingStats
 	if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
@@ -199,15 +214,15 @@ func TestE2EGetStats(t *testing.T) {
 }
 
 func TestE2EGetReplicationNodes(t *testing.T) {
-	// Arrange
 	srv := newTestServer(t)
+	addr := serverAddress(srv)
+
 	for i := 1; i <= 3; i++ {
-		body := fmt.Sprintf(`{"id": "node%d", "address": "10.0.0.%d"}`, i, i)
+		body := fmt.Sprintf(`{"id": "node%d", "address": "%s"}`, i, addr) 
 		r := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), body)
 		defer closeBody(t, r)
 	}
 
-	// Act
 	body := `{"key": "somekey", "factor": 3}`
 	resp, err := http.Post(fmt.Sprintf("%s/replicate", srv.URL), "application/json", bytes.NewBufferString(body))
 	if err != nil {
@@ -215,10 +230,10 @@ func TestE2EGetReplicationNodes(t *testing.T) {
 	}
 	defer closeBody(t, resp)
 
-	// Assert
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
 	}
+
 	var result ReplicateResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("failed to decode response: %v", err)

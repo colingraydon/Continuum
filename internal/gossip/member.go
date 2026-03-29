@@ -154,6 +154,13 @@ func (ml *MemberList) Add(id, address string) {
 	}
 }
 
+func (ml *MemberList) Get(id string) (*Member, bool) {
+	ml.mu.RLock()
+	defer ml.mu.RUnlock()
+	m, ok := ml.members[id]
+	return m, ok
+}
+
 func (ml *MemberList) Size() int {
 	ml.mu.RLock()
 	defer ml.mu.RUnlock()
