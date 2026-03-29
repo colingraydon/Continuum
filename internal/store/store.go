@@ -6,16 +6,8 @@ import (
 	"github.com/spaolacci/murmur3"
 )
 
-// Version represents a causality token for conflict resolution.
-// HappensBefore reports whether v is strictly causally earlier than other.
-// A new write replaces an existing entry only when the existing version
-// HappensBefore the incoming one — concurrent versions keep the existing value.
-type Version interface {
-	HappensBefore(other Version) bool
-}
-
 // VectorClockVersion tracks per-node logical counters. A clock A happens-before
-// B iff every counter in A is <= the corresponding counter in B and at least one
+// B iff every counter in A is ≤ the corresponding counter in B and at least one
 // is strictly less (standard Lamport partial order).
 type VectorClockVersion struct {
 	Clocks map[string]uint64 `json:"clocks"`
@@ -37,14 +29,10 @@ func (v VectorClockVersion) Increment(nodeID string) VectorClockVersion {
 	return VectorClockVersion{Clocks: clocks}
 }
 
-func (v VectorClockVersion) HappensBefore(other Version) bool {
-	o, ok := other.(VectorClockVersion)
-	if !ok {
-		return false
-	}
+func (v VectorClockVersion) HappensBefore(other VectorClockVersion) bool {
 	atLeastOneLess := false
 	for nodeID, vClock := range v.Clocks {
-		oClock := o.Clocks[nodeID]
+		oClock := other.Clocks[nodeID]
 		if vClock > oClock {
 			return false
 		}
@@ -52,9 +40,7 @@ func (v VectorClockVersion) HappensBefore(other Version) bool {
 			atLeastOneLess = true
 		}
 	}
-	// keys present only in o have an implicit v[i]=0, so they contribute to
-	// atLeastOneLess if o[i] > 0
-	for nodeID, oClock := range o.Clocks {
+	for nodeID, oClock := range other.Clocks {
 		if _, exists := v.Clocks[nodeID]; !exists && oClock > 0 {
 			atLeastOneLess = true
 		}
@@ -62,12 +48,31 @@ func (v VectorClockVersion) HappensBefore(other Version) bool {
 	return atLeastOneLess
 }
 
-// Entry holds a stored value with its version and a precomputed hash for
-// future Merkle tree anti-entropy.
-type Entry struct {
+// Equal reports whether v and other have identical clock counters.
+func (v VectorClockVersion) Equal(other VectorClockVersion) bool {
+	if len(v.Clocks) != len(other.Clocks) {
+		return false
+	}
+	for k, vc := range v.Clocks {
+		if oc, ok := other.Clocks[k]; !ok || vc != oc {
+			return false
+		}
+	}
+	return true
+}
+
+// Sibling is a single causally-distinct value for a key.
+type Sibling struct {
 	Value   string
-	Version Version
-	Hash    uint32 // murmur3(value)
+	Version VectorClockVersion
+	Hash    uint32 // murmur3(value), reserved for Merkle anti-entropy
+}
+
+// Entry holds all active siblings for a key. Len(Siblings)==1 means no
+// conflict; Len(Siblings)>1 means concurrent writes exist and should be
+// surfaced to the client for resolution.
+type Entry struct {
+	Siblings []Sibling
 }
 
 type Store struct {
@@ -79,19 +84,44 @@ func New() *Store {
 	return &Store{data: make(map[string]Entry)}
 }
 
-// Put stores key=value at version v. Drops the write if the existing entry's
-// version does not happen-before v (i.e. existing is newer or concurrent).
-func (s *Store) Put(key, value string, v Version) {
+// Put stores key=value at version v. If v is dominated by any existing sibling
+// the write is dropped. If v dominates existing siblings they are replaced. If v
+// is concurrent with existing siblings it is appended, producing a conflict.
+// Equal clocks are treated as an idempotent write and ignored.
+func (s *Store) Put(key, value string, v VectorClockVersion) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if existing, ok := s.data[key]; ok && !existing.Version.HappensBefore(v) {
-		return
-	}
-	s.data[key] = Entry{
+
+	incoming := Sibling{
 		Value:   value,
 		Version: v,
 		Hash:    murmur3.Sum32([]byte(value)),
 	}
+
+	existing, ok := s.data[key]
+	if !ok {
+		s.data[key] = Entry{Siblings: []Sibling{incoming}}
+		return
+	}
+
+	var survivors []Sibling
+	for _, sib := range existing.Siblings {
+		if v.HappensBefore(sib.Version) {
+			// Incoming is dominated by this sibling — discard it.
+			return
+		}
+		if sib.Version.Equal(v) {
+			// Same clock — idempotent write, no change.
+			return
+		}
+		if !sib.Version.HappensBefore(v) {
+			// Concurrent — keep this sibling alongside incoming.
+			survivors = append(survivors, sib)
+		}
+		// else: sib is dominated by v — drop it.
+	}
+
+	s.data[key] = Entry{Siblings: append(survivors, incoming)}
 }
 
 func (s *Store) Get(key string) (Entry, bool) {

@@ -636,3 +636,78 @@ func TestE2EReadQuorumFailure(t *testing.T) {
 		t.Errorf("expected 503 when read quorum unreachable, got %d", getResp.StatusCode)
 	}
 }
+
+// TestE2EConflictSurfacing verifies that concurrent writes (neither clock
+// happens-before the other) are returned as siblings rather than silently
+// resolved, and that a subsequent dominating write clears the conflict.
+func TestE2EConflictSurfacing(t *testing.T) {
+	srv1 := newNamedTestServerQ(t, "node1", 2, 1, 2)
+	srv2 := newNamedTestServerQ(t, "node2", 2, 1, 2)
+	addr1 := serverAddress(srv1)
+	addr2 := serverAddress(srv2)
+
+	for _, srv := range []*httptest.Server{srv1, srv2} {
+		r1 := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), fmt.Sprintf(`{"id": "node1", "address": "%s"}`, addr1))
+		defer closeBody(t, r1)
+		r2 := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), fmt.Sprintf(`{"id": "node2", "address": "%s"}`, addr2))
+		defer closeBody(t, r2)
+	}
+
+	seedWrite := func(t *testing.T, srvURL, value, clocksJSON string) {
+		t.Helper()
+		body := fmt.Sprintf(`{"value": %q, "clocks": %s}`, value, clocksJSON)
+		req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("%s/keys/conflict-key", srvURL), strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("failed to create request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Proxied-From", "test")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("seed write failed: %v", err)
+		}
+		defer closeBody(t, resp)
+	}
+
+	// Seed concurrent writes: neither clock happens-before the other.
+	seedWrite(t, srv1.URL, "alice", `{"node1": 1}`)
+	seedWrite(t, srv2.URL, "bob", `{"node2": 1}`)
+
+	// Consistent read should surface both as siblings.
+	getResp, err := http.Get(fmt.Sprintf("%s/keys/conflict-key", srv1.URL))
+	if err != nil {
+		t.Fatalf("GET failed: %v", err)
+	}
+	defer closeBody(t, getResp)
+	if getResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", getResp.StatusCode)
+	}
+	var node NodeResponse
+	if err := json.NewDecoder(getResp.Body).Decode(&node); err != nil {
+		t.Fatalf("failed to decode: %v", err)
+	}
+	if len(node.Siblings) != 2 {
+		t.Fatalf("expected 2 siblings, got %d (value=%q)", len(node.Siblings), node.Value)
+	}
+	sibValues := map[string]bool{node.Siblings[0].Value: true, node.Siblings[1].Value: true}
+	if !sibValues["alice"] || !sibValues["bob"] {
+		t.Errorf("expected siblings 'alice' and 'bob', got %v", sibValues)
+	}
+
+	// A write whose clock dominates both siblings resolves the conflict.
+	seedWrite(t, srv1.URL, "resolved", `{"node1": 1, "node2": 1}`)
+	seedWrite(t, srv2.URL, "resolved", `{"node1": 1, "node2": 1}`)
+
+	getResp2, err := http.Get(fmt.Sprintf("%s/keys/conflict-key", srv1.URL))
+	if err != nil {
+		t.Fatalf("GET after resolution failed: %v", err)
+	}
+	defer closeBody(t, getResp2)
+	var resolved NodeResponse
+	if err := json.NewDecoder(getResp2.Body).Decode(&resolved); err != nil {
+		t.Fatalf("failed to decode: %v", err)
+	}
+	if resolved.Value != "resolved" {
+		t.Errorf("expected 'resolved' after conflict resolution, got %q (siblings=%v)", resolved.Value, resolved.Siblings)
+	}
+}
