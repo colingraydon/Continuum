@@ -119,9 +119,10 @@ func (g *Gossiper) checkStale() {
 			continue
 		}
 		if time.Since(m.UpdatedAt) > staleThreshold {
-			if m.Status == MemberAlive {
+			switch m.Status {
+			case MemberAlive:
 				g.memberList.MarkSuspect(m.ID)
-			} else if m.Status == MemberSuspect {
+			case MemberSuspect:
 				g.memberList.MarkDead(m.ID)
 			}
 		}

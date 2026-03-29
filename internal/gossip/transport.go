@@ -3,6 +3,7 @@ package gossip
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"time"
 )
@@ -52,7 +53,9 @@ func (t *Transport) Start() {
 }
 
 func (t *Transport) Stop() {
-	t.conn.Close()
+	if err := t.conn.Close(); err != nil {
+		log.Printf("failed to close transport connection: %v", err)
+	}
 }
 
 func (t *Transport) listen() {
@@ -95,7 +98,7 @@ func (t *Transport) Send(address string, msg *GossipMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to dial peer: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	if err := conn.SetWriteDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		return fmt.Errorf("failed to set write deadline: %w", err)

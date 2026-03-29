@@ -151,7 +151,7 @@ func (h *Handler) proxyRequest(w http.ResponseWriter, req *http.Request, address
 		http.Error(w, "failed to proxy request to peer", http.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)

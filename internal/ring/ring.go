@@ -6,12 +6,13 @@ import (
 )
 
 type Ring struct {
-	mu        sync.RWMutex
-	tree      *Tree
-	nodes     map[string]*Node
-	replicas  int
-	keyCounts map[string]*atomic.Int64
-	onUpdate  func(nodeCount, vnodeCount int)
+	mu           sync.RWMutex
+	tree         *Tree
+	nodes        map[string]*Node
+	replicas     int
+	keyCounts    map[string]*atomic.Int64
+	onUpdate     func(nodeCount, vnodeCount int)
+	healthFilter func(nodeID string) bool
 }
 
 func NewRing(replicas int) *Ring {
@@ -29,6 +30,12 @@ func (r *Ring) SetUpdateCallback(fn func(nodeCount, vnodeCount int)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.onUpdate = fn
+}
+
+func (r *Ring) SetHealthFilter(fn func(nodeID string) bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.healthFilter = fn
 }
 
 func (r *Ring) AddNode(id, address string) {
@@ -66,13 +73,55 @@ func (r *Ring) GetNode(key string) (*Node, bool) {
 	}
 
 	hash := computeHash(key)
-	vnode, found := r.tree.GetNext(hash)
-	if !found {
-		return nil, false
+
+	if r.healthFilter == nil {
+		vnode, found := r.tree.GetNext(hash)
+		if !found {
+			return nil, false
+		}
+		r.keyCounts[vnode.Node.ID].Add(1)
+		return vnode.Node, true
 	}
 
-	r.keyCounts[vnode.Node.ID].Add(1)
-	return vnode.Node, true
+	// Walk the ring from the key's position, skipping nodes that fail the
+	// health filter. Mirrors the GetReplicationNodes iterator pattern.
+	seen := make(map[string]bool)
+	it := r.tree.Tree.Iterator()
+
+	// Find the ceiling vnode and check it first.
+	for it.Next() {
+		vnode := it.Value().(*VNode)
+		if vnode.Hash >= hash {
+			if !seen[vnode.Node.ID] {
+				seen[vnode.Node.ID] = true
+				if r.healthFilter(vnode.Node.ID) {
+					r.keyCounts[vnode.Node.ID].Add(1)
+					return vnode.Node, true
+				}
+			}
+			break
+		}
+	}
+
+	// Continue walking forward, wrapping around, until all distinct nodes
+	// have been checked.
+	for len(seen) < len(r.nodes) {
+		if !it.Next() {
+			it.First()
+			it.Next()
+		}
+		vnode := it.Value().(*VNode)
+		if seen[vnode.Node.ID] {
+			continue
+		}
+		seen[vnode.Node.ID] = true
+		if r.healthFilter(vnode.Node.ID) {
+			r.keyCounts[vnode.Node.ID].Add(1)
+			return vnode.Node, true
+		}
+	}
+
+	return nil, false
 }
 
 func (r *Ring) GetReplicationNodes(key string, factor int) []*Node {

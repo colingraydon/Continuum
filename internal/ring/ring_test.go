@@ -297,3 +297,40 @@ func TestSetUpdateCallbackOnRemove(t *testing.T) {
 		t.Errorf("expected vnode count 0, got %d", capturedVNodeCount)
 	}
 }
+
+func TestHealthFilterSkipsSuspectNode(t *testing.T) {
+	// Arrange
+	r := NewRing(150)
+	r.AddNode("node1", "10.0.0.1")
+	r.AddNode("node2", "10.0.0.2")
+	healthy := map[string]bool{"node1": true, "node2": true}
+	r.SetHealthFilter(func(id string) bool { return healthy[id] })
+
+	// Act — mark node that owns the key as unhealthy
+	first, _ := r.GetNode("mykey")
+	healthy[first.ID] = false
+	second, found := r.GetNode("mykey")
+
+	// Assert
+	if !found {
+		t.Fatal("expected a node to be found after filtering")
+	}
+	if second.ID == first.ID {
+		t.Errorf("expected a different node after filtering, got %s again", second.ID)
+	}
+}
+
+func TestHealthFilterNoHealthyNodes(t *testing.T) {
+	// Arrange
+	r := NewRing(150)
+	r.AddNode("node1", "10.0.0.1")
+	r.SetHealthFilter(func(id string) bool { return false })
+
+	// Act
+	_, found := r.GetNode("mykey")
+
+	// Assert
+	if found {
+		t.Error("expected no node when all nodes are unhealthy")
+	}
+}
