@@ -175,7 +175,9 @@ func TestTransportDropsMessagesWhenFull(t *testing.T) {
 	// Act — flood with 300 messages, channel only holds 256
 	for i := 0; i < 300; i++ {
 		msg := &GossipMessage{Type: MessagePush, From: "node1", Members: []*Member{}}
-		sender.Send(fmt.Sprintf("127.0.0.1:%d", port), msg)
+		if err := sender.Send(fmt.Sprintf("127.0.0.1:%d", port), msg); err != nil {
+			t.Fatalf("error sending messages: %v", err)
+		}
 	}
 
 	// Assert — should not panic or deadlock
