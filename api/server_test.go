@@ -11,14 +11,22 @@ import (
 
 func TestRoutes(t *testing.T) {
 	// Arrange
-	ml := gossip.NewMemberList("self", "localhost", nil)
+	r := ring.NewRing(50)
+	ml := gossip.NewMemberList("self", "localhost", func(m *gossip.Member, status gossip.MemberStatus) {
+		switch status {
+		case gossip.MemberAlive:
+			r.AddNode(m.ID, m.Address)
+		case gossip.MemberDead:
+			r.RemoveNode(m.ID)
+		}
+	})
 	transport, err := gossip.NewTransport("0")
 	if err != nil {
 		t.Fatalf("failed to create transport: %v", err)
 	}
 	defer transport.Stop()
 	g := gossip.NewGossiper("self", "0", ml, transport)
-	srv := NewServer(ring.NewRing(50), ml, g, "self")
+	srv := NewServer(r, ml, g, "self")
 
 	tests := []struct {
 		name   string

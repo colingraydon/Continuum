@@ -15,13 +15,21 @@ import (
 
 func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	ml := gossip.NewMemberList("self", "localhost", nil)
+	r := ring.NewRing(50)
+	ml := gossip.NewMemberList("self", "localhost", func(m *gossip.Member, status gossip.MemberStatus) {
+		switch status {
+		case gossip.MemberAlive:
+			r.AddNode(m.ID, m.Address)
+		case gossip.MemberDead:
+			r.RemoveNode(m.ID)
+		}
+	})
 	transport, err := gossip.NewTransport("0")
 	if err != nil {
 		t.Fatalf("failed to create transport: %v", err)
 	}
 	g := gossip.NewGossiper("self", "0", ml, transport)
-	srv := httptest.NewServer(NewServer(ring.NewRing(50), ml, g, "self"))
+	srv := httptest.NewServer(NewServer(r, ml, g, "self"))
 	t.Cleanup(func() {
 		srv.Close()
 		transport.Stop()

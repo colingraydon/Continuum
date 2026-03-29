@@ -11,22 +11,31 @@ import (
 	"github.com/colingraydon/continuum/internal/ring"
 )
 
-func newTestMemberList() *gossip.MemberList {
-	return gossip.NewMemberList("self", "localhost", nil)
+func newTestMemberList(r *ring.Ring) *gossip.MemberList {
+	return gossip.NewMemberList("self", "localhost", func(m *gossip.Member, status gossip.MemberStatus) {
+		switch status {
+		case gossip.MemberAlive:
+			r.AddNode(m.ID, m.Address)
+		case gossip.MemberDead:
+			r.RemoveNode(m.ID)
+		}
+	})
 }
 
-func newTestGossiper(t *testing.T) *gossip.Gossiper {
+func newTestGossiper(t *testing.T, ml *gossip.MemberList) *gossip.Gossiper {
 	t.Helper()
 	transport, err := gossip.NewTransport("0")
 	if err != nil {
 		t.Fatalf("failed to create transport: %v", err)
 	}
 	t.Cleanup(func() { transport.Stop() })
-	return gossip.NewGossiper("self", "0", newTestMemberList(), transport)
+	return gossip.NewGossiper("self", "0", ml, transport)
 }
 
 func newTestHandler(t *testing.T) *Handler {
-	return NewHandler(ring.NewRing(10), newTestMemberList(), newTestGossiper(t), "self")
+	r := ring.NewRing(10)
+	ml := newTestMemberList(r)
+	return NewHandler(r, ml, newTestGossiper(t, ml), "self")
 }
 
 func TestAddNode(t *testing.T) {
@@ -102,7 +111,7 @@ func TestAddNodeMissingAddress(t *testing.T) {
 func TestRemoveNode(t *testing.T) {
 	// Arrange
 	h := newTestHandler(t)
-	h.ring.AddNode("node1", "10.0.0.1")
+	h.memberList.Add("node1", "10.0.0.1")
 	req := httptest.NewRequest(http.MethodDelete, "/nodes/node1", nil)
 	w := httptest.NewRecorder()
 
@@ -136,8 +145,8 @@ func TestRemoveNodeMissingID(t *testing.T) {
 func TestGetNodes(t *testing.T) {
 	// Arrange
 	h := newTestHandler(t)
-	h.ring.AddNode("node1", "10.0.0.1")
-	h.ring.AddNode("node2", "10.0.0.2")
+	h.memberList.Add("node1", "10.0.0.1")
+	h.memberList.Add("node2", "10.0.0.2")
 	req := httptest.NewRequest(http.MethodGet, "/nodes", nil)
 	w := httptest.NewRecorder()
 
@@ -182,7 +191,7 @@ func TestGetNodesEmpty(t *testing.T) {
 func TestGetNode(t *testing.T) {
 	// Arrange
 	h := newTestHandler(t)
-	h.ring.AddNode("node1", "10.0.0.1")
+	h.memberList.Add("node1", "10.0.0.1")
 	h.selfID = "node1"
 	req := httptest.NewRequest(http.MethodGet, "/keys/mykey", nil)
 	w := httptest.NewRecorder()
@@ -236,9 +245,9 @@ func TestGetNodeMissingKey(t *testing.T) {
 func TestGetStats(t *testing.T) {
 	// Arrange
 	h := newTestHandler(t)
-	h.ring.AddNode("node1", "10.0.0.1")
-	h.ring.AddNode("node2", "10.0.0.2")
-	h.ring.AddNode("node3", "10.0.0.3")
+	h.memberList.Add("node1", "10.0.0.1")
+	h.memberList.Add("node2", "10.0.0.2")
+	h.memberList.Add("node3", "10.0.0.3")
 	req := httptest.NewRequest(http.MethodGet, "/stats", nil)
 	w := httptest.NewRecorder()
 
@@ -295,9 +304,9 @@ func TestGetStatsEmptyRing(t *testing.T) {
 func TestGetReplicationNodes(t *testing.T) {
 	// Arrange
 	h := newTestHandler(t)
-	h.ring.AddNode("node1", "10.0.0.1")
-	h.ring.AddNode("node2", "10.0.0.2")
-	h.ring.AddNode("node3", "10.0.0.3")
+	h.memberList.Add("node1", "10.0.0.1")
+	h.memberList.Add("node2", "10.0.0.2")
+	h.memberList.Add("node3", "10.0.0.3")
 	body := `{"key": "somekey", "factor": 3}`
 	req := httptest.NewRequest(http.MethodPost, "/replicate", bytes.NewBufferString(body))
 	w := httptest.NewRecorder()
@@ -387,9 +396,9 @@ func TestGetReplicationNodesEmptyRing(t *testing.T) {
 func TestGetReplicationNodesDistinct(t *testing.T) {
 	// Arrange
 	h := newTestHandler(t)
-	h.ring.AddNode("node1", "10.0.0.1")
-	h.ring.AddNode("node2", "10.0.0.2")
-	h.ring.AddNode("node3", "10.0.0.3")
+	h.memberList.Add("node1", "10.0.0.1")
+	h.memberList.Add("node2", "10.0.0.2")
+	h.memberList.Add("node3", "10.0.0.3")
 	body := `{"key": "somekey", "factor": 3}`
 	req := httptest.NewRequest(http.MethodPost, "/replicate", bytes.NewBufferString(body))
 	w := httptest.NewRecorder()

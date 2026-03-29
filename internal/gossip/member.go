@@ -143,14 +143,19 @@ func (ml *MemberList) MarkDead(id string) {
 
 func (ml *MemberList) Add(id, address string) {
 	ml.mu.Lock()
-	defer ml.mu.Unlock()
-
-	ml.members[id] = &Member{
+	m := &Member{
 		ID:        id,
 		Address:   address,
 		Heartbeat: 0,
 		UpdatedAt: time.Now(),
 		Status:    MemberAlive,
+	}
+	ml.members[id] = m
+	onChange := ml.onChange
+	ml.mu.Unlock()
+
+	if onChange != nil {
+		onChange(m, MemberAlive)
 	}
 }
 

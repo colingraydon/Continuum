@@ -75,7 +75,6 @@ func (h *Handler) AddNode(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "id and address are required", http.StatusBadRequest)
 		return
 	}
-	h.ring.AddNode(body.ID, body.Address)
 	h.memberList.Add(body.ID, body.Address)
 	w.WriteHeader(http.StatusCreated)
 	node := NodeResponse{ID: body.ID, Address: body.Address, Status: "alive"}
@@ -90,7 +89,6 @@ func (h *Handler) RemoveNode(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "node id is required", http.StatusBadRequest)
 		return
 	}
-	h.ring.RemoveNode(id)
 	h.memberList.MarkDead(id)
 	w.WriteHeader(http.StatusNoContent)
 }
