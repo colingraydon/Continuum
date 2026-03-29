@@ -77,6 +77,11 @@ func main() {
 		}
 	})
 
+	r.SetHealthFilter(func(id string) bool {
+		m, ok := ml.Get(id)
+		return ok && m.Status == gossip.MemberAlive
+	})
+
 	transport, err := gossip.NewTransport(cfg.gossipPort)
 	if err != nil {
 		log.Fatalf("failed to create gossip transport: %v", err)
