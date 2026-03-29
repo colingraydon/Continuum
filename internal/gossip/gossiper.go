@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"net"
 	"time"
 )
 
@@ -70,7 +71,7 @@ func (g *Gossiper) gossipRound() {
 	}
 
 	for _, peer := range peers {
-		addr := fmt.Sprintf("%s:%s", peer.Address, g.gossipPort)
+		addr := fmt.Sprintf("%s:%s", gossipHost(peer.Address), g.gossipPort)
 		if err := g.transport.Send(addr, msg); err != nil {
 			log.Printf("failed to gossip to peer %s: %v", peer.ID, err)
 		}
@@ -156,9 +157,18 @@ func (g *Gossiper) Bootstrap(seedNodes []string) {
 	}
 
 	for _, addr := range seedNodes {
-		gossipAddr := fmt.Sprintf("%s:%s", addr, g.gossipPort)
+		gossipAddr := fmt.Sprintf("%s:%s", gossipHost(addr), g.gossipPort)
 		if err := g.transport.Send(gossipAddr, msg); err != nil {
 			log.Printf("failed to bootstrap from seed %s: %v", addr, err)
 		}
 	}
+}
+
+// gossipHost extracts the hostname from an address that may or may not include a port.
+func gossipHost(address string) string {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return address
+	}
+	return host
 }

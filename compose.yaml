@@ -8,7 +8,7 @@ services:
     environment:
       - REPLICAS=150
       - SELF_ID=node1
-      - SELF_ADDRESS=node1
+      - SELF_ADDRESS=node1:8080
       - GOSSIP_PORT=8081
     networks:
       - continuum
@@ -20,9 +20,9 @@ services:
     environment:
       - REPLICAS=150
       - SELF_ID=node2
-      - SELF_ADDRESS=node2
+      - SELF_ADDRESS=node2:8080
       - GOSSIP_PORT=8081
-      - SEED_NODES=node1
+      - SEED_NODES=node1:8080
     depends_on:
       - node1
     networks:
@@ -35,9 +35,9 @@ services:
     environment:
       - REPLICAS=150
       - SELF_ID=node3
-      - SELF_ADDRESS=node3
+      - SELF_ADDRESS=node3:8080
       - GOSSIP_PORT=8081
-      - SEED_NODES=node1
+      - SEED_NODES=node1:8080
     depends_on:
       - node1
     networks:
