@@ -31,7 +31,7 @@ func loadConfig() config {
 
 	selfAddress := os.Getenv("SELF_ADDRESS")
 	if selfAddress == "" {
-		selfAddress = "localhost"
+		selfAddress = "localhost:8080"
 	}
 
 	selfID := os.Getenv("SELF_ID")
