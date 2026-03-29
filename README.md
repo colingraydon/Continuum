@@ -60,16 +60,19 @@ New nodes specify one or more seed nodes via the `SEED_NODES` environment variab
 When a write arrives at any node, it:
 
 1. Determines the replica set for the key using `GetReplicationNodes(key, factor)` — the N consecutive distinct nodes clockwise from the key's ring position
-2. Increments its own vector clock counter and stores the value locally
-3. Fans out the write to all other replicas in parallel (fire-and-forget), forwarding the incremented clock
+2. Increments its own vector clock counter and stores the value locally (self counts as one acknowledgment)
+3. Fans out the write to all other replicas in parallel, waiting for W acknowledgments before returning 204
+4. Returns 503 if quorum cannot be reached
 
 Replica nodes store the write as-is without further fan-out, identified by the `X-Proxied-From` header.
 
-Replication factor is configured via the `REPLICATION_FACTOR` environment variable (default: 3, capped to node count).
+Replication factor is configured via `REPLICATION_FACTOR` (default: 3). Write quorum W is configured via `WRITE_QUORUM` (default: majority — `floor(RF/2) + 1`).
 
-### Peer routing
+### Consistent reads
 
-When a key lookup (`GET /keys/:key`) arrives at a node that isn't responsible for that key, the request is proxied to the correct peer rather than returning an error. The proxy sets an `X-Proxied-From` header to prevent forwarding loops.
+When a read arrives at any node, it fans out to the full replica set and waits for R responses. The response with the highest vector clock is returned to the client. If R replicas cannot be reached, the request returns 503.
+
+Read quorum R is configured via `READ_QUORUM` (default: majority). Setting `READ_QUORUM=1` gives lowest-latency reads but may return stale data; `READ_QUORUM=REPLICATION_FACTOR` gives the strongest consistency guarantee at the cost of latency.
 
 ---
 
@@ -102,14 +105,14 @@ A write (`PUT /keys/:key`) flows like this:
 3. Incoming clock is incremented for this node; value is stored in the local `Store`
 4. `ring.GetReplicationNodes(key, factor)` returns the replica set
 5. Goroutines fan the write out to each non-self replica with `X-Proxied-From` set
-6. Returns 204
+6. Coordinator waits for W acknowledgments (self counts as one); returns 204 on quorum, 503 if quorum cannot be reached
 
 A key lookup (`GET /keys/:key`) flows like this:
 
 1. `GetNode` handler extracts the key
-2. `ring.GetNode(key)` hashes with murmur3, finds the ceiling vnode in the RBT, skips unhealthy nodes via health filter, returns the physical node
-3. If the responsible node is not self, the request is proxied to the peer
-4. If this node is responsible, the value is read from the local store and returned alongside the node metadata
+2. `ring.GetReplicationNodes(key, factor)` returns the replica set
+3. Goroutines fan the read out to each replica with `X-Proxied-From` set; each replica returns its local entry with its vector clock
+4. The coordinator waits for R responses, picks the entry with the highest vector clock, and returns it
 
 ---
 
@@ -209,7 +212,7 @@ Returns 204. The write is stored locally and fanned out to all replica nodes. An
 curl http://localhost:8080/keys/user:123
 ```
 
-Returns the responsible node and the stored value (if present). If this node is not responsible, the request is automatically proxied to the correct peer.
+Returns the primary replica node and the value with the highest vector clock across R replicas. Any node can serve any read — the coordinator fans out to the replica set internally.
 
 ```json
 {"id": "node2", "address": "10.0.0.2:8080", "status": "alive", "value": "alice"}
@@ -343,6 +346,8 @@ In Grafana, add `http://prometheus:9090` as a Prometheus data source and query:
 | `GOSSIP_PORT` | `8081` | UDP port for gossip |
 | `REPLICAS` | `150` | Virtual nodes per physical node |
 | `REPLICATION_FACTOR` | `3` | Number of replicas per key |
+| `WRITE_QUORUM` | majority | Replica acks required before returning 204 |
+| `READ_QUORUM` | majority | Replica responses required for a consistent read |
 | `SEED_NODES` | — | Comma-separated HTTP addresses to bootstrap from |
 
 ---
@@ -382,8 +387,6 @@ make coverage  # generate coverage report
 
 ## What's Next
 
-- **Quorum writes** — wait for W replica acknowledgments before returning 204; configurable consistency level
-- **Consistent reads** — read from R replicas and return the value with the highest vector clock
 - **Conflict surfacing** — return concurrent writes as siblings rather than silently keeping the existing value
 - **Merkle anti-entropy** — use precomputed value hashes to efficiently detect and repair divergent replicas
 - **Graceful shutdown** — drain in-flight requests and gossip `MemberDead` for self before exit

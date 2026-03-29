@@ -3,7 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
-	"io"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -22,10 +22,12 @@ type Handler struct {
 	store             *store.Store
 	selfID            string
 	replicationFactor int
+	writeQuorum       int
+	readQuorum        int
 	startTime         time.Time
 }
 
-func NewHandler(r *ring.Ring, ml *gossip.MemberList, g *gossip.Gossiper, s *store.Store, selfID string, replicationFactor int) *Handler {
+func NewHandler(r *ring.Ring, ml *gossip.MemberList, g *gossip.Gossiper, s *store.Store, selfID string, replicationFactor, writeQuorum, readQuorum int) *Handler {
 	return &Handler{
 		ring:              r,
 		aggregator:        stats.NewAggregator(r, ml),
@@ -34,6 +36,8 @@ func NewHandler(r *ring.Ring, ml *gossip.MemberList, g *gossip.Gossiper, s *stor
 		store:             s,
 		selfID:            selfID,
 		replicationFactor: replicationFactor,
+		writeQuorum:       writeQuorum,
+		readQuorum:        readQuorum,
 		startTime:         time.Now(),
 	}
 }
@@ -44,10 +48,11 @@ type AddNodeRequest struct {
 }
 
 type NodeResponse struct {
-	ID      string `json:"id"`
-	Address string `json:"address"`
-	Status  string `json:"status"`
-	Value   string `json:"value,omitempty"`
+	ID      string            `json:"id"`
+	Address string            `json:"address"`
+	Status  string            `json:"status"`
+	Value   string            `json:"value,omitempty"`
+	Clocks  map[string]uint64 `json:"clocks,omitempty"`
 }
 
 type PutKeyRequest struct {
@@ -127,25 +132,90 @@ func (h *Handler) GetNode(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "key is required", http.StatusBadRequest)
 		return
 	}
-	node, found := h.ring.GetNode(key)
-	if !found {
+
+	// Replica sub-read: return local entry with vector clock so the coordinator
+	// can pick the entry with the highest clock across R replicas.
+	if req.Header.Get("X-Proxied-From") != "" {
+		resp := NodeResponse{ID: h.selfID, Status: h.nodeStatus(h.selfID)}
+		if entry, ok := h.store.Get(key); ok {
+			resp.Value = entry.Value
+			if vc, ok := entry.Version.(store.VectorClockVersion); ok {
+				resp.Clocks = vc.Clocks
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			http.Error(w, "failed to write response", http.StatusInternalServerError)
+		}
+		return
+	}
+
+	// Consistent read: fan out to the replica set and return the entry with the
+	// highest vector clock across R responses.
+	nodes := h.ring.GetReplicationNodes(key, h.replicationFactor)
+	if len(nodes) == 0 {
 		http.Error(w, "no nodes available", http.StatusServiceUnavailable)
 		return
 	}
 	RecordKeyLookup()
 
-	// peer routing — if responsible node is not self, proxy the request
-	// skip if already proxied to avoid infinite loops
-	if node.ID != h.selfID && req.Header.Get("X-Proxied-From") == "" {
-		h.proxyRequest(w, req, node.Address, key)
+	quorum := h.readQuorum
+	if quorum > len(nodes) {
+		quorum = len(nodes)
+	}
+
+	type replicaResult struct {
+		resp NodeResponse
+		err  error
+	}
+	results := make(chan replicaResult, len(nodes))
+
+	for _, n := range nodes {
+		go func(node *ring.Node) {
+			if node.ID == h.selfID {
+				r := NodeResponse{ID: h.selfID, Status: h.nodeStatus(h.selfID)}
+				if entry, ok := h.store.Get(key); ok {
+					r.Value = entry.Value
+					if vc, ok2 := entry.Version.(store.VectorClockVersion); ok2 {
+						r.Clocks = vc.Clocks
+					}
+				}
+				results <- replicaResult{resp: r}
+			} else {
+				r, err := h.readFromReplica(node.Address, key)
+				results <- replicaResult{resp: r, err: err}
+			}
+		}(n)
+	}
+
+	var responses []NodeResponse
+	for i := 0; i < len(nodes); i++ {
+		r := <-results
+		if r.err == nil {
+			responses = append(responses, r.resp)
+		}
+		if len(responses) >= quorum {
+			break
+		}
+	}
+
+	if len(responses) < quorum {
+		http.Error(w, "read quorum not met", http.StatusServiceUnavailable)
 		return
 	}
 
-	resp := NodeResponse{ID: node.ID, Address: node.Address, Status: h.nodeStatus(node.ID)}
-	if node.ID == h.selfID {
-		if entry, ok := h.store.Get(key); ok {
-			resp.Value = entry.Value
-		}
+	best := responses[0]
+	for _, r := range responses[1:] {
+		best = latestEntry(best, r)
+	}
+
+	// Return primary replica metadata with the best value found across replicas.
+	primary := nodes[0]
+	resp := NodeResponse{
+		ID:      primary.ID,
+		Address: primary.Address,
+		Status:  h.nodeStatus(primary.ID),
+		Value:   best.Value,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
@@ -174,71 +244,125 @@ func (h *Handler) PutKey(w http.ResponseWriter, req *http.Request) {
 		incoming.Clocks = make(map[string]uint64)
 	}
 
-	// Primary write: increment self's counter. Replica write: use clock as-is.
-	var version store.VectorClockVersion
-	if req.Header.Get("X-Proxied-From") == "" {
-		version = incoming.Increment(h.selfID)
-	} else {
-		version = incoming
+	// Replica write: store as-is without fan-out or quorum tracking.
+	if req.Header.Get("X-Proxied-From") != "" {
+		h.store.Put(key, body.Value, incoming)
+		w.WriteHeader(http.StatusNoContent)
+		return
 	}
 
+	// Primary write: increment self's counter and store locally.
+	version := incoming.Increment(h.selfID)
 	h.store.Put(key, body.Value, version)
 
-	// Fan out to replica nodes. Skip if this is already a replicated write to
-	// avoid chained replication.
-	if req.Header.Get("X-Proxied-From") == "" {
-		nodes := h.ring.GetReplicationNodes(key, h.replicationFactor)
-		for _, n := range nodes {
-			if n.ID != h.selfID {
-				go h.replicateTo(n.Address, key, body.Value, version.Clocks)
-			}
+	// Quorum write: fan out to all replica nodes and wait for W acks (self
+	// already counts as one). Return 503 if quorum cannot be reached.
+	nodes := h.ring.GetReplicationNodes(key, h.replicationFactor)
+	quorum := min(h.writeQuorum, len(nodes))
+
+	acks := 1 // self
+	if acks >= quorum {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	type result struct{ err error }
+	pending := 0
+	results := make(chan result, len(nodes))
+	for _, n := range nodes {
+		if n.ID == h.selfID {
+			continue
+		}
+		pending++
+		go func(addr string) {
+			results <- result{h.replicateToSync(addr, key, body.Value, version.Clocks)}
+		}(n.Address)
+	}
+
+	for i := 0; i < pending; i++ {
+		r := <-results
+		if r.err == nil {
+			acks++
+		}
+		if acks >= quorum {
+			break
 		}
 	}
 
+	if acks < quorum {
+		http.Error(w, "write quorum not met", http.StatusServiceUnavailable)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (h *Handler) replicateTo(address, key, value string, clocks map[string]uint64) {
+// replicateToSync sends a replica write to addr and returns an error if the
+// write fails or the replica responds with a non-204 status.
+func (h *Handler) replicateToSync(address, key, value string, clocks map[string]uint64) error {
 	body, err := json.Marshal(PutKeyRequest{Value: value, Clocks: clocks})
 	if err != nil {
-		return
+		return err
 	}
 	req, err := http.NewRequest(http.MethodPut, "http://"+address+"/keys/"+key, bytes.NewReader(body))
 	if err != nil {
-		return
+		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Proxied-From", h.selfID)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return
-	}
-	_ = resp.Body.Close()
-}
-
-func (h *Handler) proxyRequest(w http.ResponseWriter, req *http.Request, address, key string) {
-	url := "http://" + address + "/keys/" + key
-
-	proxyReq, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		http.Error(w, "failed to create proxy request", http.StatusInternalServerError)
-		return
-	}
-	proxyReq.Header.Set("X-Proxied-From", h.selfID)
-
-	resp, err := http.DefaultClient.Do(proxyReq)
-	if err != nil {
-		http.Error(w, "failed to proxy request to peer", http.StatusBadGateway)
-		return
+		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(resp.StatusCode)
-
-	if _, err := io.Copy(w, resp.Body); err != nil {
-		return
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("replica returned %d", resp.StatusCode)
 	}
+	return nil
+}
+
+// readFromReplica fetches the local entry for key from a replica node. The
+// response includes the vector clock so the coordinator can compare versions.
+func (h *Handler) readFromReplica(address, key string) (NodeResponse, error) {
+	req, err := http.NewRequest(http.MethodGet, "http://"+address+"/keys/"+key, nil)
+	if err != nil {
+		return NodeResponse{}, err
+	}
+	req.Header.Set("X-Proxied-From", h.selfID)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return NodeResponse{}, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var nr NodeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&nr); err != nil {
+		return NodeResponse{}, err
+	}
+	return nr, nil
+}
+
+// latestEntry returns whichever of a or b has the higher vector clock.
+// If the clocks are concurrent (neither happens-before the other), the entry
+// with the larger clock sum is preferred as a best-effort tiebreak.
+func latestEntry(a, b NodeResponse) NodeResponse {
+	av := store.VectorClockVersion{Clocks: a.Clocks}
+	bv := store.VectorClockVersion{Clocks: b.Clocks}
+	if av.HappensBefore(bv) {
+		return b
+	}
+	if bv.HappensBefore(av) {
+		return a
+	}
+	var aSum, bSum uint64
+	for _, v := range a.Clocks {
+		aSum += v
+	}
+	for _, v := range b.Clocks {
+		bSum += v
+	}
+	if bSum > aSum {
+		return b
+	}
+	return a
 }
 
 func (h *Handler) GetStats(w http.ResponseWriter, req *http.Request) {

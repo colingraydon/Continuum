@@ -17,6 +17,8 @@ import (
 type config struct {
 	replicas          int
 	replicationFactor int
+	writeQuorum       int
+	readQuorum        int
 	selfID            string
 	selfAddress       string
 	gossipPort        string
@@ -35,6 +37,23 @@ func loadConfig() config {
 	if val := os.Getenv("REPLICATION_FACTOR"); val != "" {
 		if parsed, err := strconv.Atoi(val); err == nil {
 			replicationFactor = parsed
+		}
+	}
+
+	// Default quorum is majority: floor(RF/2) + 1. For RF=3 → 2, RF=1 → 1.
+	defaultQuorum := replicationFactor/2 + 1
+
+	writeQuorum := defaultQuorum
+	if val := os.Getenv("WRITE_QUORUM"); val != "" {
+		if parsed, err := strconv.Atoi(val); err == nil && parsed > 0 {
+			writeQuorum = parsed
+		}
+	}
+
+	readQuorum := defaultQuorum
+	if val := os.Getenv("READ_QUORUM"); val != "" {
+		if parsed, err := strconv.Atoi(val); err == nil && parsed > 0 {
+			readQuorum = parsed
 		}
 	}
 
@@ -61,6 +80,8 @@ func loadConfig() config {
 	return config{
 		replicas:          replicas,
 		replicationFactor: replicationFactor,
+		writeQuorum:       writeQuorum,
+		readQuorum:        readQuorum,
 		selfID:            selfID,
 		selfAddress:       selfAddress,
 		gossipPort:        gossipPort,
@@ -113,7 +134,7 @@ func main() {
 	r.AddNode(cfg.selfID, cfg.selfAddress)
 
 	s := store.New()
-	mux := api.NewServer(r, ml, g, s, cfg.selfID, cfg.replicationFactor)
+	mux := api.NewServer(r, ml, g, s, cfg.selfID, cfg.replicationFactor, cfg.writeQuorum, cfg.readQuorum)
 	log.Printf("starting server on :8080 (gossip on :%s) as %s", cfg.gossipPort, cfg.selfID)
 	if err := http.ListenAndServe(":8080", mux); err != nil {
 		log.Fatalf("server failed to start: %v", err)

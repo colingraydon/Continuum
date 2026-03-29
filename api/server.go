@@ -9,8 +9,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-func NewServer(r *ring.Ring, ml *gossip.MemberList, g *gossip.Gossiper, s *store.Store, selfID string, replicationFactor int) http.Handler {
-	h := NewHandler(r, ml, g, s, selfID, replicationFactor)
+func NewServer(r *ring.Ring, ml *gossip.MemberList, g *gossip.Gossiper, s *store.Store, selfID string, replicationFactor, writeQuorum, readQuorum int) http.Handler {
+	h := NewHandler(r, ml, g, s, selfID, replicationFactor, writeQuorum, readQuorum)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /nodes", h.AddNode)
 	mux.HandleFunc("DELETE /nodes/", h.RemoveNode)

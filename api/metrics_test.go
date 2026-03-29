@@ -52,7 +52,7 @@ func TestMetricsHTTPRequestsTotal(t *testing.T) {
 	}
 	defer transport.Stop()
 	g := gossip.NewGossiper("self", "0", ml, transport)
-	srv := NewServer(ring.NewRing(50), ml, g, store.New(), "self", 3)
+	srv := NewServer(ring.NewRing(50), ml, g, store.New(), "self", 3, 1, 1)
 	req := httptest.NewRequest(http.MethodGet, "/nodes", nil)
 	w := httptest.NewRecorder()
 
@@ -80,7 +80,7 @@ func TestMetricsRequestDurationRecorded(t *testing.T) {
 	}
 	defer transport.Stop()
 	g := gossip.NewGossiper("self", "0", ml, transport)
-	srv := NewServer(ring.NewRing(50), ml, g, store.New(), "self", 3)
+	srv := NewServer(ring.NewRing(50), ml, g, store.New(), "self", 3, 1, 1)
 	req := httptest.NewRequest(http.MethodGet, "/nodes", nil)
 	w := httptest.NewRecorder()
 

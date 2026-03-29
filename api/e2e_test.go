@@ -17,6 +17,11 @@ import (
 
 func newNamedTestServer(t *testing.T, selfID string) *httptest.Server {
 	t.Helper()
+	return newNamedTestServerQ(t, selfID, 3, 1, 2)
+}
+
+func newNamedTestServerQ(t *testing.T, selfID string, rf, wq, rq int) *httptest.Server {
+	t.Helper()
 	r := ring.NewRing(50)
 	ml := gossip.NewMemberList(selfID, "", func(m *gossip.Member, status gossip.MemberStatus) {
 		switch status {
@@ -32,7 +37,7 @@ func newNamedTestServer(t *testing.T, selfID string) *httptest.Server {
 	}
 	g := gossip.NewGossiper(selfID, "0", ml, transport)
 	s := store.New()
-	srv := httptest.NewServer(NewServer(r, ml, g, s, selfID, 3))
+	srv := httptest.NewServer(NewServer(r, ml, g, s, selfID, rf, wq, rq))
 	t.Cleanup(func() {
 		srv.Close()
 		transport.Stop()
@@ -57,7 +62,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 	}
 	g := gossip.NewGossiper("self", "0", ml, transport)
 	s := store.New()
-	srv := httptest.NewServer(NewServer(r, ml, g, s, "self", 3))
+	srv := httptest.NewServer(NewServer(r, ml, g, s, "self", 3, 1, 1))
 	t.Cleanup(func() {
 		srv.Close()
 		transport.Stop()
@@ -283,8 +288,7 @@ func TestE2EGetReplicationNodes(t *testing.T) {
 }
 
 // TestE2ERingConvergence verifies that two servers with the same ring state
-// always map any given key to the same node. Each server is registered in the
-// other's ring so proxying works, exercising both ring determinism and routing.
+// always map any given key to the same primary node, exercising ring determinism.
 func TestE2ERingConvergence(t *testing.T) {
 	srv1 := newNamedTestServer(t, "node1")
 	srv2 := newNamedTestServer(t, "node2")
@@ -384,43 +388,6 @@ func TestE2EGossipMembershipPropagates(t *testing.T) {
 	}
 }
 
-// TestE2EPeerRouting verifies that a key lookup on a server that does not own
-// the key is transparently proxied to the peer that does.
-func TestE2EPeerRouting(t *testing.T) {
-	srv1 := newNamedTestServer(t, "srv1")
-	srv2 := newNamedTestServer(t, "srv2")
-	srv2Addr := serverAddress(srv2)
-
-	// Register srv2 in srv1's ring. srv1 does not register itself, so any key
-	// lookup will route to srv2.
-	r1 := postNode(t, fmt.Sprintf("%s/nodes", srv1.URL),
-		fmt.Sprintf(`{"id": "srv2", "address": "%s"}`, srv2Addr))
-	defer closeBody(t, r1)
-
-	// Register srv2 in its own ring so it can serve requests directly.
-	r2 := postNode(t, fmt.Sprintf("%s/nodes", srv2.URL),
-		fmt.Sprintf(`{"id": "srv2", "address": "%s"}`, srv2Addr))
-	defer closeBody(t, r2)
-
-	// Any key lookup on srv1 must proxy to srv2 and return srv2's node.
-	resp, err := http.Get(fmt.Sprintf("%s/keys/anykey", srv1.URL))
-	if err != nil {
-		t.Fatalf("failed to get node: %v", err)
-	}
-	defer closeBody(t, resp)
-
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200, got %d", resp.StatusCode)
-	}
-
-	var node NodeResponse
-	if err := json.NewDecoder(resp.Body).Decode(&node); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-	if node.ID != "srv2" {
-		t.Errorf("expected srv2, got %s", node.ID)
-	}
-}
 
 // TestE2EWriteAndRead verifies that a PUT stores a value that a subsequent GET
 // returns on the same node.
@@ -517,5 +484,155 @@ func TestE2EReplicationFanOut(t *testing.T) {
 		if node.Value != "replicated" {
 			t.Errorf("srv %s: expected value 'replicated', got %q", srv.URL, node.Value)
 		}
+	}
+}
+
+// TestE2EQuorumWriteSuccess verifies that a write with quorum=2 waits for
+// acknowledgment from both nodes before returning 204, so both nodes have
+// the value without needing a sleep.
+func TestE2EQuorumWriteSuccess(t *testing.T) {
+	srv1 := newNamedTestServerQ(t, "node1", 2, 2, 1)
+	srv2 := newNamedTestServerQ(t, "node2", 2, 2, 1)
+	addr1 := serverAddress(srv1)
+	addr2 := serverAddress(srv2)
+
+	for _, srv := range []*httptest.Server{srv1, srv2} {
+		r1 := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), fmt.Sprintf(`{"id": "node1", "address": "%s"}`, addr1))
+		defer closeBody(t, r1)
+		r2 := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), fmt.Sprintf(`{"id": "node2", "address": "%s"}`, addr2))
+		defer closeBody(t, r2)
+	}
+
+	body := `{"value": "quorum-value"}`
+	req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("%s/keys/qkey", srv1.URL), bytes.NewBufferString(body))
+	if err != nil {
+		t.Fatalf("failed to create PUT request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	putResp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT failed: %v", err)
+	}
+	defer closeBody(t, putResp)
+	if putResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", putResp.StatusCode)
+	}
+
+	// No sleep needed: quorum=2 means PUT only returned after srv2 ack'd.
+	for _, srv := range []*httptest.Server{srv1, srv2} {
+		getResp, err := http.Get(fmt.Sprintf("%s/keys/qkey", srv.URL))
+		if err != nil {
+			t.Fatalf("GET failed: %v", err)
+		}
+		defer closeBody(t, getResp)
+		var node NodeResponse
+		if err := json.NewDecoder(getResp.Body).Decode(&node); err != nil {
+			t.Fatalf("failed to decode: %v", err)
+		}
+		if node.Value != "quorum-value" {
+			t.Errorf("srv %s: expected 'quorum-value', got %q", srv.URL, node.Value)
+		}
+	}
+}
+
+// TestE2EQuorumWriteFailure verifies that a write returns 503 when a required
+// replica is unreachable and quorum cannot be met.
+func TestE2EQuorumWriteFailure(t *testing.T) {
+	srv := newNamedTestServerQ(t, "node1", 2, 2, 1)
+	addr1 := serverAddress(srv)
+
+	r1 := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), fmt.Sprintf(`{"id": "node1", "address": "%s"}`, addr1))
+	defer closeBody(t, r1)
+	// Register a second node that is unreachable.
+	r2 := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), `{"id": "node2", "address": "localhost:19999"}`)
+	defer closeBody(t, r2)
+
+	body := `{"value": "should-fail"}`
+	req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("%s/keys/fkey", srv.URL), bytes.NewBufferString(body))
+	if err != nil {
+		t.Fatalf("failed to create PUT request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	putResp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT failed: %v", err)
+	}
+	defer closeBody(t, putResp)
+	if putResp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 when quorum unreachable, got %d", putResp.StatusCode)
+	}
+}
+
+// TestE2EConsistentRead verifies that a read with quorum=2 returns the entry
+// with the highest vector clock when replicas hold different versions.
+func TestE2EConsistentRead(t *testing.T) {
+	srv1 := newNamedTestServerQ(t, "node1", 2, 1, 2)
+	srv2 := newNamedTestServerQ(t, "node2", 2, 1, 2)
+	addr1 := serverAddress(srv1)
+	addr2 := serverAddress(srv2)
+
+	for _, srv := range []*httptest.Server{srv1, srv2} {
+		r1 := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), fmt.Sprintf(`{"id": "node1", "address": "%s"}`, addr1))
+		defer closeBody(t, r1)
+		r2 := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), fmt.Sprintf(`{"id": "node2", "address": "%s"}`, addr2))
+		defer closeBody(t, r2)
+	}
+
+	// Seed node1 with an older version via a replica write (bypasses fan-out).
+	seedWrite := func(t *testing.T, srvURL, value, clocksJSON string) {
+		t.Helper()
+		body := fmt.Sprintf(`{"value": %q, "clocks": %s}`, value, clocksJSON)
+		req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("%s/keys/ck", srvURL), strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("failed to create request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Proxied-From", "test")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("seed write failed: %v", err)
+		}
+		defer closeBody(t, resp)
+	}
+
+	seedWrite(t, srv1.URL, "old", `{"node1": 1}`)
+	seedWrite(t, srv2.URL, "new", `{"node1": 1, "node2": 1}`)
+
+	// Consistent read from node1 should return the newer value from node2.
+	getResp, err := http.Get(fmt.Sprintf("%s/keys/ck", srv1.URL))
+	if err != nil {
+		t.Fatalf("GET failed: %v", err)
+	}
+	defer closeBody(t, getResp)
+	if getResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", getResp.StatusCode)
+	}
+	var node NodeResponse
+	if err := json.NewDecoder(getResp.Body).Decode(&node); err != nil {
+		t.Fatalf("failed to decode: %v", err)
+	}
+	if node.Value != "new" {
+		t.Errorf("expected 'new' (highest clock), got %q", node.Value)
+	}
+}
+
+// TestE2EReadQuorumFailure verifies that a read returns 503 when a required
+// replica is unreachable and read quorum cannot be met.
+func TestE2EReadQuorumFailure(t *testing.T) {
+	srv := newNamedTestServerQ(t, "node1", 2, 1, 2)
+	addr1 := serverAddress(srv)
+
+	r1 := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), fmt.Sprintf(`{"id": "node1", "address": "%s"}`, addr1))
+	defer closeBody(t, r1)
+	r2 := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), `{"id": "node2", "address": "localhost:19999"}`)
+	defer closeBody(t, r2)
+
+	getResp, err := http.Get(fmt.Sprintf("%s/keys/rqkey", srv.URL))
+	if err != nil {
+		t.Fatalf("GET failed: %v", err)
+	}
+	defer closeBody(t, getResp)
+	if getResp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 when read quorum unreachable, got %d", getResp.StatusCode)
 	}
 }

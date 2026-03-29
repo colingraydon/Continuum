@@ -27,7 +27,7 @@ func TestRoutes(t *testing.T) {
 	}
 	defer transport.Stop()
 	g := gossip.NewGossiper("self", "0", ml, transport)
-	srv := NewServer(r, ml, g, store.New(), "self", 3)
+	srv := NewServer(r, ml, g, store.New(), "self", 3, 1, 1)
 
 	tests := []struct {
 		name   string

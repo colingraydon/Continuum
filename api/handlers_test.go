@@ -36,7 +36,7 @@ func newTestGossiper(t *testing.T, ml *gossip.MemberList) *gossip.Gossiper {
 func newTestHandler(t *testing.T) *Handler {
 	r := ring.NewRing(10)
 	ml := newTestMemberList(r)
-	return NewHandler(r, ml, newTestGossiper(t, ml), store.New(), "self", 3)
+	return NewHandler(r, ml, newTestGossiper(t, ml), store.New(), "self", 3, 1, 1)
 }
 
 func TestAddNode(t *testing.T) {
