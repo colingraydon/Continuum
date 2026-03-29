@@ -47,12 +47,21 @@ type AddNodeRequest struct {
 	Address string `json:"address"`
 }
 
+// SiblingResponse is a single causally-distinct value returned when concurrent
+// writes exist for a key. Clients should resolve the conflict and write back
+// a new value with a clock that dominates all siblings.
+type SiblingResponse struct {
+	Value  string            `json:"value"`
+	Clocks map[string]uint64 `json:"clocks"`
+}
+
 type NodeResponse struct {
-	ID      string            `json:"id"`
-	Address string            `json:"address"`
-	Status  string            `json:"status"`
-	Value   string            `json:"value,omitempty"`
-	Clocks  map[string]uint64 `json:"clocks,omitempty"`
+	ID       string            `json:"id"`
+	Address  string            `json:"address"`
+	Status   string            `json:"status"`
+	Value    string            `json:"value,omitempty"`
+	Siblings []SiblingResponse `json:"siblings,omitempty"`
+	Clocks   map[string]uint64 `json:"clocks,omitempty"`
 }
 
 type PutKeyRequest struct {
@@ -80,6 +89,89 @@ func (h *Handler) nodeStatus(id string) string {
 		return "unknown"
 	}
 	return m.Status.String()
+}
+
+// entryToResponse converts a store entry to a NodeResponse, surfacing siblings
+// when concurrent writes exist.
+func entryToResponse(id, status string, entry store.Entry) NodeResponse {
+	r := NodeResponse{ID: id, Status: status}
+	switch len(entry.Siblings) {
+	case 1:
+		r.Value = entry.Siblings[0].Value
+		r.Clocks = entry.Siblings[0].Version.Clocks
+	default:
+		for _, sib := range entry.Siblings {
+			r.Siblings = append(r.Siblings, SiblingResponse{
+				Value:  sib.Value,
+				Clocks: sib.Version.Clocks,
+			})
+		}
+	}
+	return r
+}
+
+// mergeResponses merges sibling sets from multiple replica responses into a
+// single canonical result. Entries dominated by a higher-clock sibling are
+// dropped; genuinely concurrent entries are preserved as siblings.
+func mergeResponses(responses []NodeResponse) (value string, siblings []SiblingResponse) {
+	type candidate struct {
+		value  string
+		clocks map[string]uint64
+	}
+
+	// Flatten all (value, clock) pairs across every replica response.
+	var all []candidate
+	for _, r := range responses {
+		if len(r.Siblings) > 0 {
+			for _, s := range r.Siblings {
+				all = append(all, candidate{s.Value, s.Clocks})
+			}
+		} else if r.Value != "" {
+			all = append(all, candidate{r.Value, r.Clocks})
+		}
+	}
+
+	if len(all) == 0 {
+		return "", nil
+	}
+
+	// Retain only non-dominated, deduplicated candidates.
+	var survivors []candidate
+	for i, c := range all {
+		cv := store.VectorClockVersion{Clocks: c.clocks}
+		dominated := false
+		for j, other := range all {
+			if i == j {
+				continue
+			}
+			if cv.HappensBefore(store.VectorClockVersion{Clocks: other.clocks}) {
+				dominated = true
+				break
+			}
+		}
+		if dominated {
+			continue
+		}
+		dup := false
+		for _, s := range survivors {
+			if cv.Equal(store.VectorClockVersion{Clocks: s.clocks}) {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			survivors = append(survivors, c)
+		}
+	}
+
+	if len(survivors) == 1 {
+		return survivors[0].value, nil
+	}
+	var sibs []SiblingResponse
+	for _, s := range survivors {
+		sibs = append(sibs, SiblingResponse{Value: s.value, Clocks: s.clocks})
+	}
+	return "", sibs
 }
 
 func (h *Handler) AddNode(w http.ResponseWriter, req *http.Request) {
@@ -133,15 +225,12 @@ func (h *Handler) GetNode(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Replica sub-read: return local entry with vector clock so the coordinator
-	// can pick the entry with the highest clock across R replicas.
+	// Replica sub-read: return local entry (including any siblings) so the
+	// coordinator can merge sibling sets across R replicas.
 	if req.Header.Get("X-Proxied-From") != "" {
 		resp := NodeResponse{ID: h.selfID, Status: h.nodeStatus(h.selfID)}
 		if entry, ok := h.store.Get(key); ok {
-			resp.Value = entry.Value
-			if vc, ok := entry.Version.(store.VectorClockVersion); ok {
-				resp.Clocks = vc.Clocks
-			}
+			resp = entryToResponse(h.selfID, h.nodeStatus(h.selfID), entry)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
@@ -150,8 +239,8 @@ func (h *Handler) GetNode(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Consistent read: fan out to the replica set and return the entry with the
-	// highest vector clock across R responses.
+	// Consistent read: fan out to the replica set, merge sibling sets, and
+	// return the canonical result — either a single value or a siblings list.
 	nodes := h.ring.GetReplicationNodes(key, h.replicationFactor)
 	if len(nodes) == 0 {
 		http.Error(w, "no nodes available", http.StatusServiceUnavailable)
@@ -175,10 +264,7 @@ func (h *Handler) GetNode(w http.ResponseWriter, req *http.Request) {
 			if node.ID == h.selfID {
 				r := NodeResponse{ID: h.selfID, Status: h.nodeStatus(h.selfID)}
 				if entry, ok := h.store.Get(key); ok {
-					r.Value = entry.Value
-					if vc, ok2 := entry.Version.(store.VectorClockVersion); ok2 {
-						r.Clocks = vc.Clocks
-					}
+					r = entryToResponse(h.selfID, h.nodeStatus(h.selfID), entry)
 				}
 				results <- replicaResult{resp: r}
 			} else {
@@ -204,18 +290,14 @@ func (h *Handler) GetNode(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	best := responses[0]
-	for _, r := range responses[1:] {
-		best = latestEntry(best, r)
-	}
-
-	// Return primary replica metadata with the best value found across replicas.
+	value, siblings := mergeResponses(responses)
 	primary := nodes[0]
 	resp := NodeResponse{
-		ID:      primary.ID,
-		Address: primary.Address,
-		Status:  h.nodeStatus(primary.ID),
-		Value:   best.Value,
+		ID:       primary.ID,
+		Address:  primary.Address,
+		Status:   h.nodeStatus(primary.ID),
+		Value:    value,
+		Siblings: siblings,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
@@ -279,7 +361,7 @@ func (h *Handler) PutKey(w http.ResponseWriter, req *http.Request) {
 		}(n.Address)
 	}
 
-	for i := 0; i < pending; i++ {
+	for range pending {
 		r := <-results
 		if r.err == nil {
 			acks++
@@ -321,7 +403,7 @@ func (h *Handler) replicateToSync(address, key, value string, clocks map[string]
 }
 
 // readFromReplica fetches the local entry for key from a replica node. The
-// response includes the vector clock so the coordinator can compare versions.
+// response includes the vector clock so the coordinator can merge versions.
 func (h *Handler) readFromReplica(address, key string) (NodeResponse, error) {
 	req, err := http.NewRequest(http.MethodGet, "http://"+address+"/keys/"+key, nil)
 	if err != nil {
@@ -338,31 +420,6 @@ func (h *Handler) readFromReplica(address, key string) (NodeResponse, error) {
 		return NodeResponse{}, err
 	}
 	return nr, nil
-}
-
-// latestEntry returns whichever of a or b has the higher vector clock.
-// If the clocks are concurrent (neither happens-before the other), the entry
-// with the larger clock sum is preferred as a best-effort tiebreak.
-func latestEntry(a, b NodeResponse) NodeResponse {
-	av := store.VectorClockVersion{Clocks: a.Clocks}
-	bv := store.VectorClockVersion{Clocks: b.Clocks}
-	if av.HappensBefore(bv) {
-		return b
-	}
-	if bv.HappensBefore(av) {
-		return a
-	}
-	var aSum, bSum uint64
-	for _, v := range a.Clocks {
-		aSum += v
-	}
-	for _, v := range b.Clocks {
-		bSum += v
-	}
-	if bSum > aSum {
-		return b
-	}
-	return a
 }
 
 func (h *Handler) GetStats(w http.ResponseWriter, req *http.Request) {

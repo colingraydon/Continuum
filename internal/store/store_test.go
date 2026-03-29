@@ -17,10 +17,13 @@ func TestPutAndGet(t *testing.T) {
 	if !ok {
 		t.Fatal("expected entry to exist")
 	}
-	if e.Value != "v" {
-		t.Errorf("expected 'v', got %q", e.Value)
+	if len(e.Siblings) != 1 {
+		t.Fatalf("expected 1 sibling, got %d", len(e.Siblings))
 	}
-	if e.Hash == 0 {
+	if e.Siblings[0].Value != "v" {
+		t.Errorf("expected 'v', got %q", e.Siblings[0].Value)
+	}
+	if e.Siblings[0].Hash == 0 {
 		t.Error("expected non-zero hash")
 	}
 }
@@ -39,8 +42,11 @@ func TestNewerClockWins(t *testing.T) {
 	s.Put("k", "new", clock(map[string]uint64{"node1": 2}))
 
 	e, _ := s.Get("k")
-	if e.Value != "new" {
-		t.Errorf("expected 'new', got %q", e.Value)
+	if len(e.Siblings) != 1 {
+		t.Fatalf("expected 1 sibling, got %d", len(e.Siblings))
+	}
+	if e.Siblings[0].Value != "new" {
+		t.Errorf("expected 'new', got %q", e.Siblings[0].Value)
 	}
 }
 
@@ -50,31 +56,58 @@ func TestOlderClockDropped(t *testing.T) {
 	s.Put("k", "old", clock(map[string]uint64{"node1": 1}))
 
 	e, _ := s.Get("k")
-	if e.Value != "new" {
-		t.Errorf("expected 'new' to win, got %q", e.Value)
+	if len(e.Siblings) != 1 {
+		t.Fatalf("expected 1 sibling, got %d", len(e.Siblings))
+	}
+	if e.Siblings[0].Value != "new" {
+		t.Errorf("expected 'new' to win, got %q", e.Siblings[0].Value)
 	}
 }
 
-func TestConcurrentClocksKeepExisting(t *testing.T) {
+func TestConcurrentClocksAreSiblings(t *testing.T) {
 	s := New()
-	// node1 and node2 each wrote independently — neither happens-before the other
+	// node1 and node2 each wrote independently — neither happens-before the other.
 	s.Put("k", "first", clock(map[string]uint64{"node1": 1}))
 	s.Put("k", "second", clock(map[string]uint64{"node2": 1}))
 
 	e, _ := s.Get("k")
-	if e.Value != "first" {
-		t.Errorf("expected 'first' to hold on concurrent writes, got %q", e.Value)
+	if len(e.Siblings) != 2 {
+		t.Fatalf("expected 2 siblings for concurrent writes, got %d", len(e.Siblings))
+	}
+	values := map[string]bool{e.Siblings[0].Value: true, e.Siblings[1].Value: true}
+	if !values["first"] || !values["second"] {
+		t.Errorf("expected siblings to contain both 'first' and 'second', got %v", values)
 	}
 }
 
-func TestEqualClocksKeepExisting(t *testing.T) {
+func TestDominatingWriteResolvesSiblings(t *testing.T) {
+	s := New()
+	// Create siblings via concurrent writes.
+	s.Put("k", "first", clock(map[string]uint64{"node1": 1}))
+	s.Put("k", "second", clock(map[string]uint64{"node2": 1}))
+	// A write whose clock dominates both siblings resolves the conflict.
+	s.Put("k", "resolved", clock(map[string]uint64{"node1": 1, "node2": 1}))
+
+	e, _ := s.Get("k")
+	if len(e.Siblings) != 1 {
+		t.Fatalf("expected 1 sibling after resolution, got %d", len(e.Siblings))
+	}
+	if e.Siblings[0].Value != "resolved" {
+		t.Errorf("expected 'resolved', got %q", e.Siblings[0].Value)
+	}
+}
+
+func TestEqualClocksAreIdempotent(t *testing.T) {
 	s := New()
 	s.Put("k", "first", clock(map[string]uint64{"node1": 1}))
 	s.Put("k", "second", clock(map[string]uint64{"node1": 1}))
 
 	e, _ := s.Get("k")
-	if e.Value != "first" {
-		t.Errorf("expected 'first' to hold on equal clocks, got %q", e.Value)
+	if len(e.Siblings) != 1 {
+		t.Fatalf("expected 1 sibling for equal clocks, got %d", len(e.Siblings))
+	}
+	if e.Siblings[0].Value != "first" {
+		t.Errorf("expected 'first' to be unchanged, got %q", e.Siblings[0].Value)
 	}
 }
 
@@ -87,8 +120,8 @@ func TestHashDeterministic(t *testing.T) {
 	s2.Put("k", "v", NewClock().Increment("node1").Increment("node1"))
 	e2, _ := s2.Get("k")
 
-	if e1.Hash != e2.Hash {
-		t.Errorf("hash should depend only on value, got %d vs %d", e1.Hash, e2.Hash)
+	if e1.Siblings[0].Hash != e2.Siblings[0].Hash {
+		t.Errorf("hash should depend only on value, got %d vs %d", e1.Siblings[0].Hash, e2.Siblings[0].Hash)
 	}
 }
 
@@ -100,15 +133,15 @@ func TestHashDiffersForDifferentValues(t *testing.T) {
 
 	ea, _ := s.Get("a")
 	eb, _ := s.Get("b")
-	if ea.Hash == eb.Hash {
+	if ea.Siblings[0].Hash == eb.Siblings[0].Hash {
 		t.Error("expected different hashes for different values")
 	}
 }
 
 func TestHappensBefore(t *testing.T) {
 	cases := []struct {
-		name   string
-		a, b   VectorClockVersion
+		name     string
+		a, b     VectorClockVersion
 		aBeforeB bool
 		bBeforeA bool
 	}{
@@ -156,6 +189,26 @@ func TestHappensBefore(t *testing.T) {
 			}
 			if got := tc.b.HappensBefore(tc.a); got != tc.bBeforeA {
 				t.Errorf("b.HappensBefore(a): expected %v, got %v", tc.bBeforeA, got)
+			}
+		})
+	}
+}
+
+func TestEqual(t *testing.T) {
+	cases := []struct {
+		name string
+		a, b VectorClockVersion
+		want bool
+	}{
+		{"identical", clock(map[string]uint64{"n1": 1}), clock(map[string]uint64{"n1": 1}), true},
+		{"different value", clock(map[string]uint64{"n1": 1}), clock(map[string]uint64{"n1": 2}), false},
+		{"different keys", clock(map[string]uint64{"n1": 1}), clock(map[string]uint64{"n2": 1}), false},
+		{"both empty", NewClock(), NewClock(), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.a.Equal(tc.b); got != tc.want {
+				t.Errorf("Equal: expected %v, got %v", tc.want, got)
 			}
 		})
 	}

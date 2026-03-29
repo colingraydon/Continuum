@@ -86,13 +86,19 @@ Each write carries a vector clock — a map from node ID to a logical counter. T
 
 This clock means: node1 has coordinated 3 writes, node2 has coordinated 1, and any replica that received all of them would accept this as the current version.
 
-**Conflict resolution** uses the standard partial order:
+**Conflict detection** uses the standard partial order:
 
-- Clock A **happens-before** B if every counter in A is ≤ B's and at least one is strictly less → B wins
-- **Concurrent** clocks (neither happens-before the other) → existing value is kept
-- **Equal** clocks → existing value is kept
+- Clock A **happens-before** B if every counter in A is ≤ B's and at least one is strictly less → B wins, A is dropped
+- **Concurrent** clocks (neither happens-before the other) → both values are kept as **siblings** and returned on the next read
+- **Equal** clocks → idempotent write, no change
 
-The `Version` interface (`HappensBefore(other Version) bool`) is the only contract the store depends on. Swapping in a different conflict resolution strategy — or surfacing concurrent writes to the client as siblings — requires only a new type implementing that interface.
+When siblings are present, the read response contains a `siblings` array instead of a single `value`. A subsequent write whose clock dominates all sibling clocks resolves the conflict.
+
+### Siblings vs. last-write-wins
+
+The alternative to sibling surfacing is last-write-wins (LWW): on concurrent writes, keep the value with the highest timestamp and silently discard the other. Cassandra uses LWW by default. It is simple and produces no conflicts visible to the client, but it loses writes — if two clients update the same key concurrently, one update disappears with no indication that it happened.
+
+Sibling surfacing (this system, Riak, Dynamo) never discards a write silently. Concurrent writes are preserved and the conflict is made visible. The tradeoff is that reads can return multiple values, and the application must know what to do with them — merge two shopping carts by union, pick the higher counter, defer to a CRDT, or surface the conflict to a user. This pushes complexity to the application layer, which is where the semantics to resolve it correctly live.
 
 ---
 
@@ -168,7 +174,7 @@ The ring is a pure routing layer — it has no opinion on membership. All ring m
 
 ### Vector clocks over LWW timestamps
 
-Last-write-wins timestamps are simple but lose writes silently when two clients write to the same key concurrently. Vector clocks track causality per-node, so concurrent writes are detectable rather than silently resolved by wall clock. The `Version` interface means the conflict strategy is swappable — the store has no dependency on the specific implementation.
+Last-write-wins timestamps are simple but lose writes silently when two clients write to the same key concurrently. Vector clocks track causality per-node, so concurrent writes are detectable rather than silently discarded. When concurrency is detected, both values are preserved as siblings and returned to the reader — no write is lost, and the application can resolve the conflict with full information.
 
 ### Precomputed value hashes
 
@@ -387,7 +393,6 @@ make coverage  # generate coverage report
 
 ## What's Next
 
-- **Conflict surfacing** — return concurrent writes as siblings rather than silently keeping the existing value
 - **Merkle anti-entropy** — use precomputed value hashes to efficiently detect and repair divergent replicas
 - **Graceful shutdown** — drain in-flight requests and gossip `MemberDead` for self before exit
 - **Persistence** — snapshot ring and KV state to disk on shutdown, reload on startup
