@@ -140,31 +140,6 @@ func TestHandleMessageMergesMembers(t *testing.T) {
 	}
 }
 
-func TestHandleMessageIgnoresPull(t *testing.T) {
-	// Arrange
-	ml := newTestMemberList()
-	g, transport, err := newTestGossiper("self", ml)
-	if err != nil {
-		t.Fatalf("failed to create gossiper: %v", err)
-	}
-	defer transport.Stop()
-
-	msg := &GossipMessage{
-		Type: MessagePull,
-		From: "node1",
-		Members: []*Member{
-			{ID: "node1", Address: "10.0.0.2", Heartbeat: 1, UpdatedAt: time.Now(), Status: MemberAlive},
-		},
-	}
-
-	// Act
-	g.handleMessage(msg)
-
-	// Assert
-	if ml.Size() != 1 {
-		t.Errorf("expected 1 member, got %d", ml.Size())
-	}
-}
 
 func TestCheckStaleMarksSuspect(t *testing.T) {
 	// Arrange

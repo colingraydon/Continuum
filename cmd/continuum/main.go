@@ -11,14 +11,16 @@ import (
 	"github.com/colingraydon/continuum/api"
 	"github.com/colingraydon/continuum/internal/gossip"
 	"github.com/colingraydon/continuum/internal/ring"
+	"github.com/colingraydon/continuum/internal/store"
 )
 
 type config struct {
-	replicas    int
-	selfID      string
-	selfAddress string
-	gossipPort  string
-	seedNodes   []string
+	replicas          int
+	replicationFactor int
+	selfID            string
+	selfAddress       string
+	gossipPort        string
+	seedNodes         []string
 }
 
 func loadConfig() config {
@@ -26,6 +28,13 @@ func loadConfig() config {
 	if val := os.Getenv("REPLICAS"); val != "" {
 		if parsed, err := strconv.Atoi(val); err == nil {
 			replicas = parsed
+		}
+	}
+
+	replicationFactor := 3
+	if val := os.Getenv("REPLICATION_FACTOR"); val != "" {
+		if parsed, err := strconv.Atoi(val); err == nil {
+			replicationFactor = parsed
 		}
 	}
 
@@ -50,11 +59,12 @@ func loadConfig() config {
 	}
 
 	return config{
-		replicas:    replicas,
-		selfID:      selfID,
-		selfAddress: selfAddress,
-		gossipPort:  gossipPort,
-		seedNodes:   seedNodes,
+		replicas:          replicas,
+		replicationFactor: replicationFactor,
+		selfID:            selfID,
+		selfAddress:       selfAddress,
+		gossipPort:        gossipPort,
+		seedNodes:         seedNodes,
 	}
 }
 
@@ -102,7 +112,8 @@ func main() {
 	// add self to ring
 	r.AddNode(cfg.selfID, cfg.selfAddress)
 
-	mux := api.NewServer(r, ml, g, cfg.selfID)
+	s := store.New()
+	mux := api.NewServer(r, ml, g, s, cfg.selfID, cfg.replicationFactor)
 	log.Printf("starting server on :8080 (gossip on :%s) as %s", cfg.gossipPort, cfg.selfID)
 	if err := http.ListenAndServe(":8080", mux); err != nil {
 		log.Fatalf("server failed to start: %v", err)

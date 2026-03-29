@@ -1,28 +1,31 @@
 # Continuum
 
-A distributed consistent hashing ring with virtual nodes and gossip-based peer discovery, built in Go.
+A distributed key-value store built on consistent hashing, gossip-based membership, and vector clock conflict resolution — written in Go.
 
-Continuum implements the core data routing layer used in distributed systems like Cassandra and DynamoDB - a hash ring that maps keys to nodes with minimal key movement when the cluster topology changes. Nodes discover each other via a gossip protocol, converge on ring state without a central coordinator, and route requests to the correct peer when a key lookup arrives at the wrong node. It exposes an HTTP API, Prometheus metrics, and a Grafana dashboard out of the box.
+Continuum implements the core data layer used in systems like Cassandra and Dynamo: a hash ring that maps keys to nodes with minimal disruption when topology changes, a gossip protocol that propagates membership without a central coordinator, and a replication layer that fans writes out to N nodes and resolves conflicts using vector clocks. It exposes an HTTP API, Prometheus metrics, and a Grafana dashboard out of the box.
 
 ---
 
 ## Architecture
 
-Continuum is organized into four layers:
+Continuum is organized into five layers:
 
 ### Core Ring (`internal/ring`)
-The distributed systems engine. Implements the hash ring with a Red-Black Tree, virtual nodes, murmur3 hashing, and atomic key counters. Has no knowledge of HTTP, gossip, or metrics - it is a pure data routing library. Membership is driven entirely by the gossip layer via callbacks; the ring is never mutated directly.
+The routing engine. Implements the hash ring with a Red-Black Tree, virtual nodes, murmur3 hashing, and atomic key counters. Has no knowledge of HTTP, gossip, or storage — it is a pure routing library. Membership is driven entirely by the gossip layer via callbacks; the ring is never mutated directly.
 
 ### Gossip Protocol (`internal/gossip`)
-Handles cluster membership and failure detection without a central coordinator. Each node maintains a `MemberList` - the single source of truth for membership state. Nodes exchange member lists on a 1-second interval with up to 3 random peers (fanout), propagating membership changes across the cluster in O(log n) rounds.
+Handles cluster membership and failure detection without a central coordinator. Each node maintains a `MemberList` — the single source of truth for membership state. Nodes exchange member lists on a 1-second interval with up to 3 random peers (fanout), propagating membership changes across the cluster in O(log n) rounds.
 
-The gossip layer drives the ring: when membership changes (alive, suspect, dead), a callback updates the ring so routing always reflects the current member state.
+The gossip layer drives the ring: when membership changes (alive, suspect, dead), a callback updates the ring so routing always reflects current cluster state.
+
+### KV Store (`internal/store`)
+In-memory key-value storage with vector clock versioning. Each entry holds a value, a `VectorClockVersion`, and a precomputed murmur3 hash of the value (reserved for future Merkle tree anti-entropy). Conflict resolution uses the standard Lamport partial order: a write is accepted only if the existing entry's clock happens-before the incoming one. Concurrent writes keep the existing value.
 
 ### Stats Aggregator (`internal/stats`)
 A composition layer that combines ring statistics (vnode distribution, key counts, variance) with gossip membership status (alive/suspect/dead node counts) into a single unified view. Keeps the ring package free of membership concerns.
 
 ### HTTP API (`api`)
-The transport layer. Exposes ring and gossip operations over HTTP, instruments all requests via Prometheus middleware, and wires the ring, gossip layer, and aggregator together. Handlers are thin - they delegate to the appropriate internal package and serialize the response.
+The transport layer. Exposes ring, gossip, and storage operations over HTTP, instruments all requests via Prometheus middleware, and wires all internal packages together. Handlers are thin — they delegate to the appropriate internal package and serialize the response.
 
 ---
 
@@ -33,8 +36,8 @@ The transport layer. Exposes ring and gossip operations over HTTP, instruments a
 Nodes transition through three states: **alive → suspect → dead**.
 
 - A node is marked **alive** when it joins the cluster (via `POST /nodes` or gossip peer exchange) and its heartbeat is propagating
-- A node is marked **suspect** when its heartbeat hasn't been updated within 5 seconds (`staleThreshold`) - it may be slow or partitioned
-- A node is marked **dead** when it remains suspect past a second stale check - it is removed from the ring and stops receiving traffic
+- A node is marked **suspect** when its heartbeat hasn't been updated within 5 seconds (`staleThreshold`) — it may be slow or partitioned
+- A node is marked **dead** when it remains suspect past a second stale check — it is removed from the ring and stops receiving traffic
 
 Recovery is automatic: if a dead or suspect node starts gossiping again with a higher heartbeat, it transitions back to alive and is re-added to the ring.
 
@@ -42,38 +45,81 @@ Recovery is automatic: if a dead or suspect node starts gossiping again with a h
 
 Each node runs three background loops:
 
-1. **Gossip loop** (1s interval) - increments its own heartbeat, selects up to 3 random alive peers, and pushes its full member list to each. A new member propagates to the full cluster in O(log n) rounds.
-2. **Receive loop** - handles incoming gossip messages. Merges the peer's member list using a last-write-wins strategy based on heartbeat: a member update is only accepted if the incoming heartbeat is strictly higher than what's known locally.
-3. **Stale loop** (1s interval) - checks every non-self member's `UpdatedAt` timestamp. Members not heard from in 5 seconds transition suspect → dead.
+1. **Gossip loop** (1s interval) — increments its own heartbeat, selects up to 3 random alive peers, and pushes its full member list to each. A new member propagates to the full cluster in O(log n) rounds.
+2. **Receive loop** — handles incoming gossip messages. Merges the peer's member list using a last-write-wins strategy based on heartbeat: a member update is only accepted if the incoming heartbeat is strictly higher than what's known locally.
+3. **Stale loop** (1s interval) — checks every non-self member's `UpdatedAt` timestamp. Members not heard from in 5 seconds transition alive → suspect → dead.
 
 ### Bootstrapping
 
 New nodes specify one or more seed nodes via the `SEED_NODES` environment variable. On startup, the node sends its member list to each seed, which triggers a gossip exchange. Within a few seconds the new node's membership has propagated to the full cluster.
 
+---
+
+## Replication
+
+When a write arrives at any node, it:
+
+1. Determines the replica set for the key using `GetReplicationNodes(key, factor)` — the N consecutive distinct nodes clockwise from the key's ring position
+2. Increments its own vector clock counter and stores the value locally
+3. Fans out the write to all other replicas in parallel (fire-and-forget), forwarding the incremented clock
+
+Replica nodes store the write as-is without further fan-out, identified by the `X-Proxied-From` header.
+
+Replication factor is configured via the `REPLICATION_FACTOR` environment variable (default: 3, capped to node count).
+
 ### Peer routing
 
-When a key lookup (`GET /keys/:key`) arrives at a node that isn't responsible for that key, the request is proxied to the correct peer rather than returning an error. The proxy sets an `X-Proxied-From` header to prevent forwarding loops - a node that receives a proxied request always serves it directly.
+When a key lookup (`GET /keys/:key`) arrives at a node that isn't responsible for that key, the request is proxied to the correct peer rather than returning an error. The proxy sets an `X-Proxied-From` header to prevent forwarding loops.
+
+---
+
+## Vector Clocks
+
+Each write carries a vector clock — a map from node ID to a logical counter. The writing node increments its own counter before storing and replicating.
+
+```json
+{"clocks": {"node1": 3, "node2": 1}}
+```
+
+This clock means: node1 has coordinated 3 writes, node2 has coordinated 1, and any replica that received all of them would accept this as the current version.
+
+**Conflict resolution** uses the standard partial order:
+
+- Clock A **happens-before** B if every counter in A is ≤ B's and at least one is strictly less → B wins
+- **Concurrent** clocks (neither happens-before the other) → existing value is kept
+- **Equal** clocks → existing value is kept
+
+The `Version` interface (`HappensBefore(other Version) bool`) is the only contract the store depends on. Swapping in a different conflict resolution strategy — or surfacing concurrent writes to the client as siblings — requires only a new type implementing that interface.
 
 ---
 
 ## Request flow
 
+A write (`PUT /keys/:key`) flows like this:
+
+1. Request hits `metricsMiddleware` — records latency and request count
+2. `PutKey` handler extracts the key and decodes `{"value": "...", "clocks": {...}}`
+3. Incoming clock is incremented for this node; value is stored in the local `Store`
+4. `ring.GetReplicationNodes(key, factor)` returns the replica set
+5. Goroutines fan the write out to each non-self replica with `X-Proxied-From` set
+6. Returns 204
+
 A key lookup (`GET /keys/:key`) flows like this:
 
-1. Request hits `metricsMiddleware` - records latency and request count
-2. `GetNode` handler extracts the key from the path
-3. `ring.GetNode(key)` hashes the key with murmur3, finds the ceiling vnode in the RBT, increments the atomic key counter, returns the physical node
-4. If the responsible node is not self, the request is proxied to the peer's address
-5. If this node is responsible (or the request was already proxied), the response is serialized with node ID, address, and gossip status
+1. `GetNode` handler extracts the key
+2. `ring.GetNode(key)` hashes with murmur3, finds the ceiling vnode in the RBT, skips unhealthy nodes via health filter, returns the physical node
+3. If the responsible node is not self, the request is proxied to the peer
+4. If this node is responsible, the value is read from the local store and returned alongside the node metadata
 
 ---
 
 ## How key lookup works
 
 1. Hash the key using Murmur3 to get a position on the ring (0 to 2^32)
-2. Find the first virtual node with hash ≥ key hash using a Red-Black Tree ceiling lookup - O(log n)
+2. Find the first virtual node with hash ≥ key hash using a Red-Black Tree ceiling lookup — O(log n)
 3. If no vnode found, wrap around to the first vnode on the ring
-4. Return the physical node that vnode belongs to
+4. If a health filter is set, walk forward skipping dead/suspect nodes
+5. Return the physical node that vnode belongs to
 
 ---
 
@@ -98,7 +144,7 @@ Measured on Apple M3 Max:
 | 150 | 114 ns/op |
 | 500 | 129 ns/op |
 
-Going from 10 to 500 vnodes adds only 33ns to lookup latency - the distribution benefit of more vnodes is essentially free at read time.
+Going from 10 to 500 vnodes adds only 33ns to lookup latency — the distribution benefit of more vnodes is essentially free at read time.
 
 **Concurrent reads vs mixed reads/writes:**
 
@@ -107,7 +153,7 @@ Going from 10 to 500 vnodes adds only 33ns to lookup latency - the distribution 
 | Pure reads | 160 ns/op |
 | Mixed reads + writes | 940 ns/op |
 
-The 6x slowdown on mixed workloads is expected - write lock acquisition blocks concurrent readers. Node changes are rare in production so this tradeoff is acceptable.
+The 6x slowdown on mixed workloads is expected — write lock acquisition blocks concurrent readers. Node changes are rare in production so this tradeoff is acceptable.
 
 ---
 
@@ -115,41 +161,65 @@ The 6x slowdown on mixed workloads is expected - write lock acquisition blocks c
 
 ### MemberList as single source of truth
 
-The ring is a pure routing layer - it has no opinion on membership. All ring mutations flow through a single callback on `MemberList`, so gossip-discovered members, manually registered members (`POST /nodes`), and manually removed members (`DELETE /nodes/:id`) all take the same path. This eliminates the class of bugs where the ring and membership state diverge.
+The ring is a pure routing layer — it has no opinion on membership. All ring mutations flow through a single callback on `MemberList`, so gossip-discovered members, manually registered members (`POST /nodes`), and manually removed members (`DELETE /nodes/:id`) all take the same path. This eliminates the class of bugs where ring and membership state diverge.
+
+### Vector clocks over LWW timestamps
+
+Last-write-wins timestamps are simple but lose writes silently when two clients write to the same key concurrently. Vector clocks track causality per-node, so concurrent writes are detectable rather than silently resolved by wall clock. The `Version` interface means the conflict strategy is swappable — the store has no dependency on the specific implementation.
+
+### Precomputed value hashes
+
+Each store entry carries `Hash uint32` — a murmur3 hash of the value, computed at write time. This is reserved for Merkle tree anti-entropy: when comparing replica state across nodes, leaf hashes let you identify divergent key ranges without transferring values. Computing at write time makes tree construction cheap.
 
 ### Red-Black Tree
 
-The ring uses a Red-Black Tree (via `emirpasic/gods`) to store virtual nodes sorted by hash. This gives O(log n) for insert, delete, and ceiling lookup. A sorted slice would give O(log n) lookup via binary search but O(n) insert/delete due to element shifting. Either works since node changes are rare, but the RBT is more correct under write load and the `Ceiling()` operation maps directly to the ring's successor lookup semantics.
+The ring uses a Red-Black Tree (via `emirpasic/gods`) to store virtual nodes sorted by hash. This gives O(log n) for insert, delete, and ceiling lookup. A sorted slice would give O(log n) lookup via binary search but O(n) insert/delete due to element shifting. The RBT's `Ceiling()` operation also maps directly to the ring's successor lookup semantics.
 
-### Murmur3 Hash Function
+### Murmur3
 
 Murmur3 is faster than cryptographic hashes (MD5, SHA) and has better distribution than FNV-32a for short strings. It's the same hash function Cassandra uses for consistent hashing. Since security is not a requirement here, the non-cryptographic nature is a non-issue.
 
 ### sync.RWMutex
 
-The ring uses `sync.RWMutex` rather than a plain mutex or lock-free structure. `RWMutex` allows unlimited concurrent readers with exclusive writers - correct for a ring where key lookups vastly outnumber topology changes.
+The ring uses `sync.RWMutex` rather than a plain mutex. `RWMutex` allows unlimited concurrent readers with exclusive writers — correct for a ring where key lookups vastly outnumber topology changes.
 
-### Atomic Key Counters
+### Atomic key counters
 
-Per-node key counts use `sync/atomic.Int64` rather than incrementing under the write lock. This keeps `GetNode` on the read lock path so multiple goroutines can look up keys concurrently. Using a write lock for counting would serialize all lookups - a significant regression at high TPS.
+Per-node key counts use `sync/atomic.Int64` rather than incrementing under the write lock. This keeps `GetNode` on the read lock path so multiple goroutines can look up keys concurrently.
 
-### Callback Pattern for Metrics and Ring
+### Callback pattern
 
-The ring accepts a `SetUpdateCallback` rather than importing Prometheus directly, and the gossip `MemberList` accepts an `onChange` callback rather than holding a ring reference. Both keep internal packages free of external dependencies and make the integration points explicit.
-
-### Configurable Replica Count
-
-Replica count is read from the `REPLICAS` environment variable with a default of 150.
+The ring accepts a `SetUpdateCallback` rather than importing Prometheus directly, and the gossip `MemberList` accepts an `onChange` callback rather than holding a ring reference. Both keep internal packages free of external dependencies and make integration points explicit.
 
 ---
 
 ## API
 
+### Write a value
+```bash
+curl -X PUT http://localhost:8080/keys/user:123 \
+  -H "Content-Type: application/json" \
+  -d '{"value": "alice"}'
+```
+
+Returns 204. The write is stored locally and fanned out to all replica nodes. An optional `clocks` field can be passed to forward an existing vector clock; if omitted, the receiving node's clock is used as the base.
+
+### Read a value
+```bash
+curl http://localhost:8080/keys/user:123
+```
+
+Returns the responsible node and the stored value (if present). If this node is not responsible, the request is automatically proxied to the correct peer.
+
+```json
+{"id": "node2", "address": "10.0.0.2:8080", "status": "alive", "value": "alice"}
+```
+
 ### Add a node
 ```bash
 curl -X POST http://localhost:8080/nodes \
   -H "Content-Type: application/json" \
-  -d '{"id": "node1", "address": "10.0.0.1"}'
+  -d '{"id": "node1", "address": "10.0.0.1:8080"}'
 ```
 
 ### Remove a node
@@ -162,23 +232,14 @@ curl -X DELETE http://localhost:8080/nodes/node1
 curl http://localhost:8080/nodes
 ```
 
-### Look up a key
-```bash
-curl http://localhost:8080/keys/user:123
-```
-
-Returns the node responsible for the key. If this node is not responsible, the request is automatically proxied to the correct peer.
-
-```json
-{"id": "node2", "address": "10.0.0.2", "status": "alive"}
-```
-
 ### Get replication nodes
 ```bash
 curl -X POST http://localhost:8080/replicate \
   -H "Content-Type: application/json" \
   -d '{"key": "user:123", "factor": 3}'
 ```
+
+Returns the N nodes that own replicas of this key — useful for topology inspection.
 
 ### Health check
 ```bash
@@ -195,8 +256,6 @@ curl http://localhost:8080/health
 }
 ```
 
-Node status reflects gossip membership state: `healthy_nodes` are alive per gossip, `suspect_nodes` haven't been heard from recently, `dead_nodes` have been removed from the ring.
-
 ### Get ring stats
 ```bash
 curl http://localhost:8080/stats
@@ -212,7 +271,7 @@ curl http://localhost:8080/stats
   "distribution": [
     {
       "node_id": "node1",
-      "address": "10.0.0.1",
+      "address": "10.0.0.1:8080",
       "vnode_count": 150,
       "key_count": 342,
       "percentage": 34.20
@@ -231,7 +290,7 @@ curl -X POST http://localhost:8080/gossip \
   -d '{"members": [...]}'
 ```
 
-Used internally by the gossip protocol. Merges the provided member list into this node's view and returns the node's current member list.
+Used internally by the gossip protocol. Merges the provided member list and returns this node's current view.
 
 ### Prometheus metrics
 ```bash
@@ -275,6 +334,19 @@ In Grafana, add `http://prometheus:9090` as a Prometheus data source and query:
 
 ---
 
+## Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `SELF_ID` | `SELF_ADDRESS` | Node identifier |
+| `SELF_ADDRESS` | `localhost:8080` | HTTP address including port |
+| `GOSSIP_PORT` | `8081` | UDP port for gossip |
+| `REPLICAS` | `150` | Virtual nodes per physical node |
+| `REPLICATION_FACTOR` | `3` | Number of replicas per key |
+| `SEED_NODES` | — | Comma-separated HTTP addresses to bootstrap from |
+
+---
+
 ## Development
 
 ```bash
@@ -310,7 +382,11 @@ make coverage  # generate coverage report
 
 ## What's Next
 
-- **Architecture Diagram** - use Lucid to generate an architectural diagram for the readme
-- **Persistence** - ring state survives restarts via a simple JSON snapshot on shutdown and reload on startup
-- **Weighted nodes** - nodes with higher capacity receive proportionally more vnodes, allowing heterogeneous clusters
-- **Suspect-aware routing** - exclude suspect nodes from key routing in addition to dead nodes, with configurable fallback behavior
+- **Quorum writes** — wait for W replica acknowledgments before returning 204; configurable consistency level
+- **Consistent reads** — read from R replicas and return the value with the highest vector clock
+- **Conflict surfacing** — return concurrent writes as siblings rather than silently keeping the existing value
+- **Merkle anti-entropy** — use precomputed value hashes to efficiently detect and repair divergent replicas
+- **Graceful shutdown** — drain in-flight requests and gossip `MemberDead` for self before exit
+- **Persistence** — snapshot ring and KV state to disk on shutdown, reload on startup
+- **Weighted vnodes** — nodes with higher capacity receive proportionally more vnodes for heterogeneous clusters
+- **Architecture diagram**

@@ -91,7 +91,7 @@ func (g *Gossiper) receiveLoop(ctx context.Context) {
 
 func (g *Gossiper) handleMessage(msg *GossipMessage) {
 	switch msg.Type {
-	case MessagePush, MessagePushPull:
+	case MessagePushPull:
 		g.memberList.Merge(msg.Members)
 	}
 }
