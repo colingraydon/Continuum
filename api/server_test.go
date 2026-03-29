@@ -5,13 +5,28 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/colingraydon/continuum/internal/gossip"
 	"github.com/colingraydon/continuum/internal/ring"
-	"github.com/colingraydon/continuum/internal/health"
 )
 
 func TestRoutes(t *testing.T) {
 	// Arrange
-	srv := NewServer(ring.NewRing(50), health.NewChecker(health.DefaultConfig(), nil))
+	r := ring.NewRing(50)
+	ml := gossip.NewMemberList("self", "localhost", func(m *gossip.Member, status gossip.MemberStatus) {
+		switch status {
+		case gossip.MemberAlive:
+			r.AddNode(m.ID, m.Address)
+		case gossip.MemberDead:
+			r.RemoveNode(m.ID)
+		}
+	})
+	transport, err := gossip.NewTransport("0")
+	if err != nil {
+		t.Fatalf("failed to create transport: %v", err)
+	}
+	defer transport.Stop()
+	g := gossip.NewGossiper("self", "0", ml, transport)
+	srv := NewServer(r, ml, g, "self")
 
 	tests := []struct {
 		name   string
@@ -27,6 +42,7 @@ func TestRoutes(t *testing.T) {
 		{"get stats", http.MethodGet, "/stats", http.StatusOK},
 		{"replicate", http.MethodPost, "/replicate", http.StatusBadRequest},
 		{"health", http.MethodGet, "/health", http.StatusOK},
+		{"gossip", http.MethodPost, "/gossip", http.StatusBadRequest},
 	}
 
 	for _, tt := range tests {

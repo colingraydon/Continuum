@@ -5,24 +5,29 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"io"
 
-	"github.com/colingraydon/continuum/internal/health"
+	"github.com/colingraydon/continuum/internal/gossip"
 	"github.com/colingraydon/continuum/internal/ring"
 	"github.com/colingraydon/continuum/internal/stats"
 )
 
 type Handler struct {
 	ring       *ring.Ring
-	checker    *health.Checker
 	aggregator *stats.Aggregator
+	memberList *gossip.MemberList
+	gossiper   *gossip.Gossiper
+	selfID     string
 	startTime  time.Time
 }
 
-func NewHandler(r *ring.Ring, c *health.Checker) *Handler {
+func NewHandler(r *ring.Ring, ml *gossip.MemberList, g *gossip.Gossiper, selfID string) *Handler {
 	return &Handler{
-		ring:  		r, 
-		checker: 	c,
-		aggregator: stats.NewAggregator(r, c),
+		ring:       r,
+		aggregator: stats.NewAggregator(r, ml),
+		memberList: ml,
+		gossiper:   g,
+		selfID:     selfID,
 		startTime:  time.Now(),
 	}
 }
@@ -48,6 +53,18 @@ type ReplicateResponse struct {
 	Nodes []NodeResponse `json:"nodes"`
 }
 
+type GossipRequest struct {
+	Members []*gossip.Member `json:"members"`
+}
+
+func (h *Handler) nodeStatus(id string) string {
+	m, ok := h.memberList.Get(id)
+	if !ok {
+		return "unknown"
+	}
+	return m.Status.String()
+}
+
 func (h *Handler) AddNode(w http.ResponseWriter, req *http.Request) {
 	var body AddNodeRequest
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
@@ -58,14 +75,10 @@ func (h *Handler) AddNode(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "id and address are required", http.StatusBadRequest)
 		return
 	}
-
-	h.ring.AddNode(body.ID, body.Address)
-	h.checker.AddNode(body.ID, body.Address)
-
+	h.memberList.Add(body.ID, body.Address)
 	w.WriteHeader(http.StatusCreated)
-	
-	node := NodeResponse{ID: body.ID, Address: body.Address, Status: "healthy"}
-	if err := json.NewEncoder(w).Encode(node); err != nil {		
+	node := NodeResponse{ID: body.ID, Address: body.Address, Status: "alive"}
+	if err := json.NewEncoder(w).Encode(node); err != nil {
 		http.Error(w, "failed to write response", http.StatusInternalServerError)
 	}
 }
@@ -76,9 +89,7 @@ func (h *Handler) RemoveNode(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "node id is required", http.StatusBadRequest)
 		return
 	}
-
-	h.ring.RemoveNode(id)
-	h.checker.RemoveNode(id)
+	h.memberList.MarkDead(id)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -86,11 +97,10 @@ func (h *Handler) GetNodes(w http.ResponseWriter, req *http.Request) {
 	nodes := h.ring.GetNodes()
 	resp := make([]NodeResponse, 0, len(nodes))
 	for _, n := range nodes {
-		status, _ := h.checker.GetStatus(n.ID)
 		resp = append(resp, NodeResponse{
 			ID:      n.ID,
 			Address: n.Address,
-			Status:  status.String(),
+			Status:  h.nodeStatus(n.ID),
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -105,19 +115,49 @@ func (h *Handler) GetNode(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "key is required", http.StatusBadRequest)
 		return
 	}
-
 	node, found := h.ring.GetNode(key)
 	if !found {
 		http.Error(w, "no nodes available", http.StatusServiceUnavailable)
 		return
 	}
-
 	RecordKeyLookup()
-	status, _ := h.checker.GetStatus(node.ID)
-	resp := NodeResponse{ID: node.ID, Address: node.Address, Status: status.String()}
+
+	// peer routing — if responsible node is not self, proxy the request
+	// skip if already proxied to avoid infinite loops
+	if node.ID != h.selfID && req.Header.Get("X-Proxied-From") == "" {
+		h.proxyRequest(w, req, node.Address, key)
+		return
+	}
+
+	resp := NodeResponse{ID: node.ID, Address: node.Address, Status: h.nodeStatus(node.ID)}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		http.Error(w, "failed to write response", http.StatusInternalServerError)
+	}
+}
+
+func (h *Handler) proxyRequest(w http.ResponseWriter, req *http.Request, address, key string) {
+	url := "http://" + address + "/keys/" + key
+
+	proxyReq, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		http.Error(w, "failed to create proxy request", http.StatusInternalServerError)
+		return
+	}
+	proxyReq.Header.Set("X-Proxied-From", h.selfID)
+
+	resp, err := http.DefaultClient.Do(proxyReq)
+	if err != nil {
+		http.Error(w, "failed to proxy request to peer", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		return
 	}
 }
 
@@ -145,22 +185,18 @@ func (h *Handler) GetReplicationNodes(w http.ResponseWriter, req *http.Request) 
 		http.Error(w, "factor must be at least 1", http.StatusBadRequest)
 		return
 	}
-
 	nodes := h.ring.GetReplicationNodes(body.Key, body.Factor)
 	if len(nodes) == 0 {
 		http.Error(w, "no nodes available", http.StatusServiceUnavailable)
 		return
 	}
-
 	resp := ReplicateResponse{
 		Key:   body.Key,
 		Nodes: make([]NodeResponse, 0, len(nodes)),
 	}
 	for _, n := range nodes {
-		status, _ := h.checker.GetStatus(n.ID)
-		resp.Nodes = append(resp.Nodes, NodeResponse{ID: n.ID, Address: n.Address, Status: status.String()})
+		resp.Nodes = append(resp.Nodes, NodeResponse{ID: n.ID, Address: n.Address, Status: h.nodeStatus(n.ID)})
 	}
-
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		http.Error(w, "failed to write response", http.StatusInternalServerError)
@@ -168,17 +204,30 @@ func (h *Handler) GetReplicationNodes(w http.ResponseWriter, req *http.Request) 
 }
 
 func (h *Handler) Health(w http.ResponseWriter, req *http.Request) {
-	stats := h.aggregator.GetStats()
+	s := h.aggregator.GetStats()
 	resp := map[string]any{
 		"status":        "ok",
-		"total_nodes":   stats.TotalNodes,
-		"healthy_nodes": stats.HealthyNodes,
-		"suspect_nodes": stats.SuspectNodes,
-		"dead_nodes":    stats.DeadNodes,
-		"uptime": time.Since(h.startTime).String(),
+		"total_nodes":   s.TotalNodes,
+		"healthy_nodes": s.HealthyNodes,
+		"suspect_nodes": s.SuspectNodes,
+		"dead_nodes":    s.DeadNodes,
+		"uptime":        time.Since(h.startTime).String(),
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		http.Error(w, "failed to write response", http.StatusInternalServerError)
+	}
+}
+
+func (h *Handler) Gossip(w http.ResponseWriter, req *http.Request) {
+	var body GossipRequest
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	h.memberList.Merge(body.Members)
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(h.memberList.GetAll()); err != nil {
 		http.Error(w, "failed to write response", http.StatusInternalServerError)
 	}
 }

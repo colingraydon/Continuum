@@ -6,15 +6,19 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/colingraydon/continuum/api"
-	"github.com/colingraydon/continuum/internal/health"
+	"github.com/colingraydon/continuum/internal/gossip"
 	"github.com/colingraydon/continuum/internal/ring"
 )
 
 type config struct {
-	replicas     int
-	defaultNodes []*ring.Node
+	replicas    int
+	selfID      string
+	selfAddress string
+	gossipPort  string
+	seedNodes   []string
 }
 
 func loadConfig() config {
@@ -25,9 +29,32 @@ func loadConfig() config {
 		}
 	}
 
+	selfAddress := os.Getenv("SELF_ADDRESS")
+	if selfAddress == "" {
+		selfAddress = "localhost"
+	}
+
+	selfID := os.Getenv("SELF_ID")
+	if selfID == "" {
+		selfID = selfAddress
+	}
+
+	gossipPort := os.Getenv("GOSSIP_PORT")
+	if gossipPort == "" {
+		gossipPort = "8081"
+	}
+
+	var seedNodes []string
+	if val := os.Getenv("SEED_NODES"); val != "" {
+		seedNodes = strings.Split(val, ",")
+	}
+
 	return config{
-		replicas: replicas,
-		defaultNodes: []*ring.Node{},
+		replicas:    replicas,
+		selfID:      selfID,
+		selfAddress: selfAddress,
+		gossipPort:  gossipPort,
+		seedNodes:   seedNodes,
 	}
 }
 
@@ -39,27 +66,40 @@ func main() {
 		api.UpdateRingMetrics(nodeCount, vnodeCount)
 	})
 
-	checker := health.NewChecker(health.DefaultConfig(), func(nodeID string, status health.NodeStatus) {
-		log.Printf("node %s status changed to %s", nodeID, status)
-		if status == health.StatusDead {
-			r.RemoveNode(nodeID)
-			log.Printf("removed dead node %s from ring", nodeID)
+	ml := gossip.NewMemberList(cfg.selfID, cfg.selfAddress, func(m *gossip.Member, status gossip.MemberStatus) {
+		log.Printf("member %s status changed to %s", m.ID, status)
+		switch status {
+		case gossip.MemberAlive:
+			r.AddNode(m.ID, m.Address)
+		case gossip.MemberDead:
+			r.RemoveNode(m.ID)
+			log.Printf("removed dead member %s from ring", m.ID)
 		}
 	})
 
-	for _, n := range cfg.defaultNodes {
-		r.AddNode(n.ID, n.Address)
-		checker.AddNode(n.ID, n.Address)
+	transport, err := gossip.NewTransport(cfg.gossipPort)
+	if err != nil {
+		log.Fatalf("failed to create gossip transport: %v", err)
 	}
 
-	ctx := context.Background()
-	checker.Start(ctx)
-	defer checker.Stop()
+	g := gossip.NewGossiper(cfg.selfID, cfg.gossipPort, ml, transport)
 
-	mux := api.NewServer(r, checker)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	log.Printf("Starting server on :8080 with %d replicas and %d default nodes", cfg.replicas, len(cfg.defaultNodes))
+	g.Start(ctx)
+
+	if len(cfg.seedNodes) > 0 {
+		log.Printf("bootstrapping from seed nodes: %v", cfg.seedNodes)
+		g.Bootstrap(cfg.seedNodes)
+	}
+
+	// add self to ring
+	r.AddNode(cfg.selfID, cfg.selfAddress)
+
+	mux := api.NewServer(r, ml, g, cfg.selfID)
+	log.Printf("starting server on :8080 (gossip on :%s) as %s", cfg.gossipPort, cfg.selfID)
 	if err := http.ListenAndServe(":8080", mux); err != nil {
-		log.Fatalf("Server failed to start with err: %v", err)
+		log.Fatalf("server failed to start: %v", err)
 	}
 }

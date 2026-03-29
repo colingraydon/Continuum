@@ -1,29 +1,33 @@
 package stats
 
 import (
-	"github.com/colingraydon/continuum/internal/health"
+	"github.com/colingraydon/continuum/internal/gossip"
 	"github.com/colingraydon/continuum/internal/ring"
 )
 
 type Aggregator struct {
-	ring    *ring.Ring
-	checker *health.Checker
+	ring       *ring.Ring
+	memberList *gossip.MemberList
 }
 
-func NewAggregator(r *ring.Ring, c *health.Checker) *Aggregator {
-	return &Aggregator{ring: r, checker: c}
+func NewAggregator(r *ring.Ring, ml *gossip.MemberList) *Aggregator {
+	return &Aggregator{ring: r, memberList: ml}
 }
 
 func (a *Aggregator) GetStats() ring.RingStats {
 	stats := a.ring.GetStats()
 	for _, n := range a.ring.GetNodes() {
-		status, _ := a.checker.GetStatus(n.ID)
-		switch status {
-		case health.StatusHealthy:
+		m, ok := a.memberList.Get(n.ID)
+		if !ok {
+			stats.DeadNodes++
+			continue
+		}
+		switch m.Status {
+		case gossip.MemberAlive:
 			stats.HealthyNodes++
-		case health.StatusSuspect:
+		case gossip.MemberSuspect:
 			stats.SuspectNodes++
-		case health.StatusDead:
+		case gossip.MemberDead:
 			stats.DeadNodes++
 		}
 	}

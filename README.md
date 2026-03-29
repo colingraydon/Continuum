@@ -1,8 +1,8 @@
 # Continuum
 
-A distributed consistent hashing ring with virtual nodes, built in Go.
+A distributed consistent hashing ring with virtual nodes and gossip-based peer discovery, built in Go.
 
-Continuum implements the core data routing layer used in distributed systems like Cassandra and DynamoDB - a hash ring that maps keys to nodes with minimal key movement when the cluster topology changes. It exposes an HTTP API, Prometheus metrics, and a Grafana dashboard out of the box.
+Continuum implements the core data routing layer used in distributed systems like Cassandra and DynamoDB - a hash ring that maps keys to nodes with minimal key movement when the cluster topology changes. Nodes discover each other via a gossip protocol, converge on ring state without a central coordinator, and route requests to the correct peer when a key lookup arrives at the wrong node. It exposes an HTTP API, Prometheus metrics, and a Grafana dashboard out of the box.
 
 ---
 
@@ -11,45 +11,71 @@ Continuum implements the core data routing layer used in distributed systems lik
 Continuum is organized into four layers:
 
 ### Core Ring (`internal/ring`)
-The distributed systems engine. Implements the hash ring with a Red-Black Tree, virtual nodes, murmur3 hashing, and atomic key counters. Has no knowledge of HTTP, health, or metrics - it is a pure data routing library.
+The distributed systems engine. Implements the hash ring with a Red-Black Tree, virtual nodes, murmur3 hashing, and atomic key counters. Has no knowledge of HTTP, gossip, or metrics - it is a pure data routing library. Membership is driven entirely by the gossip layer via callbacks; the ring is never mutated directly.
 
-### Health Checker (`internal/health`)
-A standalone component that periodically pings each node's `/health` endpoint and tracks a three-state lifecycle: healthy → suspect → dead. Designed to plug directly into a gossip protocol - the `OnStatusChange` callback is the integration point where gossip peer reports would replace direct HTTP pings.
+### Gossip Protocol (`internal/gossip`)
+Handles cluster membership and failure detection without a central coordinator. Each node maintains a `MemberList` - the single source of truth for membership state. Nodes exchange member lists on a 1-second interval with up to 3 random peers (fanout), propagating membership changes across the cluster in O(log n) rounds.
+
+The gossip layer drives the ring: when membership changes (alive, suspect, dead), a callback updates the ring so routing always reflects the current member state.
 
 ### Stats Aggregator (`internal/stats`)
-A composition layer that combines ring statistics (vnode distribution, key counts, variance) with health status (healthy/suspect/dead node counts) into a single unified view. Keeps the ring package free of health concerns.
+A composition layer that combines ring statistics (vnode distribution, key counts, variance) with gossip membership status (alive/suspect/dead node counts) into a single unified view. Keeps the ring package free of membership concerns.
 
 ### HTTP API (`api`)
-The transport layer. Exposes ring operations over HTTP, instruments all requests via Prometheus middleware, and wires the ring, health checker, and aggregator together. Handlers are thin - they delegate to the appropriate internal package and serialize the response.
+The transport layer. Exposes ring and gossip operations over HTTP, instruments all requests via Prometheus middleware, and wires the ring, gossip layer, and aggregator together. Handlers are thin - they delegate to the appropriate internal package and serialize the response.
 
-### Health Checker Lifecycle
+---
 
-Nodes transition through three states: healthy → suspect → dead. The checker runs every 5 seconds (configurable via `Config.Interval`) and pings each node's `/health` endpoint with a 2 second timeout.
+## Gossip Protocol
 
-- A single failed ping marks a node **suspect**
-- Three consecutive failures (configurable via `Config.FailureThreshold`) marks it **dead** and removes it from the ring
-- A successful ping at any point resets the node to **healthy** immediately
+### Membership lifecycle
 
-At default settings, a node takes a minimum of 15 seconds to be removed from the ring (3 failures × 5 second interval). Recovery is immediate on the next successful ping.
+Nodes transition through three states: **alive → suspect → dead**.
 
-The `OnStatusChange` callback is intentionally generic - it is the integration point for a future gossip protocol where peer reports would replace direct HTTP pings, with no changes required to the health checker itself.
+- A node is marked **alive** when it joins the cluster (via `POST /nodes` or gossip peer exchange) and its heartbeat is propagating
+- A node is marked **suspect** when its heartbeat hasn't been updated within 5 seconds (`staleThreshold`) - it may be slow or partitioned
+- A node is marked **dead** when it remains suspect past a second stale check - it is removed from the ring and stops receiving traffic
 
-### Request flow
+Recovery is automatic: if a dead or suspect node starts gossiping again with a higher heartbeat, it transitions back to alive and is re-added to the ring.
+
+### Peer discovery and convergence
+
+Each node runs three background loops:
+
+1. **Gossip loop** (1s interval) - increments its own heartbeat, selects up to 3 random alive peers, and pushes its full member list to each. A new member propagates to the full cluster in O(log n) rounds.
+2. **Receive loop** - handles incoming gossip messages. Merges the peer's member list using a last-write-wins strategy based on heartbeat: a member update is only accepted if the incoming heartbeat is strictly higher than what's known locally.
+3. **Stale loop** (1s interval) - checks every non-self member's `UpdatedAt` timestamp. Members not heard from in 5 seconds transition suspect → dead.
+
+### Bootstrapping
+
+New nodes specify one or more seed nodes via the `SEED_NODES` environment variable. On startup, the node sends its member list to each seed, which triggers a gossip exchange. Within a few seconds the new node's membership has propagated to the full cluster.
+
+### Peer routing
+
+When a key lookup (`GET /keys/:key`) arrives at a node that isn't responsible for that key, the request is proxied to the correct peer rather than returning an error. The proxy sets an `X-Proxied-From` header to prevent forwarding loops - a node that receives a proxied request always serves it directly.
+
+---
+
+## Request flow
 
 A key lookup (`GET /keys/:key`) flows like this:
 
 1. Request hits `metricsMiddleware` - records latency and request count
 2. `GetNode` handler extracts the key from the path
 3. `ring.GetNode(key)` hashes the key with murmur3, finds the ceiling vnode in the RBT, increments the atomic key counter, returns the physical node
-4. `checker.GetStatus(nodeID)` returns the node's current health status
-5. Response is serialized with node ID, address, and status
+4. If the responsible node is not self, the request is proxied to the peer's address
+5. If this node is responsible (or the request was already proxied), the response is serialized with node ID, address, and gossip status
 
-### How key lookup works
+---
+
+## How key lookup works
 
 1. Hash the key using Murmur3 to get a position on the ring (0 to 2^32)
 2. Find the first virtual node with hash ≥ key hash using a Red-Black Tree ceiling lookup - O(log n)
 3. If no vnode found, wrap around to the first vnode on the ring
 4. Return the physical node that vnode belongs to
+
+---
 
 ## Benchmarks
 
@@ -87,6 +113,10 @@ The 6x slowdown on mixed workloads is expected - write lock acquisition blocks c
 
 ## Design Decisions
 
+### MemberList as single source of truth
+
+The ring is a pure routing layer - it has no opinion on membership. All ring mutations flow through a single callback on `MemberList`, so gossip-discovered members, manually registered members (`POST /nodes`), and manually removed members (`DELETE /nodes/:id`) all take the same path. This eliminates the class of bugs where the ring and membership state diverge.
+
 ### Red-Black Tree
 
 The ring uses a Red-Black Tree (via `emirpasic/gods`) to store virtual nodes sorted by hash. This gives O(log n) for insert, delete, and ceiling lookup. A sorted slice would give O(log n) lookup via binary search but O(n) insert/delete due to element shifting. Either works since node changes are rare, but the RBT is more correct under write load and the `Ceiling()` operation maps directly to the ring's successor lookup semantics.
@@ -103,13 +133,13 @@ The ring uses `sync.RWMutex` rather than a plain mutex or lock-free structure. `
 
 Per-node key counts use `sync/atomic.Int64` rather than incrementing under the write lock. This keeps `GetNode` on the read lock path so multiple goroutines can look up keys concurrently. Using a write lock for counting would serialize all lookups - a significant regression at high TPS.
 
-### Callback Pattern for Metrics
+### Callback Pattern for Metrics and Ring
 
-The ring accepts a `SetUpdateCallback` rather than importing Prometheus directly. This keeps `internal/ring` as a pure distributed systems package with no API or metrics dependencies. The metrics concern lives entirely in the `api` package, making the ring reusable as a library.
+The ring accepts a `SetUpdateCallback` rather than importing Prometheus directly, and the gossip `MemberList` accepts an `onChange` callback rather than holding a ring reference. Both keep internal packages free of external dependencies and make the integration points explicit.
 
 ### Configurable Replica Count
 
-Replica count is read from the `REPLICAS` environment variable with a default of 150. 
+Replica count is read from the `REPLICAS` environment variable with a default of 150.
 
 ---
 
@@ -122,9 +152,25 @@ curl -X POST http://localhost:8080/nodes \
   -d '{"id": "node1", "address": "10.0.0.1"}'
 ```
 
+### Remove a node
+```bash
+curl -X DELETE http://localhost:8080/nodes/node1
+```
+
+### List all nodes
+```bash
+curl http://localhost:8080/nodes
+```
+
 ### Look up a key
 ```bash
 curl http://localhost:8080/keys/user:123
+```
+
+Returns the node responsible for the key. If this node is not responsible, the request is automatically proxied to the correct peer.
+
+```json
+{"id": "node2", "address": "10.0.0.2", "status": "alive"}
 ```
 
 ### Get replication nodes
@@ -148,6 +194,8 @@ curl http://localhost:8080/health
   "uptime": "4h32m10s"
 }
 ```
+
+Node status reflects gossip membership state: `healthy_nodes` are alive per gossip, `suspect_nodes` haven't been heard from recently, `dead_nodes` have been removed from the ring.
 
 ### Get ring stats
 ```bash
@@ -176,6 +224,15 @@ curl http://localhost:8080/stats
 }
 ```
 
+### Exchange gossip state
+```bash
+curl -X POST http://localhost:8080/gossip \
+  -H "Content-Type: application/json" \
+  -d '{"members": [...]}'
+```
+
+Used internally by the gossip protocol. Merges the provided member list into this node's view and returns the node's current member list.
+
 ### Prometheus metrics
 ```bash
 curl http://localhost:8080/metrics
@@ -190,14 +247,20 @@ curl http://localhost:8080/metrics
 make run
 ```
 
-### Docker (with Prometheus + Grafana)
+### Docker (3-node cluster with Prometheus + Grafana)
 ```bash
 make docker-run
 ```
 
-- API: `http://localhost:8080`
-- Prometheus: `http://localhost:9090`
-- Grafana: `http://localhost:3000` (admin/admin)
+Starts three Continuum nodes that discover each other via gossip. `node1` acts as the seed; `node2` and `node3` bootstrap from it.
+
+| Service | Address |
+|---|---|
+| node1 API | `http://localhost:8080` |
+| node2 API | `http://localhost:8082` |
+| node3 API | `http://localhost:8083` |
+| Prometheus | `http://localhost:9090` |
+| Grafana | `http://localhost:3000` (admin/admin) |
 
 In Grafana, add `http://prometheus:9090` as a Prometheus data source and query:
 - `continuum_ring_node_count`
@@ -228,6 +291,7 @@ make coverage  # generate coverage report
 ```
 
 ---
+
 ## Metrics
 
 | Metric | Type | Description |
@@ -238,16 +302,15 @@ make coverage  # generate coverage report
 | `continuum_ring_vnode_count` | Gauge | Current virtual node count |
 | `continuum_ring_key_lookups_total` | Counter | Total key lookups performed |
 | `continuum_ring_distribution_variance` | Gauge | Key distribution variance across nodes |
-| `continuum_ring_healthy_nodes` | Gauge | Current number of healthy nodes |
-| `continuum_ring_suspect_nodes` | Gauge | Current number of suspect nodes |
-| `continuum_ring_dead_nodes` | Gauge | Current number of dead nodes |
+| `continuum_ring_healthy_nodes` | Gauge | Nodes currently alive per gossip |
+| `continuum_ring_suspect_nodes` | Gauge | Nodes currently suspect per gossip |
+| `continuum_ring_dead_nodes` | Gauge | Nodes currently dead per gossip |
+
 ---
 
 ## What's Next
 
 - **Architecture Diagram** - use Lucid to generate an architectural diagram for the readme
-- **Gossip protocol** - nodes discover each other and converge on ring state without a central coordinator. The `OnStatusChange` callback in the health checker is already designed as the integration point - gossip peer reports would replace direct HTTP pings with no changes to the health checker itself.
-- **Peer routing** - when a key lookup arrives at a Continuum instance that doesn't own the key, forward the request to the correct peer rather than returning the node address. This is how Cassandra handles request routing.
-- **Persistence** - ring state survives restarts via a simple JSON snapshot on shutdown and reload on startup.
-- **Weighted nodes** - nodes with higher capacity receive proportionally more vnodes, allowing heterogeneous clusters.
-- **Cassandra-ification** - run multiple Continuum instances as peers that gossip, health check each other, and route requests between themselves. This is the architecture Cassandra uses - every node is equal, any node can serve any request.
+- **Persistence** - ring state survives restarts via a simple JSON snapshot on shutdown and reload on startup
+- **Weighted nodes** - nodes with higher capacity receive proportionally more vnodes, allowing heterogeneous clusters
+- **Suspect-aware routing** - exclude suspect nodes from key routing in addition to dead nodes, with configurable fallback behavior
