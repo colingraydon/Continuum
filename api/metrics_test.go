@@ -6,10 +6,12 @@ import (
 	"testing"
 
 	"strings"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/colingraydon/continuum/internal/gossip"
 	"github.com/colingraydon/continuum/internal/ring"
+	"github.com/colingraydon/continuum/internal/store"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 func resetMetrics() {
@@ -50,7 +52,7 @@ func TestMetricsHTTPRequestsTotal(t *testing.T) {
 	}
 	defer transport.Stop()
 	g := gossip.NewGossiper("self", "0", ml, transport)
-	srv := NewServer(ring.NewRing(50), ml, g, "self")
+	srv := NewServer(ring.NewRing(50), ml, g, store.New(), "self", 3)
 	req := httptest.NewRequest(http.MethodGet, "/nodes", nil)
 	w := httptest.NewRecorder()
 
@@ -78,7 +80,7 @@ func TestMetricsRequestDurationRecorded(t *testing.T) {
 	}
 	defer transport.Stop()
 	g := gossip.NewGossiper("self", "0", ml, transport)
-	srv := NewServer(ring.NewRing(50), ml, g, "self")
+	srv := NewServer(ring.NewRing(50), ml, g, store.New(), "self", 3)
 	req := httptest.NewRequest(http.MethodGet, "/nodes", nil)
 	w := httptest.NewRecorder()
 

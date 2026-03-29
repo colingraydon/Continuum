@@ -1,34 +1,40 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"time"
-	"io"
 
 	"github.com/colingraydon/continuum/internal/gossip"
 	"github.com/colingraydon/continuum/internal/ring"
 	"github.com/colingraydon/continuum/internal/stats"
+	"github.com/colingraydon/continuum/internal/store"
 )
 
 type Handler struct {
-	ring       *ring.Ring
-	aggregator *stats.Aggregator
-	memberList *gossip.MemberList
-	gossiper   *gossip.Gossiper
-	selfID     string
-	startTime  time.Time
+	ring              *ring.Ring
+	aggregator        *stats.Aggregator
+	memberList        *gossip.MemberList
+	gossiper          *gossip.Gossiper
+	store             *store.Store
+	selfID            string
+	replicationFactor int
+	startTime         time.Time
 }
 
-func NewHandler(r *ring.Ring, ml *gossip.MemberList, g *gossip.Gossiper, selfID string) *Handler {
+func NewHandler(r *ring.Ring, ml *gossip.MemberList, g *gossip.Gossiper, s *store.Store, selfID string, replicationFactor int) *Handler {
 	return &Handler{
-		ring:       r,
-		aggregator: stats.NewAggregator(r, ml),
-		memberList: ml,
-		gossiper:   g,
-		selfID:     selfID,
-		startTime:  time.Now(),
+		ring:              r,
+		aggregator:        stats.NewAggregator(r, ml),
+		memberList:        ml,
+		gossiper:          g,
+		store:             s,
+		selfID:            selfID,
+		replicationFactor: replicationFactor,
+		startTime:         time.Now(),
 	}
 }
 
@@ -41,6 +47,12 @@ type NodeResponse struct {
 	ID      string `json:"id"`
 	Address string `json:"address"`
 	Status  string `json:"status"`
+	Value   string `json:"value,omitempty"`
+}
+
+type PutKeyRequest struct {
+	Value  string            `json:"value"`
+	Clocks map[string]uint64 `json:"clocks,omitempty"`
 }
 
 type ReplicateRequest struct {
@@ -130,10 +142,78 @@ func (h *Handler) GetNode(w http.ResponseWriter, req *http.Request) {
 	}
 
 	resp := NodeResponse{ID: node.ID, Address: node.Address, Status: h.nodeStatus(node.ID)}
+	if node.ID == h.selfID {
+		if entry, ok := h.store.Get(key); ok {
+			resp.Value = entry.Value
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		http.Error(w, "failed to write response", http.StatusInternalServerError)
 	}
+}
+
+func (h *Handler) PutKey(w http.ResponseWriter, req *http.Request) {
+	key := strings.TrimPrefix(req.URL.Path, "/keys/")
+	if key == "" {
+		http.Error(w, "key is required", http.StatusBadRequest)
+		return
+	}
+	var body PutKeyRequest
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if body.Value == "" {
+		http.Error(w, "value is required", http.StatusBadRequest)
+		return
+	}
+
+	incoming := store.VectorClockVersion{Clocks: body.Clocks}
+	if incoming.Clocks == nil {
+		incoming.Clocks = make(map[string]uint64)
+	}
+
+	// Primary write: increment self's counter. Replica write: use clock as-is.
+	var version store.VectorClockVersion
+	if req.Header.Get("X-Proxied-From") == "" {
+		version = incoming.Increment(h.selfID)
+	} else {
+		version = incoming
+	}
+
+	h.store.Put(key, body.Value, version)
+
+	// Fan out to replica nodes. Skip if this is already a replicated write to
+	// avoid chained replication.
+	if req.Header.Get("X-Proxied-From") == "" {
+		nodes := h.ring.GetReplicationNodes(key, h.replicationFactor)
+		for _, n := range nodes {
+			if n.ID != h.selfID {
+				go h.replicateTo(n.Address, key, body.Value, version.Clocks)
+			}
+		}
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) replicateTo(address, key, value string, clocks map[string]uint64) {
+	body, err := json.Marshal(PutKeyRequest{Value: value, Clocks: clocks})
+	if err != nil {
+		return
+	}
+	req, err := http.NewRequest(http.MethodPut, "http://"+address+"/keys/"+key, bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Proxied-From", h.selfID)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return
+	}
+	_ = resp.Body.Close()
 }
 
 func (h *Handler) proxyRequest(w http.ResponseWriter, req *http.Request, address, key string) {

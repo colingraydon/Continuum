@@ -13,9 +13,7 @@ const maxUDPPacketSize = 65536
 type MessageType int
 
 const (
-	MessagePush MessageType = iota
-	MessagePull
-	MessagePushPull
+	MessagePushPull MessageType = iota
 )
 
 type GossipMessage struct {

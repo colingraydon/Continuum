@@ -9,6 +9,7 @@ import (
 
 	"github.com/colingraydon/continuum/internal/gossip"
 	"github.com/colingraydon/continuum/internal/ring"
+	"github.com/colingraydon/continuum/internal/store"
 )
 
 func newTestMemberList(r *ring.Ring) *gossip.MemberList {
@@ -35,7 +36,7 @@ func newTestGossiper(t *testing.T, ml *gossip.MemberList) *gossip.Gossiper {
 func newTestHandler(t *testing.T) *Handler {
 	r := ring.NewRing(10)
 	ml := newTestMemberList(r)
-	return NewHandler(r, ml, newTestGossiper(t, ml), "self")
+	return NewHandler(r, ml, newTestGossiper(t, ml), store.New(), "self", 3)
 }
 
 func TestAddNode(t *testing.T) {

@@ -8,9 +8,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/colingraydon/continuum/internal/gossip"
 	"github.com/colingraydon/continuum/internal/ring"
+	"github.com/colingraydon/continuum/internal/store"
 )
 
 func newNamedTestServer(t *testing.T, selfID string) *httptest.Server {
@@ -29,7 +31,8 @@ func newNamedTestServer(t *testing.T, selfID string) *httptest.Server {
 		t.Fatalf("failed to create transport: %v", err)
 	}
 	g := gossip.NewGossiper(selfID, "0", ml, transport)
-	srv := httptest.NewServer(NewServer(r, ml, g, selfID))
+	s := store.New()
+	srv := httptest.NewServer(NewServer(r, ml, g, s, selfID, 3))
 	t.Cleanup(func() {
 		srv.Close()
 		transport.Stop()
@@ -53,7 +56,8 @@ func newTestServer(t *testing.T) *httptest.Server {
 		t.Fatalf("failed to create transport: %v", err)
 	}
 	g := gossip.NewGossiper("self", "0", ml, transport)
-	srv := httptest.NewServer(NewServer(r, ml, g, "self"))
+	s := store.New()
+	srv := httptest.NewServer(NewServer(r, ml, g, s, "self", 3))
 	t.Cleanup(func() {
 		srv.Close()
 		transport.Stop()
@@ -415,5 +419,103 @@ func TestE2EPeerRouting(t *testing.T) {
 	}
 	if node.ID != "srv2" {
 		t.Errorf("expected srv2, got %s", node.ID)
+	}
+}
+
+// TestE2EWriteAndRead verifies that a PUT stores a value that a subsequent GET
+// returns on the same node.
+func TestE2EWriteAndRead(t *testing.T) {
+	srv := newNamedTestServer(t, "node1")
+	addr := serverAddress(srv)
+
+	// Register self so GET /keys/:key resolves to this node.
+	r := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), fmt.Sprintf(`{"id": "node1", "address": "%s"}`, addr))
+	defer closeBody(t, r)
+
+	body := `{"value": "hello"}`
+	req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("%s/keys/mykey", srv.URL), bytes.NewBufferString(body))
+	if err != nil {
+		t.Fatalf("failed to create PUT request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	putResp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT failed: %v", err)
+	}
+	defer closeBody(t, putResp)
+	if putResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", putResp.StatusCode)
+	}
+
+	getResp, err := http.Get(fmt.Sprintf("%s/keys/mykey", srv.URL))
+	if err != nil {
+		t.Fatalf("GET failed: %v", err)
+	}
+	defer closeBody(t, getResp)
+	if getResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", getResp.StatusCode)
+	}
+
+	var node NodeResponse
+	if err := json.NewDecoder(getResp.Body).Decode(&node); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if node.Value != "hello" {
+		t.Errorf("expected value 'hello', got %q", node.Value)
+	}
+}
+
+// TestE2EReplicationFanOut verifies that a write to one node is replicated to
+// other nodes in the replica set.
+func TestE2EReplicationFanOut(t *testing.T) {
+	srv1 := newNamedTestServer(t, "node1")
+	srv2 := newNamedTestServer(t, "node2")
+	addr1 := serverAddress(srv1)
+	addr2 := serverAddress(srv2)
+
+	// Register both nodes in both rings.
+	for _, srv := range []*httptest.Server{srv1, srv2} {
+		r1 := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), fmt.Sprintf(`{"id": "node1", "address": "%s"}`, addr1))
+		defer closeBody(t, r1)
+		r2 := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), fmt.Sprintf(`{"id": "node2", "address": "%s"}`, addr2))
+		defer closeBody(t, r2)
+	}
+
+	// Write to node1.
+	body := `{"value": "replicated"}`
+	req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("%s/keys/rkey", srv1.URL), bytes.NewBufferString(body))
+	if err != nil {
+		t.Fatalf("failed to create PUT request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	putResp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT failed: %v", err)
+	}
+	defer closeBody(t, putResp)
+	if putResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", putResp.StatusCode)
+	}
+
+	// Give the async fan-out time to complete.
+	time.Sleep(50 * time.Millisecond)
+
+	// Both nodes should return the value for the key regardless of which owns it.
+	for _, srv := range []*httptest.Server{srv1, srv2} {
+		getResp, err := http.Get(fmt.Sprintf("%s/keys/rkey", srv.URL))
+		if err != nil {
+			t.Fatalf("GET failed: %v", err)
+		}
+		defer closeBody(t, getResp)
+		if getResp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200, got %d", getResp.StatusCode)
+		}
+		var node NodeResponse
+		if err := json.NewDecoder(getResp.Body).Decode(&node); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+		if node.Value != "replicated" {
+			t.Errorf("srv %s: expected value 'replicated', got %q", srv.URL, node.Value)
+		}
 	}
 }

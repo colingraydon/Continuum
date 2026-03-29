@@ -107,7 +107,7 @@ func TestTransportSendInvalidAddress(t *testing.T) {
 	transport := newTestTransport(t)
 
 	msg := &GossipMessage{
-		Type:    MessagePush,
+		Type:    MessagePushPull,
 		From:    "node1",
 		Members: []*Member{},
 	}
@@ -136,8 +136,6 @@ func TestTransportMessageTypes(t *testing.T) {
 	tests := []struct {
 		msgType MessageType
 	}{
-		{MessagePush},
-		{MessagePull},
 		{MessagePushPull},
 	}
 
@@ -174,7 +172,7 @@ func TestTransportDropsMessagesWhenFull(t *testing.T) {
 
 	// Act — flood with 300 messages, channel only holds 256
 	for i := 0; i < 300; i++ {
-		msg := &GossipMessage{Type: MessagePush, From: "node1", Members: []*Member{}}
+		msg := &GossipMessage{Type: MessagePushPull, From: "node1", Members: []*Member{}}
 		if err := sender.Send(fmt.Sprintf("127.0.0.1:%d", port), msg); err != nil {
 			t.Fatalf("error sending messages: %v", err)
 		}
