@@ -25,9 +25,10 @@ type Handler struct {
 	writeQuorum       int
 	readQuorum        int
 	startTime         time.Time
+	replicaClient     *http.Client
 }
 
-func NewHandler(r *ring.Ring, ml *gossip.MemberList, g *gossip.Gossiper, s *store.Store, selfID string, replicationFactor, writeQuorum, readQuorum int) *Handler {
+func NewHandler(r *ring.Ring, ml *gossip.MemberList, g *gossip.Gossiper, s *store.Store, selfID string, replicationFactor, writeQuorum, readQuorum int, replicaTimeout time.Duration) *Handler {
 	return &Handler{
 		ring:              r,
 		aggregator:        stats.NewAggregator(r, ml),
@@ -39,6 +40,7 @@ func NewHandler(r *ring.Ring, ml *gossip.MemberList, g *gossip.Gossiper, s *stor
 		writeQuorum:       writeQuorum,
 		readQuorum:        readQuorum,
 		startTime:         time.Now(),
+		replicaClient:     &http.Client{Timeout: replicaTimeout},
 	}
 }
 
@@ -240,7 +242,7 @@ func (h *Handler) GetNode(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// Consistent read: fan out to the replica set, merge sibling sets, and
-	// return the canonical result — either a single value or a siblings list.
+	// return the canonical result - either a single value or a siblings list.
 	nodes := h.ring.GetReplicationNodes(key, h.replicationFactor)
 	if len(nodes) == 0 {
 		http.Error(w, "no nodes available", http.StatusServiceUnavailable)
@@ -391,7 +393,7 @@ func (h *Handler) replicateToSync(address, key, value string, clocks map[string]
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Proxied-From", h.selfID)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := h.replicaClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -410,7 +412,7 @@ func (h *Handler) readFromReplica(address, key string) (NodeResponse, error) {
 		return NodeResponse{}, err
 	}
 	req.Header.Set("X-Proxied-From", h.selfID)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := h.replicaClient.Do(req)
 	if err != nil {
 		return NodeResponse{}, err
 	}

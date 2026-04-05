@@ -3,9 +3,9 @@ package api
 import (
 	"net/http"
 	"net/http/httptest"
-	"testing"
-
 	"strings"
+	"testing"
+	"time"
 
 	"github.com/colingraydon/continuum/internal/gossip"
 	"github.com/colingraydon/continuum/internal/ring"
@@ -52,7 +52,7 @@ func TestMetricsHTTPRequestsTotal(t *testing.T) {
 	}
 	defer transport.Stop()
 	g := gossip.NewGossiper("self", "0", ml, transport)
-	srv := NewServer(ring.NewRing(50), ml, g, store.New(), "self", 3, 1, 1)
+	srv := NewServer(ring.NewRing(50), ml, g, store.New(), "self", 3, 1, 1, time.Second)
 	req := httptest.NewRequest(http.MethodGet, "/nodes", nil)
 	w := httptest.NewRecorder()
 
@@ -80,7 +80,7 @@ func TestMetricsRequestDurationRecorded(t *testing.T) {
 	}
 	defer transport.Stop()
 	g := gossip.NewGossiper("self", "0", ml, transport)
-	srv := NewServer(ring.NewRing(50), ml, g, store.New(), "self", 3, 1, 1)
+	srv := NewServer(ring.NewRing(50), ml, g, store.New(), "self", 3, 1, 1, time.Second)
 	req := httptest.NewRequest(http.MethodGet, "/nodes", nil)
 	w := httptest.NewRecorder()
 

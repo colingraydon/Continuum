@@ -1,6 +1,6 @@
 # Continuum
 
-A distributed key-value store built on consistent hashing, gossip-based membership, and vector clock conflict resolution — written in Go.
+A distributed key-value store built on consistent hashing, gossip-based membership, and vector clock conflict resolution - written in Go.
 
 Continuum implements the core data layer used in systems like Cassandra and Dynamo: a hash ring that maps keys to nodes with minimal disruption when topology changes, a gossip protocol that propagates membership without a central coordinator, and a replication layer that fans writes out to N nodes and resolves conflicts using vector clocks. It exposes an HTTP API, Prometheus metrics, and a Grafana dashboard out of the box.
 
@@ -11,21 +11,26 @@ Continuum implements the core data layer used in systems like Cassandra and Dyna
 Continuum is organized into five layers:
 
 ### Core Ring (`internal/ring`)
-The routing engine. Implements the hash ring with a Red-Black Tree, virtual nodes, murmur3 hashing, and atomic key counters. Has no knowledge of HTTP, gossip, or storage — it is a pure routing library. Membership is driven entirely by the gossip layer via callbacks; the ring is never mutated directly.
+
+The routing engine. Implements the hash ring with a Red-Black Tree, virtual nodes, murmur3 hashing, and atomic key counters. Has no knowledge of HTTP, gossip, or storage - it is a pure routing library. Membership is driven entirely by the gossip layer via callbacks; the ring is never mutated directly.
 
 ### Gossip Protocol (`internal/gossip`)
-Handles cluster membership and failure detection without a central coordinator. Each node maintains a `MemberList` — the single source of truth for membership state. Nodes exchange member lists on a 1-second interval with up to 3 random peers (fanout), propagating membership changes across the cluster in O(log n) rounds.
+
+Handles cluster membership and failure detection without a central coordinator. Each node maintains a `MemberList` - the single source of truth for membership state. Nodes exchange member lists on a 1-second interval with up to 3 random peers (fanout), propagating membership changes across the cluster in O(log n) rounds.
 
 The gossip layer drives the ring: when membership changes (alive, suspect, dead), a callback updates the ring so routing always reflects current cluster state.
 
 ### KV Store (`internal/store`)
+
 In-memory key-value storage with vector clock versioning. Each entry holds a value, a `VectorClockVersion`, and a precomputed murmur3 hash of the value (reserved for future Merkle tree anti-entropy). Conflict resolution uses the standard Lamport partial order: a write is accepted only if the existing entry's clock happens-before the incoming one. Concurrent writes keep the existing value.
 
 ### Stats Aggregator (`internal/stats`)
+
 A composition layer that combines ring statistics (vnode distribution, key counts, variance) with gossip membership status (alive/suspect/dead node counts) into a single unified view. Keeps the ring package free of membership concerns.
 
 ### HTTP API (`api`)
-The transport layer. Exposes ring, gossip, and storage operations over HTTP, instruments all requests via Prometheus middleware, and wires all internal packages together. Handlers are thin — they delegate to the appropriate internal package and serialize the response.
+
+The transport layer. Exposes ring, gossip, and storage operations over HTTP, instruments all requests via Prometheus middleware, and wires all internal packages together. Handlers are thin - they delegate to the appropriate internal package and serialize the response.
 
 ---
 
@@ -36,8 +41,8 @@ The transport layer. Exposes ring, gossip, and storage operations over HTTP, ins
 Nodes transition through three states: **alive → suspect → dead**.
 
 - A node is marked **alive** when it joins the cluster (via `POST /nodes` or gossip peer exchange) and its heartbeat is propagating
-- A node is marked **suspect** when its heartbeat hasn't been updated within 5 seconds (`staleThreshold`) — it may be slow or partitioned
-- A node is marked **dead** when it remains suspect past a second stale check — it is removed from the ring and stops receiving traffic
+- A node is marked **suspect** when its heartbeat hasn't been updated within 5 seconds (`staleThreshold`) - it may be slow or partitioned
+- A node is marked **dead** when it remains suspect past a second stale check - it is removed from the ring and stops receiving traffic
 
 Recovery is automatic: if a dead or suspect node starts gossiping again with a higher heartbeat, it transitions back to alive and is re-added to the ring.
 
@@ -45,9 +50,9 @@ Recovery is automatic: if a dead or suspect node starts gossiping again with a h
 
 Each node runs three background loops:
 
-1. **Gossip loop** (1s interval) — increments its own heartbeat, selects up to 3 random alive peers, and pushes its full member list to each. A new member propagates to the full cluster in O(log n) rounds.
-2. **Receive loop** — handles incoming gossip messages. Merges the peer's member list using a last-write-wins strategy based on heartbeat: a member update is only accepted if the incoming heartbeat is strictly higher than what's known locally.
-3. **Stale loop** (1s interval) — checks every non-self member's `UpdatedAt` timestamp. Members not heard from in 5 seconds transition alive → suspect → dead.
+1. **Gossip loop** (1s interval) - increments its own heartbeat, selects up to 3 random alive peers, and pushes its full member list to each. A new member propagates to the full cluster in O(log n) rounds.
+2. **Receive loop** - handles incoming gossip messages. Merges the peer's member list using a last-write-wins strategy based on heartbeat: a member update is only accepted if the incoming heartbeat is strictly higher than what's known locally.
+3. **Stale loop** (1s interval) - checks every non-self member's `UpdatedAt` timestamp. Members not heard from in 5 seconds transition alive → suspect → dead.
 
 ### Bootstrapping
 
@@ -59,14 +64,14 @@ New nodes specify one or more seed nodes via the `SEED_NODES` environment variab
 
 When a write arrives at any node, it:
 
-1. Determines the replica set for the key using `GetReplicationNodes(key, factor)` — the N consecutive distinct nodes clockwise from the key's ring position
+1. Determines the replica set for the key using `GetReplicationNodes(key, factor)` - the N consecutive distinct nodes clockwise from the key's ring position
 2. Increments its own vector clock counter and stores the value locally (self counts as one acknowledgment)
 3. Fans out the write to all other replicas in parallel, waiting for W acknowledgments before returning 204
 4. Returns 503 if quorum cannot be reached
 
 Replica nodes store the write as-is without further fan-out, identified by the `X-Proxied-From` header.
 
-Replication factor is configured via `REPLICATION_FACTOR` (default: 3). Write quorum W is configured via `WRITE_QUORUM` (default: majority — `floor(RF/2) + 1`).
+Replication factor is configured via `REPLICATION_FACTOR` (default: 3). Write quorum W is configured via `WRITE_QUORUM` (default: majority, `floor(RF/2) + 1`). Inter-node replication calls use a dedicated HTTP client with a configurable timeout so a slow or unresponsive replica does not block the coordinator indefinitely.
 
 ### Consistent reads
 
@@ -78,10 +83,10 @@ Read quorum R is configured via `READ_QUORUM` (default: majority). Setting `READ
 
 ## Vector Clocks
 
-Each write carries a vector clock — a map from node ID to a logical counter. The writing node increments its own counter before storing and replicating.
+Each write carries a vector clock - a map from node ID to a logical counter. The writing node increments its own counter before storing and replicating.
 
 ```json
-{"clocks": {"node1": 3, "node2": 1}}
+{ "clocks": { "node1": 3, "node2": 1 } }
 ```
 
 This clock means: node1 has coordinated 3 writes, node2 has coordinated 1, and any replica that received all of them would accept this as the current version.
@@ -96,9 +101,9 @@ When siblings are present, the read response contains a `siblings` array instead
 
 ### Siblings vs. last-write-wins
 
-The alternative to sibling surfacing is last-write-wins (LWW): on concurrent writes, keep the value with the highest timestamp and silently discard the other. Cassandra uses LWW by default. It is simple and produces no conflicts visible to the client, but it loses writes — if two clients update the same key concurrently, one update disappears with no indication that it happened.
+The alternative to sibling surfacing is last-write-wins (LWW): on concurrent writes, keep the value with the highest timestamp and silently discard the other. Cassandra uses LWW by default. It is simple and produces no conflicts visible to the client, but it loses writes - if two clients update the same key concurrently, one update disappears with no indication that it happened.
 
-Sibling surfacing (this system, Riak, Dynamo) never discards a write silently. Concurrent writes are preserved and the conflict is made visible. The tradeoff is that reads can return multiple values, and the application must know what to do with them — merge two shopping carts by union, pick the higher counter, defer to a CRDT, or surface the conflict to a user. This pushes complexity to the application layer, which is where the semantics to resolve it correctly live.
+Sibling surfacing (this system, Riak, Dynamo) never discards a write silently. Concurrent writes are preserved and the conflict is made visible. The tradeoff is that reads can return multiple values, and the application must know what to do with them - merge two shopping carts by union, pick the higher counter, defer to a CRDT, or surface the conflict to a user. This pushes complexity to the application layer, which is where the semantics to resolve it correctly live.
 
 ---
 
@@ -106,7 +111,7 @@ Sibling surfacing (this system, Riak, Dynamo) never discards a write silently. C
 
 A write (`PUT /keys/:key`) flows like this:
 
-1. Request hits `metricsMiddleware` — records latency and request count
+1. Request hits `metricsMiddleware` - records latency and request count
 2. `PutKey` handler extracts the key and decodes `{"value": "...", "clocks": {...}}`
 3. Incoming clock is incremented for this node; value is stored in the local `Store`
 4. `ring.GetReplicationNodes(key, factor)` returns the replica set
@@ -125,7 +130,7 @@ A key lookup (`GET /keys/:key`) flows like this:
 ## How key lookup works
 
 1. Hash the key using Murmur3 to get a position on the ring (0 to 2^32)
-2. Find the first virtual node with hash ≥ key hash using a Red-Black Tree ceiling lookup — O(log n)
+2. Find the first virtual node with hash ≥ key hash using a Red-Black Tree ceiling lookup - O(log n)
 3. If no vnode found, wrap around to the first vnode on the ring
 4. If a health filter is set, walk forward skipping dead/suspect nodes
 5. Return the physical node that vnode belongs to
@@ -136,33 +141,33 @@ A key lookup (`GET /keys/:key`) flows like this:
 
 Measured on Apple M3 Max:
 
-| Operation | Throughput | Latency |
-|---|---|---|
-| GetNode (3 nodes) | ~9M ops/sec | 112 ns/op |
-| GetNode (100 nodes) | ~5M ops/sec | 201 ns/op |
-| GetNode (parallel) | ~6M ops/sec | 160 ns/op |
-| AddNode | ~8K ops/sec | 116 µs/op |
-| RemoveNode | ~10K ops/sec | 101 µs/op |
+| Operation           | Throughput   | Latency   |
+| ------------------- | ------------ | --------- |
+| GetNode (3 nodes)   | ~9M ops/sec  | 112 ns/op |
+| GetNode (100 nodes) | ~5M ops/sec  | 201 ns/op |
+| GetNode (parallel)  | ~6M ops/sec  | 160 ns/op |
+| AddNode             | ~8K ops/sec  | 116 µs/op |
+| RemoveNode          | ~10K ops/sec | 101 µs/op |
 
 **Replica count impact on lookup latency:**
 
-| Replicas | Latency |
-|---|---|
-| 10 | 96 ns/op |
-| 50 | 105 ns/op |
-| 150 | 114 ns/op |
-| 500 | 129 ns/op |
+| Replicas | Latency   |
+| -------- | --------- |
+| 10       | 96 ns/op  |
+| 50       | 105 ns/op |
+| 150      | 114 ns/op |
+| 500      | 129 ns/op |
 
-Going from 10 to 500 vnodes adds only 33ns to lookup latency — the distribution benefit of more vnodes is essentially free at read time.
+Going from 10 to 500 vnodes adds only 33ns to lookup latency - the distribution benefit of more vnodes is essentially free at read time.
 
 **Concurrent reads vs mixed reads/writes:**
 
-| Workload | Latency |
-|---|---|
-| Pure reads | 160 ns/op |
+| Workload             | Latency   |
+| -------------------- | --------- |
+| Pure reads           | 160 ns/op |
 | Mixed reads + writes | 940 ns/op |
 
-The 6x slowdown on mixed workloads is expected — write lock acquisition blocks concurrent readers. Node changes are rare in production so this tradeoff is acceptable.
+The 6x slowdown on mixed workloads is expected - write lock acquisition blocks concurrent readers. Node changes are rare in production so this tradeoff is acceptable.
 
 ---
 
@@ -170,15 +175,15 @@ The 6x slowdown on mixed workloads is expected — write lock acquisition blocks
 
 ### MemberList as single source of truth
 
-The ring is a pure routing layer — it has no opinion on membership. All ring mutations flow through a single callback on `MemberList`, so gossip-discovered members, manually registered members (`POST /nodes`), and manually removed members (`DELETE /nodes/:id`) all take the same path. This eliminates the class of bugs where ring and membership state diverge.
+The ring is a pure routing layer - it has no opinion on membership. All ring mutations flow through a single callback on `MemberList`, so gossip-discovered members, manually registered members (`POST /nodes`), and manually removed members (`DELETE /nodes/:id`) all take the same path. This eliminates the class of bugs where ring and membership state diverge.
 
 ### Vector clocks over LWW timestamps
 
-Last-write-wins timestamps are simple but lose writes silently when two clients write to the same key concurrently. Vector clocks track causality per-node, so concurrent writes are detectable rather than silently discarded. When concurrency is detected, both values are preserved as siblings and returned to the reader — no write is lost, and the application can resolve the conflict with full information.
+Last-write-wins timestamps are simple but lose writes silently when two clients write to the same key concurrently. Vector clocks track causality per-node, so concurrent writes are detectable rather than silently discarded. When concurrency is detected, both values are preserved as siblings and returned to the reader - no write is lost, and the application can resolve the conflict with full information.
 
 ### Precomputed value hashes
 
-Each store entry carries `Hash uint32` — a murmur3 hash of the value, computed at write time. This is reserved for Merkle tree anti-entropy: when comparing replica state across nodes, leaf hashes let you identify divergent key ranges without transferring values. Computing at write time makes tree construction cheap.
+Each store entry carries `Hash uint32` - a murmur3 hash of the value, computed at write time. This is reserved for Merkle tree anti-entropy: when comparing replica state across nodes, leaf hashes let you identify divergent key ranges without transferring values. Computing at write time makes tree construction cheap.
 
 ### Red-Black Tree
 
@@ -190,7 +195,7 @@ Murmur3 is faster than cryptographic hashes (MD5, SHA) and has better distributi
 
 ### sync.RWMutex
 
-The ring uses `sync.RWMutex` rather than a plain mutex. `RWMutex` allows unlimited concurrent readers with exclusive writers — correct for a ring where key lookups vastly outnumber topology changes.
+The ring uses `sync.RWMutex` rather than a plain mutex. `RWMutex` allows unlimited concurrent readers with exclusive writers - correct for a ring where key lookups vastly outnumber topology changes.
 
 ### Atomic key counters
 
@@ -205,6 +210,7 @@ The ring accepts a `SetUpdateCallback` rather than importing Prometheus directly
 ## API
 
 ### Write a value
+
 ```bash
 curl -X PUT http://localhost:8080/keys/user:123 \
   -H "Content-Type: application/json" \
@@ -214,17 +220,24 @@ curl -X PUT http://localhost:8080/keys/user:123 \
 Returns 204. The write is stored locally and fanned out to all replica nodes. An optional `clocks` field can be passed to forward an existing vector clock; if omitted, the receiving node's clock is used as the base.
 
 ### Read a value
+
 ```bash
 curl http://localhost:8080/keys/user:123
 ```
 
-Returns the primary replica node and the value with the highest vector clock across R replicas. Any node can serve any read — the coordinator fans out to the replica set internally.
+Returns the primary replica node and the value with the highest vector clock across R replicas. Any node can serve any read - the coordinator fans out to the replica set internally.
 
 ```json
-{"id": "node2", "address": "10.0.0.2:8080", "status": "alive", "value": "alice"}
+{
+  "id": "node2",
+  "address": "10.0.0.2:8080",
+  "status": "alive",
+  "value": "alice"
+}
 ```
 
 ### Add a node
+
 ```bash
 curl -X POST http://localhost:8080/nodes \
   -H "Content-Type: application/json" \
@@ -232,28 +245,33 @@ curl -X POST http://localhost:8080/nodes \
 ```
 
 ### Remove a node
+
 ```bash
 curl -X DELETE http://localhost:8080/nodes/node1
 ```
 
 ### List all nodes
+
 ```bash
 curl http://localhost:8080/nodes
 ```
 
 ### Get replication nodes
+
 ```bash
 curl -X POST http://localhost:8080/replicate \
   -H "Content-Type: application/json" \
   -d '{"key": "user:123", "factor": 3}'
 ```
 
-Returns the N nodes that own replicas of this key — useful for topology inspection.
+Returns the N nodes that own replicas of this key - useful for topology inspection.
 
 ### Health check
+
 ```bash
 curl http://localhost:8080/health
 ```
+
 ```json
 {
   "status": "ok",
@@ -266,6 +284,7 @@ curl http://localhost:8080/health
 ```
 
 ### Get ring stats
+
 ```bash
 curl http://localhost:8080/stats
 ```
@@ -283,7 +302,7 @@ curl http://localhost:8080/stats
       "address": "10.0.0.1:8080",
       "vnode_count": 150,
       "key_count": 342,
-      "percentage": 34.20
+      "percentage": 34.2
     }
   ],
   "most_loaded": "node1",
@@ -293,6 +312,7 @@ curl http://localhost:8080/stats
 ```
 
 ### Exchange gossip state
+
 ```bash
 curl -X POST http://localhost:8080/gossip \
   -H "Content-Type: application/json" \
@@ -302,6 +322,7 @@ curl -X POST http://localhost:8080/gossip \
 Used internally by the gossip protocol. Merges the provided member list and returns this node's current view.
 
 ### Prometheus metrics
+
 ```bash
 curl http://localhost:8080/metrics
 ```
@@ -311,26 +332,29 @@ curl http://localhost:8080/metrics
 ## Running
 
 ### Local
+
 ```bash
 make run
 ```
 
 ### Docker (3-node cluster with Prometheus + Grafana)
+
 ```bash
 make docker-run
 ```
 
 Starts three Continuum nodes that discover each other via gossip. `node1` acts as the seed; `node2` and `node3` bootstrap from it.
 
-| Service | Address |
-|---|---|
-| node1 API | `http://localhost:8080` |
-| node2 API | `http://localhost:8082` |
-| node3 API | `http://localhost:8083` |
-| Prometheus | `http://localhost:9090` |
-| Grafana | `http://localhost:3000` (admin/admin) |
+| Service    | Address                               |
+| ---------- | ------------------------------------- |
+| node1 API  | `http://localhost:8080`               |
+| node2 API  | `http://localhost:8082`               |
+| node3 API  | `http://localhost:8083`               |
+| Prometheus | `http://localhost:9090`               |
+| Grafana    | `http://localhost:3000` (admin/admin) |
 
 In Grafana, add `http://prometheus:9090` as a Prometheus data source and query:
+
 - `continuum_ring_node_count`
 - `continuum_ring_key_lookups_total`
 - `continuum_ring_distribution_variance`
@@ -345,16 +369,17 @@ In Grafana, add `http://prometheus:9090` as a Prometheus data source and query:
 
 ## Environment Variables
 
-| Variable | Default | Description |
-|---|---|---|
-| `SELF_ID` | `SELF_ADDRESS` | Node identifier |
-| `SELF_ADDRESS` | `localhost:8080` | HTTP address including port |
-| `GOSSIP_PORT` | `8081` | UDP port for gossip |
-| `REPLICAS` | `150` | Virtual nodes per physical node |
-| `REPLICATION_FACTOR` | `3` | Number of replicas per key |
-| `WRITE_QUORUM` | majority | Replica acks required before returning 204 |
-| `READ_QUORUM` | majority | Replica responses required for a consistent read |
-| `SEED_NODES` | — | Comma-separated HTTP addresses to bootstrap from |
+| Variable             | Default          | Description                                      |
+| -------------------- | ---------------- | ------------------------------------------------ |
+| `SELF_ID`            | `SELF_ADDRESS`   | Node identifier                                  |
+| `SELF_ADDRESS`       | `localhost:8080` | HTTP address including port                      |
+| `GOSSIP_PORT`        | `8081`           | UDP port for gossip                              |
+| `REPLICAS`           | `150`            | Virtual nodes per physical node                  |
+| `REPLICATION_FACTOR` | `3`              | Number of replicas per key                       |
+| `WRITE_QUORUM`       | majority         | Replica acks required before returning 204       |
+| `READ_QUORUM`        | majority         | Replica responses required for a consistent read |
+| `REPLICA_TIMEOUT_MS` | `500`            | Timeout in milliseconds for inter-node replication and read calls |
+| `SEED_NODES`         | -                | Comma-separated HTTP addresses to bootstrap from |
 
 ---
 
@@ -369,6 +394,7 @@ make coverage  # generate coverage report
 ```
 
 ### Generate test traffic
+
 ```bash
 ./scripts/traffic.sh http://localhost:8080 1000
 ```
@@ -377,24 +403,24 @@ make coverage  # generate coverage report
 
 ## Metrics
 
-| Metric | Type | Description |
-|---|---|---|
-| `continuum_http_requests_total` | Counter | Request count by method, path, status |
-| `continuum_http_request_duration_seconds` | Histogram | Request latency by method and path |
-| `continuum_ring_node_count` | Gauge | Current physical node count |
-| `continuum_ring_vnode_count` | Gauge | Current virtual node count |
-| `continuum_ring_key_lookups_total` | Counter | Total key lookups performed |
-| `continuum_ring_distribution_variance` | Gauge | Key distribution variance across nodes |
-| `continuum_ring_healthy_nodes` | Gauge | Nodes currently alive per gossip |
-| `continuum_ring_suspect_nodes` | Gauge | Nodes currently suspect per gossip |
-| `continuum_ring_dead_nodes` | Gauge | Nodes currently dead per gossip |
+| Metric                                    | Type      | Description                            |
+| ----------------------------------------- | --------- | -------------------------------------- |
+| `continuum_http_requests_total`           | Counter   | Request count by method, path, status  |
+| `continuum_http_request_duration_seconds` | Histogram | Request latency by method and path     |
+| `continuum_ring_node_count`               | Gauge     | Current physical node count            |
+| `continuum_ring_vnode_count`              | Gauge     | Current virtual node count             |
+| `continuum_ring_key_lookups_total`        | Counter   | Total key lookups performed            |
+| `continuum_ring_distribution_variance`    | Gauge     | Key distribution variance across nodes |
+| `continuum_ring_healthy_nodes`            | Gauge     | Nodes currently alive per gossip       |
+| `continuum_ring_suspect_nodes`            | Gauge     | Nodes currently suspect per gossip     |
+| `continuum_ring_dead_nodes`               | Gauge     | Nodes currently dead per gossip        |
 
 ---
 
 ## What's Next
 
-- **Merkle anti-entropy** — use precomputed value hashes to efficiently detect and repair divergent replicas
-- **Graceful shutdown** — drain in-flight requests and gossip `MemberDead` for self before exit
-- **Persistence** — snapshot ring and KV state to disk on shutdown, reload on startup
-- **Weighted vnodes** — nodes with higher capacity receive proportionally more vnodes for heterogeneous clusters
+- **Merkle anti-entropy** - use precomputed value hashes to efficiently detect and repair divergent replicas
+- **Graceful shutdown** - drain in-flight requests and gossip `MemberDead` for self before exit
+- **Persistence** - snapshot ring and KV state to disk on shutdown, reload on startup
+- **Weighted vnodes** - nodes with higher capacity receive proportionally more vnodes for heterogeneous clusters
 - **Architecture diagram**

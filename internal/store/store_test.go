@@ -66,7 +66,7 @@ func TestOlderClockDropped(t *testing.T) {
 
 func TestConcurrentClocksAreSiblings(t *testing.T) {
 	s := New()
-	// node1 and node2 each wrote independently — neither happens-before the other.
+	// node1 and node2 each wrote independently - neither happens-before the other.
 	s.Put("k", "first", clock(map[string]uint64{"node1": 1}))
 	s.Put("k", "second", clock(map[string]uint64{"node2": 1}))
 

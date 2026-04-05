@@ -224,7 +224,7 @@ func TestMarkSuspectNonExistent(t *testing.T) {
 	// Arrange
 	ml := newTestMemberList()
 
-	// Act + Assert — should not panic
+	// Act + Assert - should not panic
 	ml.MarkSuspect("nonexistent")
 }
 
@@ -232,7 +232,7 @@ func TestMarkDeadNonExistent(t *testing.T) {
 	// Arrange
 	ml := newTestMemberList()
 
-	// Act + Assert — should not panic
+	// Act + Assert - should not panic
 	ml.MarkDead("nonexistent")
 }
 
@@ -283,12 +283,12 @@ func TestMergeIgnoresLowerHeartbeat(t *testing.T) {
 		{ID: "node1", Address: "10.0.0.2", Heartbeat: 10, UpdatedAt: time.Now(), Status: MemberAlive},
 	})
 
-	// Act — merge with lower heartbeat
+	// Act - merge with lower heartbeat
 	ml.Merge([]*Member{
 		{ID: "node1", Address: "10.0.0.2", Heartbeat: 5, UpdatedAt: time.Now(), Status: MemberAlive},
 	})
 
-	// Assert — heartbeat should still be 10
+	// Assert - heartbeat should still be 10
 	for _, m := range ml.GetAll() {
 		if m.ID == "node1" {
 			if m.Heartbeat != 10 {
@@ -311,7 +311,7 @@ func TestMergeIgnoresSelf(t *testing.T) {
 	// Act
 	ml.Merge(incoming)
 
-	// Assert — self heartbeat should still be 1
+	// Assert - self heartbeat should still be 1
 	for _, m := range ml.GetAll() {
 		if m.ID == "self" {
 			if m.Heartbeat != 1 {
@@ -348,7 +348,7 @@ func TestMergeFiresOnChangeForStatusChange(t *testing.T) {
 	})
 	ml.Add("node1", "10.0.0.2")
 
-	// Act — merge with dead status and higher heartbeat
+	// Act - merge with dead status and higher heartbeat
 	ml.Merge([]*Member{
 		{ID: "node1", Address: "10.0.0.2", Heartbeat: 10, UpdatedAt: time.Now(), Status: MemberDead},
 	})

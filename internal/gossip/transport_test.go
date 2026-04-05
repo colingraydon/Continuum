@@ -42,7 +42,7 @@ func TestTransportStartStop(t *testing.T) {
 	// Arrange
 	transport := newTestTransport(t)
 
-	// Act + Assert — should not panic
+	// Act + Assert - should not panic
 	transport.Start()
 	transport.Stop()
 }
@@ -170,7 +170,7 @@ func TestTransportDropsMessagesWhenFull(t *testing.T) {
 	}
 	defer sender.Stop()
 
-	// Act — flood with 300 messages, channel only holds 256
+	// Act - flood with 300 messages, channel only holds 256
 	for i := 0; i < 300; i++ {
 		msg := &GossipMessage{Type: MessagePushPull, From: "node1", Members: []*Member{}}
 		if err := sender.Send(fmt.Sprintf("127.0.0.1:%d", port), msg); err != nil {
@@ -178,6 +178,6 @@ func TestTransportDropsMessagesWhenFull(t *testing.T) {
 		}
 	}
 
-	// Assert — should not panic or deadlock
+	// Assert - should not panic or deadlock
 	time.Sleep(100 * time.Millisecond)
 }
