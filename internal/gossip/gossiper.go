@@ -149,6 +149,29 @@ func (g *Gossiper) selectPeers() []*Member {
 	return peers
 }
 
+// NotifyDead marks self as dead in the member list and broadcasts the updated
+// state to all currently alive peers. Called during graceful shutdown so peers
+// stop routing traffic to this node immediately rather than waiting for the
+// stale threshold.
+func (g *Gossiper) NotifyDead() {
+	g.memberList.MarkDead(g.selfID)
+
+	peers := g.memberList.GetAlive()
+	members := g.memberList.GetAll()
+	msg := &GossipMessage{
+		Type:    MessagePushPull,
+		From:    g.selfID,
+		Members: members,
+	}
+
+	for _, peer := range peers {
+		addr := fmt.Sprintf("%s:%s", gossipHost(peer.Address), g.gossipPort)
+		if err := g.transport.Send(addr, msg); err != nil {
+			log.Printf("shutdown: failed to notify peer %s: %v", peer.ID, err)
+		}
+	}
+}
+
 func (g *Gossiper) Bootstrap(seedNodes []string) {
 	members := g.memberList.GetAll()
 	msg := &GossipMessage{

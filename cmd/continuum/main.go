@@ -5,8 +5,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/colingraydon/continuum/api"
@@ -138,8 +140,8 @@ func main() {
 
 	g := gossip.NewGossiper(cfg.selfID, cfg.gossipPort, ml, transport)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	g.Start(ctx)
 
@@ -153,8 +155,27 @@ func main() {
 
 	s := store.New()
 	mux := api.NewServer(r, ml, g, s, cfg.selfID, cfg.replicationFactor, cfg.writeQuorum, cfg.readQuorum, cfg.replicaTimeout)
-	log.Printf("starting server on :8080 (gossip on :%s) as %s", cfg.gossipPort, cfg.selfID)
-	if err := http.ListenAndServe(":8080", mux); err != nil {
-		log.Fatalf("server failed to start: %v", err)
+	srv := &http.Server{Addr: ":8080", Handler: mux}
+
+	go func() {
+		log.Printf("starting server on :8080 (gossip on :%s) as %s", cfg.gossipPort, cfg.selfID)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server error: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	stop()
+	log.Printf("shutdown: notifying peers")
+	g.NotifyDead()
+
+	log.Printf("shutdown: draining in-flight requests")
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer drainCancel()
+	if err := srv.Shutdown(drainCtx); err != nil {
+		log.Printf("shutdown: drain error: %v", err)
 	}
+
+	g.Stop()
+	log.Printf("shutdown: complete")
 }
