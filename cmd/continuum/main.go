@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -153,12 +154,17 @@ func main() {
 	// add self to ring
 	r.AddNode(cfg.selfID, cfg.selfAddress)
 
+	_, httpPort, err := net.SplitHostPort(cfg.selfAddress)
+	if err != nil {
+		log.Fatalf("invalid SELF_ADDRESS %q: %v", cfg.selfAddress, err)
+	}
+
 	s := store.New()
 	mux := api.NewServer(r, ml, g, s, cfg.selfID, cfg.replicationFactor, cfg.writeQuorum, cfg.readQuorum, cfg.replicaTimeout)
-	srv := &http.Server{Addr: ":8080", Handler: mux}
+	srv := &http.Server{Addr: ":" + httpPort, Handler: mux}
 
 	go func() {
-		log.Printf("starting server on :8080 (gossip on :%s) as %s", cfg.gossipPort, cfg.selfID)
+		log.Printf("starting server on :%s (gossip on :%s) as %s", httpPort, cfg.gossipPort, cfg.selfID)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server error: %v", err)
 		}
