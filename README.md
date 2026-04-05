@@ -417,10 +417,20 @@ make coverage  # generate coverage report
 
 ---
 
+## Shutdown
+
+Continuum shuts down gracefully on `SIGINT` or `SIGTERM`:
+
+1. Marks self as dead in the member list and broadcasts the updated state to all alive peers (not just the usual fanout of 3). Peers remove this node from their rings immediately rather than waiting up to 10 seconds for the stale threshold.
+2. Stops accepting new HTTP connections.
+3. Drains in-flight requests with a 30-second timeout.
+4. Stops the gossip transport.
+
+---
+
 ## What's Next
 
 - **Merkle anti-entropy** - use precomputed value hashes to efficiently detect and repair divergent replicas
-- **Graceful shutdown** - drain in-flight requests and gossip `MemberDead` for self before exit
 - **Persistence** - snapshot ring and KV state to disk on shutdown, reload on startup
 - **Weighted vnodes** - nodes with higher capacity receive proportionally more vnodes for heterogeneous clusters
 - **Architecture diagram**

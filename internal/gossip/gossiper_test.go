@@ -3,6 +3,7 @@ package gossip
 import (
 	"context"
 	"fmt"
+	"net"
 	"testing"
 	"time"
 )
@@ -281,6 +282,113 @@ func TestStartAndStop(t *testing.T) {
 	g.Start(ctx)
 	cancel()
 	g.Stop()
+}
+
+func TestNotifyDeadMarksSelfDead(t *testing.T) {
+	// Arrange
+	ml := newTestMemberList()
+	g, transport, err := newTestGossiper("self", ml)
+	if err != nil {
+		t.Fatalf("failed to create gossiper: %v", err)
+	}
+	defer transport.Stop()
+
+	// Act
+	g.NotifyDead()
+
+	// Assert
+	m, ok := ml.Get("self")
+	if !ok {
+		t.Fatal("self not found in member list")
+	}
+	if m.Status != MemberDead {
+		t.Errorf("expected self to be dead, got %s", m.Status)
+	}
+}
+
+func TestNotifyDeadBroadcastsToAllAlivePeers(t *testing.T) {
+	// Arrange: receiver transport on a known port; gossiper configured with that
+	// port so all peer sends are directed there.
+	receiver := newTestTransport(t)
+	receiver.Start()
+	port := fmt.Sprintf("%d", receiver.conn.LocalAddr().(*net.UDPAddr).Port)
+
+	ml := newTestMemberList()
+	senderTransport, err := NewTransport("0")
+	if err != nil {
+		t.Fatalf("failed to create transport: %v", err)
+	}
+	defer senderTransport.Stop()
+
+	// Use receiver port as gossipPort so messages land on the receiver.
+	g := NewGossiper("self", port, ml, senderTransport)
+
+	// Add more peers than fanout (3) to verify all are notified, not just fanout.
+	for i := 0; i < 5; i++ {
+		ml.Add(fmt.Sprintf("node%d", i), "127.0.0.1:8080")
+	}
+
+	// Act
+	g.NotifyDead()
+
+	// Assert: expect one message per alive peer (5), not capped at fanout (3).
+	received := 0
+	deadline := time.After(2 * time.Second)
+	for received < 5 {
+		select {
+		case msg := <-receiver.Incoming():
+			if msg.From != "self" {
+				t.Errorf("expected message from self, got %s", msg.From)
+			}
+			received++
+		case <-deadline:
+			t.Errorf("timeout: got %d/5 messages", received)
+			return
+		}
+	}
+}
+
+func TestNotifyDeadSkipsDeadPeers(t *testing.T) {
+	// Arrange
+	receiver := newTestTransport(t)
+	receiver.Start()
+	port := fmt.Sprintf("%d", receiver.conn.LocalAddr().(*net.UDPAddr).Port)
+
+	ml := newTestMemberList()
+	senderTransport, err := NewTransport("0")
+	if err != nil {
+		t.Fatalf("failed to create transport: %v", err)
+	}
+	defer senderTransport.Stop()
+
+	g := NewGossiper("self", port, ml, senderTransport)
+
+	ml.Add("node1", "127.0.0.1:8080")
+	ml.MarkDead("node1")
+
+	// Act
+	g.NotifyDead()
+
+	// Assert: no message should arrive since the only peer is dead.
+	select {
+	case <-receiver.Incoming():
+		t.Error("expected no broadcast to dead peer")
+	case <-time.After(200 * time.Millisecond):
+		// expected
+	}
+}
+
+func TestNotifyDeadWithNoPeers(t *testing.T) {
+	// Arrange
+	ml := newTestMemberList()
+	g, transport, err := newTestGossiper("self", ml)
+	if err != nil {
+		t.Fatalf("failed to create gossiper: %v", err)
+	}
+	defer transport.Stop()
+
+	// Act + Assert: should not panic
+	g.NotifyDead()
 }
 
 func TestGossipRoundIncrementsHeartbeat(t *testing.T) {
