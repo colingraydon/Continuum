@@ -59,6 +59,14 @@ func loadConfig() config {
 		}
 	}
 
+	if writeQuorum > replicationFactor {
+		log.Fatalf("WRITE_QUORUM (%d) exceeds REPLICATION_FACTOR (%d): writes will always fail", writeQuorum, replicationFactor)
+	}
+
+	if readQuorum > replicationFactor {
+		log.Fatalf("READ_QUORUM (%d) exceeds REPLICATION_FACTOR (%d): reads will always fail", readQuorum, replicationFactor)
+	}
+
 	selfAddress := os.Getenv("SELF_ADDRESS")
 	if selfAddress == "" {
 		selfAddress = "localhost:8080"
