@@ -306,7 +306,7 @@ func TestHealthFilterSkipsSuspectNode(t *testing.T) {
 	healthy := map[string]bool{"node1": true, "node2": true}
 	r.SetHealthFilter(func(id string) bool { return healthy[id] })
 
-	// Act — mark node that owns the key as unhealthy
+	// Act - mark node that owns the key as unhealthy
 	first, _ := r.GetNode("mykey")
 	healthy[first.ID] = false
 	second, found := r.GetNode("mykey")

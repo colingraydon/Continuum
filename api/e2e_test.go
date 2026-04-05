@@ -37,7 +37,7 @@ func newNamedTestServerQ(t *testing.T, selfID string, rf, wq, rq int) *httptest.
 	}
 	g := gossip.NewGossiper(selfID, "0", ml, transport)
 	s := store.New()
-	srv := httptest.NewServer(NewServer(r, ml, g, s, selfID, rf, wq, rq))
+	srv := httptest.NewServer(NewServer(r, ml, g, s, selfID, rf, wq, rq, time.Second))
 	t.Cleanup(func() {
 		srv.Close()
 		transport.Stop()
@@ -62,7 +62,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 	}
 	g := gossip.NewGossiper("self", "0", ml, transport)
 	s := store.New()
-	srv := httptest.NewServer(NewServer(r, ml, g, s, "self", 3, 1, 1))
+	srv := httptest.NewServer(NewServer(r, ml, g, s, "self", 3, 1, 1, time.Second))
 	t.Cleanup(func() {
 		srv.Close()
 		transport.Stop()
@@ -325,7 +325,7 @@ func TestE2ERingConvergence(t *testing.T) {
 		closeBody(t, resp2)
 
 		if n1.ID != n2.ID {
-			t.Errorf("key %q: ring divergence — srv1=%s srv2=%s", key, n1.ID, n2.ID)
+			t.Errorf("key %q: ring divergence - srv1=%s srv2=%s", key, n1.ID, n2.ID)
 		}
 	}
 }

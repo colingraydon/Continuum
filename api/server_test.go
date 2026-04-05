@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/colingraydon/continuum/internal/gossip"
 	"github.com/colingraydon/continuum/internal/ring"
@@ -27,7 +28,7 @@ func TestRoutes(t *testing.T) {
 	}
 	defer transport.Stop()
 	g := gossip.NewGossiper("self", "0", ml, transport)
-	srv := NewServer(r, ml, g, store.New(), "self", 3, 1, 1)
+	srv := NewServer(r, ml, g, store.New(), "self", 3, 1, 1, time.Second)
 
 	tests := []struct {
 		name   string

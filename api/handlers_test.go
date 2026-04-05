@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/colingraydon/continuum/internal/gossip"
 	"github.com/colingraydon/continuum/internal/ring"
@@ -36,7 +38,7 @@ func newTestGossiper(t *testing.T, ml *gossip.MemberList) *gossip.Gossiper {
 func newTestHandler(t *testing.T) *Handler {
 	r := ring.NewRing(10)
 	ml := newTestMemberList(r)
-	return NewHandler(r, ml, newTestGossiper(t, ml), store.New(), "self", 3, 1, 1)
+	return NewHandler(r, ml, newTestGossiper(t, ml), store.New(), "self", 3, 1, 1, time.Second)
 }
 
 func TestAddNode(t *testing.T) {
@@ -487,5 +489,79 @@ func TestGossipInvalidBody(t *testing.T) {
 	// Assert
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+// newHandlerWithSlowReplica starts an httptest.Server that hangs for hangFor
+// before responding, registers it in the returned handler's ring, and returns
+// both. The handler is configured with replicaTimeout so the slow replica will
+// always exceed it. Callers must defer slow.Close().
+func newHandlerWithSlowReplica(t *testing.T, replicaTimeout, hangFor time.Duration) (*Handler, *httptest.Server) {
+	t.Helper()
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(hangFor):
+			w.WriteHeader(http.StatusNoContent)
+		case <-r.Context().Done():
+		}
+	}))
+
+	r := ring.NewRing(10)
+	ml := gossip.NewMemberList("self", "localhost", func(m *gossip.Member, status gossip.MemberStatus) {
+		switch status {
+		case gossip.MemberAlive:
+			r.AddNode(m.ID, m.Address)
+		case gossip.MemberDead:
+			r.RemoveNode(m.ID)
+		}
+	})
+	transport, err := gossip.NewTransport("0")
+	if err != nil {
+		t.Fatalf("failed to create transport: %v", err)
+	}
+	t.Cleanup(func() { transport.Stop() })
+	g := gossip.NewGossiper("self", "0", ml, transport)
+	// writeQuorum=2, readQuorum=2: self counts as one, slow replica must ack for quorum.
+	h := NewHandler(r, ml, g, store.New(), "self", 3, 2, 2, replicaTimeout)
+
+	replicaAddr := strings.TrimPrefix(slow.URL, "http://")
+	ml.Add("self", "localhost:8080")
+	ml.Add("replica1", replicaAddr)
+
+	return h, slow
+}
+
+func TestPutKeyReplicaTimeout(t *testing.T) {
+	// Arrange: replica hangs for 10x the client timeout.
+	h, slow := newHandlerWithSlowReplica(t, 50*time.Millisecond, 150*time.Millisecond)
+	defer slow.Close()
+
+	body := `{"value": "testval"}`
+	req := httptest.NewRequest(http.MethodPut, "/keys/testkey", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+
+	// Act
+	h.PutKey(w, req)
+
+	// Assert: self ack=1 < writeQuorum=2 because replica timed out.
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 when replica times out, got %d", w.Code)
+	}
+}
+
+func TestGetNodeReplicaTimeout(t *testing.T) {
+	// Arrange: replica hangs for 3x the client timeout.
+	h, slow := newHandlerWithSlowReplica(t, 50*time.Millisecond, 150*time.Millisecond)
+	defer slow.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/keys/testkey", nil)
+	w := httptest.NewRecorder()
+
+	// Act
+	h.GetNode(w, req)
+
+	// Assert: self response=1 < readQuorum=2 because replica timed out.
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 when replica times out, got %d", w.Code)
 	}
 }

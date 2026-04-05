@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/colingraydon/continuum/api"
 	"github.com/colingraydon/continuum/internal/gossip"
@@ -23,6 +24,7 @@ type config struct {
 	selfAddress       string
 	gossipPort        string
 	seedNodes         []string
+	replicaTimeout    time.Duration
 }
 
 func loadConfig() config {
@@ -77,6 +79,13 @@ func loadConfig() config {
 		seedNodes = strings.Split(val, ",")
 	}
 
+	replicaTimeout := 500 * time.Millisecond
+	if val := os.Getenv("REPLICA_TIMEOUT_MS"); val != "" {
+		if parsed, err := strconv.Atoi(val); err == nil && parsed > 0 {
+			replicaTimeout = time.Duration(parsed) * time.Millisecond
+		}
+	}
+
 	return config{
 		replicas:          replicas,
 		replicationFactor: replicationFactor,
@@ -86,6 +95,7 @@ func loadConfig() config {
 		selfAddress:       selfAddress,
 		gossipPort:        gossipPort,
 		seedNodes:         seedNodes,
+		replicaTimeout:    replicaTimeout,
 	}
 }
 
@@ -134,7 +144,7 @@ func main() {
 	r.AddNode(cfg.selfID, cfg.selfAddress)
 
 	s := store.New()
-	mux := api.NewServer(r, ml, g, s, cfg.selfID, cfg.replicationFactor, cfg.writeQuorum, cfg.readQuorum)
+	mux := api.NewServer(r, ml, g, s, cfg.selfID, cfg.replicationFactor, cfg.writeQuorum, cfg.readQuorum, cfg.replicaTimeout)
 	log.Printf("starting server on :8080 (gossip on :%s) as %s", cfg.gossipPort, cfg.selfID)
 	if err := http.ListenAndServe(":8080", mux); err != nil {
 		log.Fatalf("server failed to start: %v", err)

@@ -2,9 +2,9 @@ package gossip
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
-	"fmt"
 )
 
 func newTestGossiper(selfID string, ml *MemberList) (*Gossiper, *Transport, error) {
@@ -223,7 +223,7 @@ func TestCheckStaleSkipsSelf(t *testing.T) {
 	// Act
 	g.checkStale()
 
-	// Assert — self should still be alive
+	// Assert - self should still be alive
 	for _, m := range ml.GetAll() {
 		if m.ID == "self" {
 			if m.Status != MemberAlive {
@@ -260,7 +260,7 @@ func TestCheckStaleSkipsDead(t *testing.T) {
 	// Act
 	g.checkStale()
 
-	// Assert — no additional status change for already dead node
+	// Assert - no additional status change for already dead node
 	if callCount != 0 {
 		t.Errorf("expected no callbacks for dead node, got %d", callCount)
 	}
@@ -277,7 +277,7 @@ func TestStartAndStop(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Act + Assert — should not panic
+	// Act + Assert - should not panic
 	g.Start(ctx)
 	cancel()
 	g.Stop()

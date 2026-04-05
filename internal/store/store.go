@@ -107,18 +107,18 @@ func (s *Store) Put(key, value string, v VectorClockVersion) {
 	var survivors []Sibling
 	for _, sib := range existing.Siblings {
 		if v.HappensBefore(sib.Version) {
-			// Incoming is dominated by this sibling — discard it.
+			// Incoming is dominated by this sibling - discard it.
 			return
 		}
 		if sib.Version.Equal(v) {
-			// Same clock — idempotent write, no change.
+			// Same clock - idempotent write, no change.
 			return
 		}
 		if !sib.Version.HappensBefore(v) {
-			// Concurrent — keep this sibling alongside incoming.
+			// Concurrent - keep this sibling alongside incoming.
 			survivors = append(survivors, sib)
 		}
-		// else: sib is dominated by v — drop it.
+		// else: sib is dominated by v - drop it.
 	}
 
 	s.data[key] = Entry{Siblings: append(survivors, incoming)}
