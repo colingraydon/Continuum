@@ -61,9 +61,11 @@ func (v VectorClockVersion) Equal(other VectorClockVersion) bool {
 	return true
 }
 
-// Sibling is a single causally-distinct value for a key.
+// Sibling is a single causally-distinct value for a key. Deleted=true marks a
+// tombstone: the key was deleted at this vector clock position.
 type Sibling struct {
 	Value   string
+	Deleted bool
 	Version VectorClockVersion
 	Hash    uint32 // murmur3(value), reserved for Merkle anti-entropy
 }
@@ -84,20 +86,9 @@ func New() *Store {
 	return &Store{data: make(map[string]Entry)}
 }
 
-// Put stores key=value at version v. If v is dominated by any existing sibling
-// the write is dropped. If v dominates existing siblings they are replaced. If v
-// is concurrent with existing siblings it is appended, producing a conflict.
-// Equal clocks are treated as an idempotent write and ignored.
-func (s *Store) Put(key, value string, v VectorClockVersion) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	incoming := Sibling{
-		Value:   value,
-		Version: v,
-		Hash:    murmur3.Sum32([]byte(value)),
-	}
-
+// applySibling applies conflict-resolution logic for incoming against the
+// existing entry. Must be called with s.mu held for writing.
+func (s *Store) applySibling(key string, incoming Sibling) {
 	existing, ok := s.data[key]
 	if !ok {
 		s.data[key] = Entry{Siblings: []Sibling{incoming}}
@@ -106,22 +97,42 @@ func (s *Store) Put(key, value string, v VectorClockVersion) {
 
 	var survivors []Sibling
 	for _, sib := range existing.Siblings {
-		if v.HappensBefore(sib.Version) {
-			// Incoming is dominated by this sibling - discard it.
+		if incoming.Version.HappensBefore(sib.Version) {
 			return
 		}
-		if sib.Version.Equal(v) {
-			// Same clock - idempotent write, no change.
+		if sib.Version.Equal(incoming.Version) {
 			return
 		}
-		if !sib.Version.HappensBefore(v) {
-			// Concurrent - keep this sibling alongside incoming.
+		if !sib.Version.HappensBefore(incoming.Version) {
 			survivors = append(survivors, sib)
 		}
-		// else: sib is dominated by v - drop it.
 	}
 
 	s.data[key] = Entry{Siblings: append(survivors, incoming)}
+}
+
+// Put stores key=value at version v. If v is dominated by any existing sibling
+// the write is dropped. If v dominates existing siblings they are replaced. If v
+// is concurrent with existing siblings it is appended, producing a conflict.
+// Equal clocks are treated as an idempotent write and ignored.
+func (s *Store) Put(key, value string, v VectorClockVersion) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.applySibling(key, Sibling{
+		Value:   value,
+		Version: v,
+		Hash:    murmur3.Sum32([]byte(value)),
+	})
+}
+
+// Delete writes a tombstone for key at version v. The tombstone participates in
+// conflict resolution identically to a value write: it wins if v dominates
+// existing siblings, loses if dominated, and becomes a sibling on concurrent
+// writes. Tombstones are never garbage-collected until anti-entropy is in place.
+func (s *Store) Delete(key string, v VectorClockVersion) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.applySibling(key, Sibling{Deleted: true, Version: v})
 }
 
 func (s *Store) Get(key string) (Entry, bool) {

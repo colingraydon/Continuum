@@ -51,10 +51,12 @@ type AddNodeRequest struct {
 
 // SiblingResponse is a single causally-distinct value returned when concurrent
 // writes exist for a key. Clients should resolve the conflict and write back
-// a new value with a clock that dominates all siblings.
+// a new value with a clock that dominates all siblings. Deleted=true means
+// this sibling is a tombstone (concurrent write/delete conflict).
 type SiblingResponse struct {
-	Value  string            `json:"value"`
-	Clocks map[string]uint64 `json:"clocks"`
+	Value   string            `json:"value,omitempty"`
+	Clocks  map[string]uint64 `json:"clocks"`
+	Deleted bool              `json:"deleted,omitempty"`
 }
 
 type NodeResponse struct {
@@ -64,6 +66,7 @@ type NodeResponse struct {
 	Value    string            `json:"value,omitempty"`
 	Siblings []SiblingResponse `json:"siblings,omitempty"`
 	Clocks   map[string]uint64 `json:"clocks,omitempty"`
+	Deleted  bool              `json:"deleted,omitempty"`
 }
 
 type PutKeyRequest struct {
@@ -99,13 +102,19 @@ func entryToResponse(id, status string, entry store.Entry) NodeResponse {
 	r := NodeResponse{ID: id, Status: status}
 	switch len(entry.Siblings) {
 	case 1:
-		r.Value = entry.Siblings[0].Value
-		r.Clocks = entry.Siblings[0].Version.Clocks
+		sib := entry.Siblings[0]
+		r.Clocks = sib.Version.Clocks
+		if sib.Deleted {
+			r.Deleted = true
+		} else {
+			r.Value = sib.Value
+		}
 	default:
 		for _, sib := range entry.Siblings {
 			r.Siblings = append(r.Siblings, SiblingResponse{
-				Value:  sib.Value,
-				Clocks: sib.Version.Clocks,
+				Value:   sib.Value,
+				Clocks:  sib.Version.Clocks,
+				Deleted: sib.Deleted,
 			})
 		}
 	}
@@ -115,26 +124,29 @@ func entryToResponse(id, status string, entry store.Entry) NodeResponse {
 // mergeResponses merges sibling sets from multiple replica responses into a
 // single canonical result. Entries dominated by a higher-clock sibling are
 // dropped; genuinely concurrent entries are preserved as siblings.
-func mergeResponses(responses []NodeResponse) (value string, siblings []SiblingResponse) {
+// deleted=true means the winning result is a tombstone with no siblings.
+func mergeResponses(responses []NodeResponse) (value string, siblings []SiblingResponse, deleted bool) {
 	type candidate struct {
-		value  string
-		clocks map[string]uint64
+		value   string
+		clocks  map[string]uint64
+		deleted bool
 	}
 
-	// Flatten all (value, clock) pairs across every replica response.
+	// Flatten all (value, clock) pairs across every replica response,
+	// including tombstones.
 	var all []candidate
 	for _, r := range responses {
 		if len(r.Siblings) > 0 {
 			for _, s := range r.Siblings {
-				all = append(all, candidate{s.Value, s.Clocks})
+				all = append(all, candidate{s.Value, s.Clocks, s.Deleted})
 			}
-		} else if r.Value != "" {
-			all = append(all, candidate{r.Value, r.Clocks})
+		} else if r.Value != "" || r.Deleted {
+			all = append(all, candidate{r.Value, r.Clocks, r.Deleted})
 		}
 	}
 
 	if len(all) == 0 {
-		return "", nil
+		return "", nil, false
 	}
 
 	// Retain only non-dominated, deduplicated candidates.
@@ -167,13 +179,13 @@ func mergeResponses(responses []NodeResponse) (value string, siblings []SiblingR
 	}
 
 	if len(survivors) == 1 {
-		return survivors[0].value, nil
+		return survivors[0].value, nil, survivors[0].deleted
 	}
 	var sibs []SiblingResponse
 	for _, s := range survivors {
-		sibs = append(sibs, SiblingResponse{Value: s.value, Clocks: s.clocks})
+		sibs = append(sibs, SiblingResponse{Value: s.value, Clocks: s.clocks, Deleted: s.deleted})
 	}
-	return "", sibs
+	return "", sibs, false
 }
 
 func (h *Handler) AddNode(w http.ResponseWriter, req *http.Request) {
@@ -292,7 +304,11 @@ func (h *Handler) GetNode(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	value, siblings := mergeResponses(responses)
+	value, siblings, deleted := mergeResponses(responses)
+	if deleted && len(siblings) == 0 {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
 	primary := nodes[0]
 	resp := NodeResponse{
 		ID:       primary.ID,
@@ -380,6 +396,91 @@ func (h *Handler) PutKey(w http.ResponseWriter, req *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+type DeleteKeyRequest struct {
+	Clocks map[string]uint64 `json:"clocks,omitempty"`
+}
+
+func (h *Handler) DeleteKey(w http.ResponseWriter, req *http.Request) {
+	key := strings.TrimPrefix(req.URL.Path, "/keys/")
+	if key == "" {
+		http.Error(w, "key is required", http.StatusBadRequest)
+		return
+	}
+	var body DeleteKeyRequest
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	incoming := store.VectorClockVersion{Clocks: body.Clocks}
+	if incoming.Clocks == nil {
+		incoming.Clocks = make(map[string]uint64)
+	}
+
+	// Replica delete: store tombstone as-is without fan-out.
+	if req.Header.Get("X-Proxied-From") != "" {
+		h.store.Delete(key, incoming)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// Bootstrap clock from current local entry if the client didn't provide one,
+	// so the tombstone's clock dominates the existing value rather than equaling it.
+	if len(incoming.Clocks) == 0 {
+		if entry, ok := h.store.Get(key); ok {
+			for _, sib := range entry.Siblings {
+				for nodeID, c := range sib.Version.Clocks {
+					if incoming.Clocks[nodeID] < c {
+						incoming.Clocks[nodeID] = c
+					}
+				}
+			}
+		}
+	}
+
+	// Primary delete: increment self's counter and store tombstone locally.
+	version := incoming.Increment(h.selfID)
+	h.store.Delete(key, version)
+
+	nodes := h.ring.GetReplicationNodes(key, h.replicationFactor)
+	quorum := min(h.writeQuorum, len(nodes))
+
+	acks := 1 // self
+	if acks >= quorum {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	type result struct{ err error }
+	pending := 0
+	results := make(chan result, len(nodes))
+	for _, n := range nodes {
+		if n.ID == h.selfID {
+			continue
+		}
+		pending++
+		go func(addr string) {
+			results <- result{h.replicateDeleteToSync(addr, key, version.Clocks)}
+		}(n.Address)
+	}
+
+	for range pending {
+		r := <-results
+		if r.err == nil {
+			acks++
+		}
+		if acks >= quorum {
+			break
+		}
+	}
+
+	if acks < quorum {
+		http.Error(w, "write quorum not met", http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // replicateToSync sends a replica write to addr and returns an error if the
 // write fails or the replica responds with a non-204 status.
 func (h *Handler) replicateToSync(address, key, value string, clocks map[string]uint64) error {
@@ -388,6 +489,30 @@ func (h *Handler) replicateToSync(address, key, value string, clocks map[string]
 		return err
 	}
 	req, err := http.NewRequest(http.MethodPut, "http://"+address+"/keys/"+key, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Proxied-From", h.selfID)
+	resp, err := h.replicaClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("replica returned %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// replicateDeleteToSync sends a replica tombstone to addr and returns an error
+// if the delete fails or the replica responds with a non-204 status.
+func (h *Handler) replicateDeleteToSync(address, key string, clocks map[string]uint64) error {
+	body, err := json.Marshal(DeleteKeyRequest{Clocks: clocks})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodDelete, "http://"+address+"/keys/"+key, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}

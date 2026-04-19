@@ -24,6 +24,8 @@ The gossip layer drives the ring: when membership changes (alive, suspect, dead)
 
 In-memory key-value storage with vector clock versioning. Each entry holds a value, a `VectorClockVersion`, and a precomputed murmur3 hash of the value (reserved for future Merkle tree anti-entropy). Conflict resolution uses the standard Lamport partial order: a write is accepted only if the existing entry's clock happens-before the incoming one. Concurrent writes keep the existing value.
 
+Deletes are implemented as tombstones: a `Deleted` sibling written at an incremented vector clock. Tombstones participate in conflict resolution identically to value writes. A tombstone with a dominating clock wins, a stale tombstone is dropped, and a concurrent write/delete produces siblings. This prevents resurrection: a stale replica that missed a delete cannot revive the key through anti-entropy or a consistent read.
+
 ### Stats Aggregator (`internal/stats`)
 
 A composition layer that combines ring statistics (vnode distribution, key counts, variance) with gossip membership status (alive/suspect/dead node counts) into a single unified view. Keeps the ring package free of membership concerns.

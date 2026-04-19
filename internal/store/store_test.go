@@ -231,3 +231,87 @@ func TestIncrementDoesNotMutateReceiver(t *testing.T) {
 		t.Errorf("Increment mutated receiver: node1=%d", original.Clocks["node1"])
 	}
 }
+
+func TestDeleteWritesTombstone(t *testing.T) {
+	s := New()
+	s.Put("k", "v", clock(map[string]uint64{"node1": 1}))
+	s.Delete("k", clock(map[string]uint64{"node1": 2}))
+
+	e, ok := s.Get("k")
+	if !ok {
+		t.Fatal("expected entry to exist after delete")
+	}
+	if len(e.Siblings) != 1 {
+		t.Fatalf("expected 1 sibling, got %d", len(e.Siblings))
+	}
+	if !e.Siblings[0].Deleted {
+		t.Error("expected tombstone sibling")
+	}
+}
+
+func TestDeleteOnMissingKeyCreatesTombstone(t *testing.T) {
+	s := New()
+	s.Delete("k", clock(map[string]uint64{"node1": 1}))
+
+	e, ok := s.Get("k")
+	if !ok {
+		t.Fatal("expected entry to exist")
+	}
+	if !e.Siblings[0].Deleted {
+		t.Error("expected tombstone for delete on missing key")
+	}
+}
+
+func TestOlderDeleteDropped(t *testing.T) {
+	s := New()
+	s.Put("k", "v", clock(map[string]uint64{"node1": 2}))
+	s.Delete("k", clock(map[string]uint64{"node1": 1}))
+
+	e, _ := s.Get("k")
+	if len(e.Siblings) != 1 {
+		t.Fatalf("expected 1 sibling, got %d", len(e.Siblings))
+	}
+	if e.Siblings[0].Deleted {
+		t.Error("stale delete should be dropped; value should survive")
+	}
+	if e.Siblings[0].Value != "v" {
+		t.Errorf("expected 'v', got %q", e.Siblings[0].Value)
+	}
+}
+
+func TestConcurrentWriteAndDeleteAreSiblings(t *testing.T) {
+	s := New()
+	s.Put("k", "v", clock(map[string]uint64{"node1": 1}))
+	s.Delete("k", clock(map[string]uint64{"node2": 1}))
+
+	e, _ := s.Get("k")
+	if len(e.Siblings) != 2 {
+		t.Fatalf("expected 2 siblings for concurrent write/delete, got %d", len(e.Siblings))
+	}
+	var hasValue, hasTombstone bool
+	for _, sib := range e.Siblings {
+		if sib.Deleted {
+			hasTombstone = true
+		} else {
+			hasValue = true
+		}
+	}
+	if !hasValue || !hasTombstone {
+		t.Error("expected one value sibling and one tombstone sibling")
+	}
+}
+
+func TestDominatingDeleteResolvesSiblings(t *testing.T) {
+	s := New()
+	s.Put("k", "first", clock(map[string]uint64{"node1": 1}))
+	s.Put("k", "second", clock(map[string]uint64{"node2": 1}))
+	s.Delete("k", clock(map[string]uint64{"node1": 1, "node2": 1}))
+
+	e, _ := s.Get("k")
+	if len(e.Siblings) != 1 {
+		t.Fatalf("expected 1 sibling after dominating delete, got %d", len(e.Siblings))
+	}
+	if !e.Siblings[0].Deleted {
+		t.Error("expected tombstone to win over dominated siblings")
+	}
+}
