@@ -565,3 +565,135 @@ func TestGetNodeReplicaTimeout(t *testing.T) {
 		t.Errorf("expected 503 when replica times out, got %d", w.Code)
 	}
 }
+
+func TestDeleteKeyMissingKey(t *testing.T) {
+	h := newTestHandler(t)
+	req := httptest.NewRequest(http.MethodDelete, "/keys/", bytes.NewBufferString("{}"))
+	w := httptest.NewRecorder()
+
+	h.DeleteKey(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestDeleteKeyInvalidBody(t *testing.T) {
+	h := newTestHandler(t)
+	h.memberList.Add("self", "localhost:8080")
+	req := httptest.NewRequest(http.MethodDelete, "/keys/k", bytes.NewBufferString("not json"))
+	w := httptest.NewRecorder()
+
+	h.DeleteKey(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestDeleteKeyLocalAndReadBack(t *testing.T) {
+	// Arrange: single-node cluster, WQ=1, RQ=1.
+	h := newTestHandler(t)
+	h.memberList.Add("self", "localhost:8080")
+	h.selfID = "self"
+
+	// Write a value.
+	putReq := httptest.NewRequest(http.MethodPut, "/keys/k", bytes.NewBufferString(`{"value":"v"}`))
+	putReq.Header.Set("Content-Type", "application/json")
+	putW := httptest.NewRecorder()
+	h.PutKey(putW, putReq)
+	if putW.Code != http.StatusNoContent {
+		t.Fatalf("put: expected 204, got %d", putW.Code)
+	}
+
+	// Delete it.
+	delReq := httptest.NewRequest(http.MethodDelete, "/keys/k", bytes.NewBufferString("{}"))
+	delW := httptest.NewRecorder()
+	h.DeleteKey(delW, delReq)
+	if delW.Code != http.StatusNoContent {
+		t.Fatalf("delete: expected 204, got %d", delW.Code)
+	}
+
+	// Read should return 404.
+	getReq := httptest.NewRequest(http.MethodGet, "/keys/k", nil)
+	getW := httptest.NewRecorder()
+	h.GetNode(getW, getReq)
+	if getW.Code != http.StatusNotFound {
+		t.Errorf("expected 404 after delete, got %d", getW.Code)
+	}
+}
+
+func TestDeleteKeyReplicaPassthrough(t *testing.T) {
+	// A replica delete (X-Proxied-From set) stores tombstone without fan-out.
+	h := newTestHandler(t)
+	h.selfID = "self"
+
+	req := httptest.NewRequest(http.MethodDelete, "/keys/k", bytes.NewBufferString(`{"clocks":{"node1":1}}`))
+	req.Header.Set("X-Proxied-From", "node1")
+	w := httptest.NewRecorder()
+
+	h.DeleteKey(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", w.Code)
+	}
+	e, ok := h.store.Get("k")
+	if !ok || !e.Siblings[0].Deleted {
+		t.Error("expected tombstone in local store after replica delete")
+	}
+}
+
+func TestDeleteKeyClockBootstrapping(t *testing.T) {
+	// Without bootstrapping, the delete increments from an empty clock and
+	// produces {self:1}, which equals the value's clock and is dropped as
+	// idempotent. Bootstrapping reads the current entry first so the tombstone
+	// gets {self:2}, which dominates {self:1} and wins.
+	h := newTestHandler(t)
+	h.memberList.Add("self", "localhost:8080")
+	h.selfID = "self"
+
+	putReq := httptest.NewRequest(http.MethodPut, "/keys/k", bytes.NewBufferString(`{"value":"v"}`))
+	putReq.Header.Set("Content-Type", "application/json")
+	h.PutKey(httptest.NewRecorder(), putReq)
+
+	// Confirm the value is stored at {self:1}.
+	entry, ok := h.store.Get("k")
+	if !ok || entry.Siblings[0].Version.Clocks["self"] != 1 {
+		t.Fatalf("expected value at clock {self:1}, got %+v", entry)
+	}
+
+	// Delete with no clocks provided — bootstrapping must kick in.
+	delReq := httptest.NewRequest(http.MethodDelete, "/keys/k", bytes.NewBufferString("{}"))
+	delW := httptest.NewRecorder()
+	h.DeleteKey(delW, delReq)
+	if delW.Code != http.StatusNoContent {
+		t.Fatalf("delete: expected 204, got %d", delW.Code)
+	}
+
+	// Tombstone must have been written (not silently dropped).
+	entry, ok = h.store.Get("k")
+	if !ok {
+		t.Fatal("expected entry to exist after delete")
+	}
+	if len(entry.Siblings) != 1 || !entry.Siblings[0].Deleted {
+		t.Errorf("expected single tombstone sibling, got %+v", entry.Siblings)
+	}
+	if entry.Siblings[0].Version.Clocks["self"] != 2 {
+		t.Errorf("expected tombstone clock {self:2}, got %v", entry.Siblings[0].Version.Clocks)
+	}
+}
+
+func TestDeleteKeyReplicaTimeout(t *testing.T) {
+	h, slow := newHandlerWithSlowReplica(t, 50*time.Millisecond, 150*time.Millisecond)
+	defer slow.Close()
+
+	req := httptest.NewRequest(http.MethodDelete, "/keys/testkey", bytes.NewBufferString("{}"))
+	w := httptest.NewRecorder()
+
+	h.DeleteKey(w, req)
+
+	// self ack=1 < writeQuorum=2 because replica timed out.
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 when replica times out, got %d", w.Code)
+	}
+}

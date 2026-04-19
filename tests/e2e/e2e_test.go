@@ -183,6 +183,21 @@ func (n *testNode) seedWrite(t *testing.T, key, value, clocksJSON string) {
 	resp.Body.Close()
 }
 
+func (n *testNode) delete(t *testing.T, key string) int {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodDelete, n.baseURL+"/keys/"+key, strings.NewReader("{}"))
+	if err != nil {
+		t.Fatalf("failed to build DELETE: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE /keys/%s on %s: %v", key, n.id, err)
+	}
+	resp.Body.Close()
+	return resp.StatusCode
+}
+
 // kill sends SIGKILL to the node and waits for it to exit.
 func (n *testNode) kill(t *testing.T) {
 	t.Helper()
@@ -394,6 +409,78 @@ func TestProcessNodeFailureMidCluster(t *testing.T) {
 	}
 	if nr.Value != "post-failure" {
 		t.Errorf("expected 'post-failure', got %q", nr.Value)
+	}
+}
+
+// TestProcessDeleteSingleNode verifies that a deleted key returns 404.
+func TestProcessDeleteSingleNode(t *testing.T) {
+	n := startNode(t)
+	n.registerPeer(t, n)
+
+	if code := n.put(t, "fruit", "apple"); code != http.StatusNoContent {
+		t.Fatalf("put: expected 204, got %d", code)
+	}
+	if code := n.delete(t, "fruit"); code != http.StatusNoContent {
+		t.Fatalf("delete: expected 204, got %d", code)
+	}
+	_, code := n.get(t, "fruit")
+	if code != http.StatusNotFound {
+		t.Errorf("expected 404 after delete, got %d", code)
+	}
+}
+
+// TestProcessDeleteReplicatedAcrossCluster verifies that a quorum delete fans
+// out to all replicas so any node returns 404 after the delete.
+func TestProcessDeleteReplicatedAcrossCluster(t *testing.T) {
+	rf := "REPLICATION_FACTOR=3"
+	wq := "WRITE_QUORUM=3"
+	rq := "READ_QUORUM=1"
+
+	n1 := startNode(t, rf, wq, rq)
+	n2 := startNode(t, rf, wq, rq)
+	n3 := startNode(t, rf, wq, rq)
+	mesh(t, n1, n2, n3)
+
+	if code := n1.put(t, "color", "red"); code != http.StatusNoContent {
+		t.Fatalf("put: expected 204, got %d", code)
+	}
+	if code := n1.delete(t, "color"); code != http.StatusNoContent {
+		t.Fatalf("delete: expected 204, got %d", code)
+	}
+
+	// WQ=3 guaranteed all nodes acked, so check each node directly.
+	for _, n := range []*testNode{n1, n2, n3} {
+		_, code := n.get(t, "color")
+		if code != http.StatusNotFound {
+			t.Errorf("node %s: expected 404, got %d", n.id, code)
+		}
+	}
+}
+
+// TestProcessDeleteTombstoneBeatsStaleWrite verifies that a consistent read
+// (RQ=2) picks up the tombstone from one replica over a stale value on another.
+func TestProcessDeleteTombstoneBeatsStaleWrite(t *testing.T) {
+	rf := "REPLICATION_FACTOR=2"
+	rq := "READ_QUORUM=2"
+
+	n1 := startNode(t, rf, "WRITE_QUORUM=1", rq)
+	n2 := startNode(t, rf, "WRITE_QUORUM=1", rq)
+	mesh(t, n1, n2)
+
+	// Write to n1 only (WQ=1).
+	if code := n1.put(t, "ghost", "haunted"); code != http.StatusNoContent {
+		t.Fatalf("put: expected 204, got %d", code)
+	}
+
+	// Delete via n1 (WQ=1 again): tombstone lands on n1, n2 still has the value.
+	if code := n1.delete(t, "ghost"); code != http.StatusNoContent {
+		t.Fatalf("delete: expected 204, got %d", code)
+	}
+
+	// Consistent read (RQ=2) collects both: tombstone on n1 dominates value on n2.
+	_, code := n2.get(t, "ghost")
+	if code != http.StatusNotFound {
+		t.Errorf("expected 404 (tombstone wins over stale value), got %d", code)
 	}
 }
 

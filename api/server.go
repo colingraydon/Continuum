@@ -18,6 +18,7 @@ func NewServer(r *ring.Ring, ml *gossip.MemberList, g *gossip.Gossiper, s *store
 	mux.HandleFunc("GET /nodes", h.GetNodes)
 	mux.HandleFunc("GET /keys/", h.GetNode)
 	mux.HandleFunc("PUT /keys/", h.PutKey)
+	mux.HandleFunc("DELETE /keys/", h.DeleteKey)
 	mux.HandleFunc("GET /stats", h.GetStats)
 	mux.HandleFunc("POST /replicate", h.GetReplicationNodes)
 	mux.HandleFunc("GET /health", h.Health)
