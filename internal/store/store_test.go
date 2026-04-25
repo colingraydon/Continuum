@@ -315,3 +315,113 @@ func TestDominatingDeleteResolvesSiblings(t *testing.T) {
 		t.Error("expected tombstone to win over dominated siblings")
 	}
 }
+
+// --- onUpdate callback tests ---
+
+func TestOnUpdateFiredOnPut(t *testing.T) {
+	s := New()
+	var gotKey string
+	var gotHash uint32
+	var calls int
+	s.SetOnUpdate(func(key string, hash uint32) {
+		gotKey = key
+		gotHash = hash
+		calls++
+	})
+
+	v := clock(map[string]uint64{"node1": 1})
+	s.Put("k", "v", v)
+
+	if calls != 1 {
+		t.Fatalf("expected 1 callback call, got %d", calls)
+	}
+	if gotKey != "k" {
+		t.Errorf("expected key 'k', got %q", gotKey)
+	}
+	e, _ := s.Get("k")
+	if gotHash != entryHash(e) {
+		t.Errorf("callback hash %d does not match entryHash %d", gotHash, entryHash(e))
+	}
+}
+
+func TestOnUpdateFiredOnDelete(t *testing.T) {
+	s := New()
+	var gotHash uint32
+	s.SetOnUpdate(func(_ string, hash uint32) { gotHash = hash })
+
+	s.Delete("k", clock(map[string]uint64{"node1": 1}))
+
+	if gotHash != tombstoneSentinel {
+		t.Errorf("expected tombstone sentinel %#x, got %#x", tombstoneSentinel, gotHash)
+	}
+}
+
+func TestOnUpdateNotFiredOnDominatedPut(t *testing.T) {
+	s := New()
+	var calls int
+	s.SetOnUpdate(func(_ string, _ uint32) { calls++ })
+
+	s.Put("k", "new", clock(map[string]uint64{"node1": 2}))
+	calls = 0 // reset after initial write
+
+	s.Put("k", "old", clock(map[string]uint64{"node1": 1}))
+
+	if calls != 0 {
+		t.Errorf("callback should not fire for a dominated Put, got %d calls", calls)
+	}
+}
+
+func TestOnUpdateNotFiredOnEqualClockPut(t *testing.T) {
+	s := New()
+	var calls int
+	s.SetOnUpdate(func(_ string, _ uint32) { calls++ })
+
+	v := clock(map[string]uint64{"node1": 1})
+	s.Put("k", "v", v)
+	calls = 0
+
+	s.Put("k", "v", v)
+
+	if calls != 0 {
+		t.Errorf("callback should not fire for an idempotent Put, got %d calls", calls)
+	}
+}
+
+func TestOnUpdateNotFiredOnDominatedDelete(t *testing.T) {
+	s := New()
+	var calls int
+	s.SetOnUpdate(func(_ string, _ uint32) { calls++ })
+
+	s.Put("k", "v", clock(map[string]uint64{"node1": 2}))
+	calls = 0
+
+	s.Delete("k", clock(map[string]uint64{"node1": 1}))
+
+	if calls != 0 {
+		t.Errorf("callback should not fire for a dominated Delete, got %d calls", calls)
+	}
+}
+
+func TestOnUpdateHashForSiblings(t *testing.T) {
+	s := New()
+	var lastHash uint32
+	s.SetOnUpdate(func(_ string, hash uint32) { lastHash = hash })
+
+	s.Put("k", "first", clock(map[string]uint64{"node1": 1}))
+	s.Put("k", "second", clock(map[string]uint64{"node2": 1}))
+
+	e, _ := s.Get("k")
+	if len(e.Siblings) != 2 {
+		t.Fatalf("expected 2 siblings, got %d", len(e.Siblings))
+	}
+	if lastHash != entryHash(e) {
+		t.Errorf("callback hash %#x does not match entryHash %#x", lastHash, entryHash(e))
+	}
+}
+
+func TestOnUpdateNoPanicWithoutCallback(t *testing.T) {
+	s := New()
+	// No SetOnUpdate call — Put and Delete must not panic.
+	s.Put("k", "v", clock(map[string]uint64{"node1": 1}))
+	s.Delete("k", clock(map[string]uint64{"node1": 2}))
+}
