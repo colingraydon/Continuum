@@ -175,3 +175,16 @@ func (s *Store) Get(key string) (Entry, bool) {
 	e, ok := s.data[key]
 	return e, ok
 }
+
+// KeyHashes returns a snapshot of every key and its current entry hash.
+// Used by the anti-entropy manager to populate Merkle trees on startup and by
+// the sync endpoint to compute bucket hashes on-the-fly.
+func (s *Store) KeyHashes() map[string]uint32 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]uint32, len(s.data))
+	for key, entry := range s.data {
+		out[key] = entryHash(entry)
+	}
+	return out
+}

@@ -111,3 +111,49 @@ func (t *Tree) BucketKeys(i int) []string {
 	sort.Strings(keys)
 	return keys
 }
+
+// HashKey returns murmur3(key) — the hash used to place a key on the ring and
+// assign it to a vnode range. Exported so callers can check range membership
+// without duplicating the hash function.
+func HashKey(key string) uint32 {
+	return murmur3.Sum32([]byte(key))
+}
+
+// BucketIndex returns the bucket index for key. Same assignment as Update.
+func BucketIndex(key string) int {
+	return bucketIndex(key)
+}
+
+// ComputeBucketHash computes the aggregate hash for a set of (key, entryHash)
+// pairs using the same algorithm as the tree's internal bucket. Exported so
+// the sync endpoint can compute bucket hashes on-the-fly from the store.
+func ComputeBucketHash(entries map[string]uint32) uint32 {
+	if len(entries) == 0 {
+		return 0
+	}
+	keys := make([]string, 0, len(entries))
+	for k := range entries {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	h := murmur3.New32()
+	var buf [4]byte
+	for _, k := range keys {
+		h.Write([]byte(k))
+		binary.BigEndian.PutUint32(buf[:], entries[k])
+		h.Write(buf[:])
+	}
+	return h.Sum32()
+}
+
+// ComputeRootHash computes the root hash from a slice of bucket hashes, using
+// the same algorithm as RootHash.
+func ComputeRootHash(bucketHashes []uint32) uint32 {
+	h := murmur3.New32()
+	var buf [4]byte
+	for _, bh := range bucketHashes {
+		binary.BigEndian.PutUint32(buf[:], bh)
+		h.Write(buf[:])
+	}
+	return h.Sum32()
+}

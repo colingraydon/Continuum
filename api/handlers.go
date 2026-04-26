@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,7 +22,6 @@ type Handler struct {
 	memberList        *gossip.MemberList
 	gossiper          *gossip.Gossiper
 	store             *store.Store
-	tree              *merkle.Tree
 	selfID            string
 	replicationFactor int
 	writeQuorum       int
@@ -30,14 +30,13 @@ type Handler struct {
 	replicaClient     *http.Client
 }
 
-func NewHandler(r *ring.Ring, ml *gossip.MemberList, g *gossip.Gossiper, s *store.Store, t *merkle.Tree, selfID string, replicationFactor, writeQuorum, readQuorum int, replicaTimeout time.Duration) *Handler {
+func NewHandler(r *ring.Ring, ml *gossip.MemberList, g *gossip.Gossiper, s *store.Store, selfID string, replicationFactor, writeQuorum, readQuorum int, replicaTimeout time.Duration) *Handler {
 	return &Handler{
 		ring:              r,
 		aggregator:        stats.NewAggregator(r, ml),
 		memberList:        ml,
 		gossiper:          g,
 		store:             s,
-		tree:              t,
 		selfID:            selfID,
 		replicationFactor: replicationFactor,
 		writeQuorum:       writeQuorum,
@@ -647,15 +646,50 @@ type SyncKeysResponse struct {
 	Entries map[string][]SyncSibling `json:"entries"`
 }
 
-// GetSyncState returns the root hash and per-bucket hashes of this node's
-// Merkle tree. Used by the anti-entropy loop to cheaply detect divergence.
+// GetSyncState returns the root hash and per-bucket hashes for the requested
+// vnode (?vnode=<endHash>). Computes bucket hashes on-the-fly from the local
+// store so that replicas can serve sync state without maintaining their own
+// Merkle trees.
 func (h *Handler) GetSyncState(w http.ResponseWriter, req *http.Request) {
-	buckets := make([]uint32, merkle.BucketCount)
-	for i := range buckets {
-		buckets[i] = h.tree.BucketHash(i)
+	param := req.URL.Query().Get("vnode")
+	if param == "" {
+		http.Error(w, "vnode param required", http.StatusBadRequest)
+		return
 	}
+	parsed, err := strconv.ParseUint(param, 10, 32)
+	if err != nil {
+		http.Error(w, "invalid vnode param", http.StatusBadRequest)
+		return
+	}
+	vnodeHash := uint32(parsed)
+
+	vr, ok := h.ring.GetVnodeRange(vnodeHash)
+	if !ok {
+		http.Error(w, "unknown vnode", http.StatusNotFound)
+		return
+	}
+
+	buckets := make([]map[string]uint32, merkle.BucketCount)
+	for i := range buckets {
+		buckets[i] = make(map[string]uint32)
+	}
+	for key, hash := range h.store.KeyHashes() {
+		if !vr.Contains(merkle.HashKey(key)) {
+			continue
+		}
+		buckets[merkle.BucketIndex(key)][key] = hash
+	}
+
+	bucketHashes := make([]uint32, merkle.BucketCount)
+	for i, entries := range buckets {
+		bucketHashes[i] = merkle.ComputeBucketHash(entries)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(SyncStateResponse{Root: h.tree.RootHash(), Buckets: buckets}); err != nil {
+	if err := json.NewEncoder(w).Encode(SyncStateResponse{
+		Root:    merkle.ComputeRootHash(bucketHashes),
+		Buckets: bucketHashes,
+	}); err != nil {
 		http.Error(w, "failed to write response", http.StatusInternalServerError)
 	}
 }

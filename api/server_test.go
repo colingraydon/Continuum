@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/colingraydon/continuum/internal/gossip"
-	"github.com/colingraydon/continuum/internal/merkle"
 	"github.com/colingraydon/continuum/internal/ring"
 	"github.com/colingraydon/continuum/internal/store"
 )
@@ -29,10 +28,8 @@ func TestRoutes(t *testing.T) {
 	}
 	defer transport.Stop()
 	g := gossip.NewGossiper("self", "0", ml, transport)
-	tree := merkle.New()
 	s := store.New()
-	s.SetOnUpdate(tree.Update)
-	srv := NewServer(r, ml, g, s, tree, "self", 3, 1, 1, time.Second)
+	srv := NewServer(r, ml, g, s, "self", 3, 1, 1, time.Second)
 
 	tests := []struct {
 		name   string
@@ -49,7 +46,7 @@ func TestRoutes(t *testing.T) {
 		{"replicate", http.MethodPost, "/replicate", http.StatusBadRequest},
 		{"health", http.MethodGet, "/health", http.StatusOK},
 		{"gossip", http.MethodPost, "/gossip", http.StatusBadRequest},
-		{"sync state", http.MethodGet, "/sync", http.StatusOK},
+		{"sync state missing vnode", http.MethodGet, "/sync", http.StatusBadRequest},
 		{"sync keys", http.MethodPost, "/sync/keys", http.StatusBadRequest},
 	}
 
