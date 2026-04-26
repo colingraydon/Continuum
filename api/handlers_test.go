@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/colingraydon/continuum/internal/gossip"
+	"github.com/colingraydon/continuum/internal/merkle"
 	"github.com/colingraydon/continuum/internal/ring"
 	"github.com/colingraydon/continuum/internal/store"
 )
@@ -38,7 +39,10 @@ func newTestGossiper(t *testing.T, ml *gossip.MemberList) *gossip.Gossiper {
 func newTestHandler(t *testing.T) *Handler {
 	r := ring.NewRing(10)
 	ml := newTestMemberList(r)
-	return NewHandler(r, ml, newTestGossiper(t, ml), store.New(), "self", 3, 1, 1, time.Second)
+	tree := merkle.New()
+	s := store.New()
+	s.SetOnUpdate(tree.Update)
+	return NewHandler(r, ml, newTestGossiper(t, ml), s, tree, "self", 3, 1, 1, time.Second)
 }
 
 func TestAddNode(t *testing.T) {
@@ -522,7 +526,10 @@ func newHandlerWithSlowReplica(t *testing.T, replicaTimeout, hangFor time.Durati
 	t.Cleanup(func() { transport.Stop() })
 	g := gossip.NewGossiper("self", "0", ml, transport)
 	// writeQuorum=2, readQuorum=2: self counts as one, slow replica must ack for quorum.
-	h := NewHandler(r, ml, g, store.New(), "self", 3, 2, 2, replicaTimeout)
+	tree := merkle.New()
+	s := store.New()
+	s.SetOnUpdate(tree.Update)
+	h := NewHandler(r, ml, g, s, tree, "self", 3, 2, 2, replicaTimeout)
 
 	replicaAddr := strings.TrimPrefix(slow.URL, "http://")
 	ml.Add("self", "localhost:8080")
@@ -695,5 +702,123 @@ func TestDeleteKeyReplicaTimeout(t *testing.T) {
 	// self ack=1 < writeQuorum=2 because replica timed out.
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected 503 when replica times out, got %d", w.Code)
+	}
+}
+
+func TestGetSyncStateEmpty(t *testing.T) {
+	h := newTestHandler(t)
+	req := httptest.NewRequest(http.MethodGet, "/sync", nil)
+	w := httptest.NewRecorder()
+
+	h.GetSyncState(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp SyncStateResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Buckets) != merkle.BucketCount {
+		t.Errorf("expected %d buckets, got %d", merkle.BucketCount, len(resp.Buckets))
+	}
+	if resp.Root != h.tree.RootHash() {
+		t.Errorf("response root %d does not match tree root %d", resp.Root, h.tree.RootHash())
+	}
+}
+
+func TestGetSyncStateChangesAfterWrite(t *testing.T) {
+	h := newTestHandler(t)
+	h.memberList.Add("self", "localhost:8080")
+
+	before := h.tree.RootHash()
+
+	putReq := httptest.NewRequest(http.MethodPut, "/keys/k", bytes.NewBufferString(`{"value":"v"}`))
+	putReq.Header.Set("Content-Type", "application/json")
+	h.PutKey(httptest.NewRecorder(), putReq)
+
+	req := httptest.NewRequest(http.MethodGet, "/sync", nil)
+	w := httptest.NewRecorder()
+	h.GetSyncState(w, req)
+
+	var resp SyncStateResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if resp.Root == before {
+		t.Error("root hash should change after a write")
+	}
+}
+
+func TestGetSyncKeysReturnsEntries(t *testing.T) {
+	h := newTestHandler(t)
+	h.memberList.Add("self", "localhost:8080")
+	h.selfID = "self"
+
+	putReq := httptest.NewRequest(http.MethodPut, "/keys/fruit", bytes.NewBufferString(`{"value":"apple"}`))
+	putReq.Header.Set("Content-Type", "application/json")
+	h.PutKey(httptest.NewRecorder(), putReq)
+
+	body := `{"keys":["fruit","missing"]}`
+	req := httptest.NewRequest(http.MethodPost, "/sync/keys", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+	h.GetSyncKeys(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp SyncKeysResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, ok := resp.Entries["fruit"]; !ok {
+		t.Error("expected 'fruit' in response")
+	}
+	if _, ok := resp.Entries["missing"]; ok {
+		t.Error("expected 'missing' to be absent from response")
+	}
+	sibs := resp.Entries["fruit"]
+	if len(sibs) != 1 || sibs[0].Value != "apple" {
+		t.Errorf("unexpected siblings for 'fruit': %+v", sibs)
+	}
+}
+
+func TestGetSyncKeysReturnsTombstone(t *testing.T) {
+	h := newTestHandler(t)
+	h.memberList.Add("self", "localhost:8080")
+	h.selfID = "self"
+
+	putReq := httptest.NewRequest(http.MethodPut, "/keys/k", bytes.NewBufferString(`{"value":"v"}`))
+	putReq.Header.Set("Content-Type", "application/json")
+	h.PutKey(httptest.NewRecorder(), putReq)
+
+	delReq := httptest.NewRequest(http.MethodDelete, "/keys/k", bytes.NewBufferString("{}"))
+	h.DeleteKey(httptest.NewRecorder(), delReq)
+
+	req := httptest.NewRequest(http.MethodPost, "/sync/keys", bytes.NewBufferString(`{"keys":["k"]}`))
+	w := httptest.NewRecorder()
+	h.GetSyncKeys(w, req)
+
+	var resp SyncKeysResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	sibs := resp.Entries["k"]
+	if len(sibs) != 1 || !sibs[0].Deleted {
+		t.Errorf("expected tombstone sibling, got %+v", sibs)
+	}
+}
+
+func TestGetSyncKeysInvalidBody(t *testing.T) {
+	h := newTestHandler(t)
+	req := httptest.NewRequest(http.MethodPost, "/sync/keys", bytes.NewBufferString("not json"))
+	w := httptest.NewRecorder()
+
+	h.GetSyncKeys(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
 	}
 }

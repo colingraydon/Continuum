@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/colingraydon/continuum/internal/gossip"
+	"github.com/colingraydon/continuum/internal/merkle"
 	"github.com/colingraydon/continuum/internal/ring"
 	"github.com/colingraydon/continuum/internal/stats"
 	"github.com/colingraydon/continuum/internal/store"
@@ -20,6 +21,7 @@ type Handler struct {
 	memberList        *gossip.MemberList
 	gossiper          *gossip.Gossiper
 	store             *store.Store
+	tree              *merkle.Tree
 	selfID            string
 	replicationFactor int
 	writeQuorum       int
@@ -28,13 +30,14 @@ type Handler struct {
 	replicaClient     *http.Client
 }
 
-func NewHandler(r *ring.Ring, ml *gossip.MemberList, g *gossip.Gossiper, s *store.Store, selfID string, replicationFactor, writeQuorum, readQuorum int, replicaTimeout time.Duration) *Handler {
+func NewHandler(r *ring.Ring, ml *gossip.MemberList, g *gossip.Gossiper, s *store.Store, t *merkle.Tree, selfID string, replicationFactor, writeQuorum, readQuorum int, replicaTimeout time.Duration) *Handler {
 	return &Handler{
 		ring:              r,
 		aggregator:        stats.NewAggregator(r, ml),
 		memberList:        ml,
 		gossiper:          g,
 		store:             s,
+		tree:              t,
 		selfID:            selfID,
 		replicationFactor: replicationFactor,
 		writeQuorum:       writeQuorum,
@@ -616,6 +619,70 @@ func (h *Handler) Gossip(w http.ResponseWriter, req *http.Request) {
 	h.memberList.Merge(body.Members)
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(h.memberList.GetAll()); err != nil {
+		http.Error(w, "failed to write response", http.StatusInternalServerError)
+	}
+}
+
+// SyncStateResponse is returned by GET /sync. Root is a hash of all bucket
+// hashes; a matching root means the two nodes are in sync. Buckets narrows
+// divergence to a specific key range without transferring any keys.
+type SyncStateResponse struct {
+	Root    uint32   `json:"root"`
+	Buckets []uint32 `json:"buckets"`
+}
+
+type SyncKeysRequest struct {
+	Keys []string `json:"keys"`
+}
+
+// SyncSibling carries a single causally-distinct version of a key, including
+// the vector clock needed for the receiving node to apply it correctly.
+type SyncSibling struct {
+	Value   string            `json:"value,omitempty"`
+	Deleted bool              `json:"deleted,omitempty"`
+	Clocks  map[string]uint64 `json:"clocks"`
+}
+
+type SyncKeysResponse struct {
+	Entries map[string][]SyncSibling `json:"entries"`
+}
+
+// GetSyncState returns the root hash and per-bucket hashes of this node's
+// Merkle tree. Used by the anti-entropy loop to cheaply detect divergence.
+func (h *Handler) GetSyncState(w http.ResponseWriter, req *http.Request) {
+	buckets := make([]uint32, merkle.BucketCount)
+	for i := range buckets {
+		buckets[i] = h.tree.BucketHash(i)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(SyncStateResponse{Root: h.tree.RootHash(), Buckets: buckets}); err != nil {
+		http.Error(w, "failed to write response", http.StatusInternalServerError)
+	}
+}
+
+// GetSyncKeys returns the full entry (all siblings with vector clocks) for
+// each requested key. Used by the anti-entropy loop to fetch entries from a
+// divergent bucket so the caller can apply repairs via the normal write path.
+func (h *Handler) GetSyncKeys(w http.ResponseWriter, req *http.Request) {
+	var body SyncKeysRequest
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	entries := make(map[string][]SyncSibling, len(body.Keys))
+	for _, key := range body.Keys {
+		entry, ok := h.store.Get(key)
+		if !ok {
+			continue
+		}
+		sibs := make([]SyncSibling, len(entry.Siblings))
+		for i, sib := range entry.Siblings {
+			sibs[i] = SyncSibling{Value: sib.Value, Deleted: sib.Deleted, Clocks: sib.Version.Clocks}
+		}
+		entries[key] = sibs
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(SyncKeysResponse{Entries: entries}); err != nil {
 		http.Error(w, "failed to write response", http.StatusInternalServerError)
 	}
 }
