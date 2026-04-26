@@ -14,6 +14,7 @@ import (
 
 	"github.com/colingraydon/continuum/api"
 	"github.com/colingraydon/continuum/internal/gossip"
+	"github.com/colingraydon/continuum/internal/merkle"
 	"github.com/colingraydon/continuum/internal/ring"
 	"github.com/colingraydon/continuum/internal/store"
 )
@@ -159,8 +160,10 @@ func main() {
 		log.Fatalf("invalid SELF_ADDRESS %q: %v", cfg.selfAddress, err)
 	}
 
+	tree := merkle.New()
 	s := store.New()
-	mux := api.NewServer(r, ml, g, s, cfg.selfID, cfg.replicationFactor, cfg.writeQuorum, cfg.readQuorum, cfg.replicaTimeout)
+	s.SetOnUpdate(tree.Update)
+	mux := api.NewServer(r, ml, g, s, tree, cfg.selfID, cfg.replicationFactor, cfg.writeQuorum, cfg.readQuorum, cfg.replicaTimeout)
 	srv := &http.Server{Addr: ":" + httpPort, Handler: mux}
 
 	go func() {

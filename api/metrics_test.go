@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/colingraydon/continuum/internal/gossip"
+	"github.com/colingraydon/continuum/internal/merkle"
 	"github.com/colingraydon/continuum/internal/ring"
 	"github.com/colingraydon/continuum/internal/store"
 	"github.com/prometheus/client_golang/prometheus"
@@ -52,7 +53,10 @@ func TestMetricsHTTPRequestsTotal(t *testing.T) {
 	}
 	defer transport.Stop()
 	g := gossip.NewGossiper("self", "0", ml, transport)
-	srv := NewServer(ring.NewRing(50), ml, g, store.New(), "self", 3, 1, 1, time.Second)
+	tree1 := merkle.New()
+	s1 := store.New()
+	s1.SetOnUpdate(tree1.Update)
+	srv := NewServer(ring.NewRing(50), ml, g, s1, tree1, "self", 3, 1, 1, time.Second)
 	req := httptest.NewRequest(http.MethodGet, "/nodes", nil)
 	w := httptest.NewRecorder()
 
@@ -80,7 +84,10 @@ func TestMetricsRequestDurationRecorded(t *testing.T) {
 	}
 	defer transport.Stop()
 	g := gossip.NewGossiper("self", "0", ml, transport)
-	srv := NewServer(ring.NewRing(50), ml, g, store.New(), "self", 3, 1, 1, time.Second)
+	tree2 := merkle.New()
+	s2 := store.New()
+	s2.SetOnUpdate(tree2.Update)
+	srv := NewServer(ring.NewRing(50), ml, g, s2, tree2, "self", 3, 1, 1, time.Second)
 	req := httptest.NewRequest(http.MethodGet, "/nodes", nil)
 	w := httptest.NewRecorder()
 
