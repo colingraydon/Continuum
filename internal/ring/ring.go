@@ -190,3 +190,121 @@ func (r *Ring) GetNodes() []*Node {
 
 	return nodes
 }
+
+// VnodeRange is the half-open hash range (Start, End] owned by a vnode.
+// If Start >= End the range wraps around zero (the vnode is the first
+// clockwise entry in the ring).
+type VnodeRange struct {
+	Start uint32 // exclusive lower bound
+	End   uint32 // inclusive upper bound (the vnode's own hash)
+}
+
+// Contains reports whether hash falls within this vnode's range.
+func (vr VnodeRange) Contains(hash uint32) bool {
+	if vr.Start < vr.End {
+		return hash > vr.Start && hash <= vr.End
+	}
+	// Wrapping range: covers (Start, MaxUint32] ∪ [0, End]
+	return hash > vr.Start || hash <= vr.End
+}
+
+// GetReplicationNodesForHash is like GetReplicationNodes but accepts a raw
+// hash instead of a key string. Used by the anti-entropy manager to look up
+// replicas for a vnode without needing a representative key.
+func (r *Ring) GetReplicationNodesForHash(hash uint32, factor int) []*Node {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if r.tree.Tree.Size() == 0 {
+		return nil
+	}
+	if factor > len(r.nodes) {
+		factor = len(r.nodes)
+	}
+
+	seen := make(map[string]bool)
+	var result []*Node
+
+	it := r.tree.Tree.Iterator()
+	for it.Next() {
+		vnode := it.Value().(*VNode)
+		if vnode.Hash >= hash {
+			if !seen[vnode.Node.ID] {
+				seen[vnode.Node.ID] = true
+				result = append(result, vnode.Node)
+				if len(result) == factor {
+					return result
+				}
+			}
+			break
+		}
+	}
+	for len(result) < factor {
+		if !it.Next() {
+			it.First()
+			it.Next()
+		}
+		vnode := it.Value().(*VNode)
+		if seen[vnode.Node.ID] {
+			continue
+		}
+		seen[vnode.Node.ID] = true
+		result = append(result, vnode.Node)
+	}
+	return result
+}
+
+// GetVnodeRange returns the VnodeRange whose End equals endHash.
+// Used by the sync endpoint to determine which keys belong to a requested vnode.
+func (r *Ring) GetVnodeRange(endHash uint32) (VnodeRange, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if r.tree.Tree.Size() == 0 {
+		return VnodeRange{}, false
+	}
+
+	var vnodes []*VNode
+	it := r.tree.Tree.Iterator()
+	for it.Next() {
+		vnodes = append(vnodes, it.Value().(*VNode))
+	}
+
+	n := len(vnodes)
+	for i, vn := range vnodes {
+		if vn.Hash == endHash {
+			start := vnodes[(i-1+n)%n].Hash
+			return VnodeRange{Start: start, End: endHash}, true
+		}
+	}
+	return VnodeRange{}, false
+}
+
+// GetPrimaryVnodeRanges returns the hash ranges for which nodeID is the
+// primary replica (i.e. first clockwise owner). The manager uses this to
+// know which vnodes to drive anti-entropy for.
+func (r *Ring) GetPrimaryVnodeRanges(nodeID string) []VnodeRange {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if r.tree.Tree.Size() == 0 {
+		return nil
+	}
+
+	var vnodes []*VNode
+	it := r.tree.Tree.Iterator()
+	for it.Next() {
+		vnodes = append(vnodes, it.Value().(*VNode))
+	}
+
+	n := len(vnodes)
+	var ranges []VnodeRange
+	for i, vn := range vnodes {
+		if vn.Node.ID != nodeID {
+			continue
+		}
+		start := vnodes[(i-1+n)%n].Hash
+		ranges = append(ranges, VnodeRange{Start: start, End: vn.Hash})
+	}
+	return ranges
+}

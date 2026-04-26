@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -39,10 +40,8 @@ func newTestGossiper(t *testing.T, ml *gossip.MemberList) *gossip.Gossiper {
 func newTestHandler(t *testing.T) *Handler {
 	r := ring.NewRing(10)
 	ml := newTestMemberList(r)
-	tree := merkle.New()
 	s := store.New()
-	s.SetOnUpdate(tree.Update)
-	return NewHandler(r, ml, newTestGossiper(t, ml), s, tree, "self", 3, 1, 1, time.Second)
+	return NewHandler(r, ml, newTestGossiper(t, ml), s, "self", 3, 1, 1, time.Second)
 }
 
 func TestAddNode(t *testing.T) {
@@ -526,10 +525,8 @@ func newHandlerWithSlowReplica(t *testing.T, replicaTimeout, hangFor time.Durati
 	t.Cleanup(func() { transport.Stop() })
 	g := gossip.NewGossiper("self", "0", ml, transport)
 	// writeQuorum=2, readQuorum=2: self counts as one, slow replica must ack for quorum.
-	tree := merkle.New()
 	s := store.New()
-	s.SetOnUpdate(tree.Update)
-	h := NewHandler(r, ml, g, s, tree, "self", 3, 2, 2, replicaTimeout)
+	h := NewHandler(r, ml, g, s, "self", 3, 2, 2, replicaTimeout)
 
 	replicaAddr := strings.TrimPrefix(slow.URL, "http://")
 	ml.Add("self", "localhost:8080")
@@ -705,15 +702,42 @@ func TestDeleteKeyReplicaTimeout(t *testing.T) {
 	}
 }
 
-func TestGetSyncStateEmpty(t *testing.T) {
+func TestGetSyncStateMissingParam(t *testing.T) {
 	h := newTestHandler(t)
 	req := httptest.NewRequest(http.MethodGet, "/sync", nil)
 	w := httptest.NewRecorder()
+	h.GetSyncState(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing vnode param, got %d", w.Code)
+	}
+}
 
+func TestGetSyncStateUnknownVnode(t *testing.T) {
+	h := newTestHandler(t)
+	req := httptest.NewRequest(http.MethodGet, "/sync?vnode=9999999", nil)
+	w := httptest.NewRecorder()
+	h.GetSyncState(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for unknown vnode, got %d", w.Code)
+	}
+}
+
+func TestGetSyncStateEmpty(t *testing.T) {
+	h := newTestHandler(t)
+	h.memberList.Add("self", "localhost:8080")
+
+	ranges := h.ring.GetPrimaryVnodeRanges("self")
+	if len(ranges) == 0 {
+		t.Fatal("expected primary vnode ranges for self")
+	}
+	url := fmt.Sprintf("/sync?vnode=%d", ranges[0].End)
+
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	w := httptest.NewRecorder()
 	h.GetSyncState(w, req)
 
 	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 	var resp SyncStateResponse
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
@@ -722,32 +746,52 @@ func TestGetSyncStateEmpty(t *testing.T) {
 	if len(resp.Buckets) != merkle.BucketCount {
 		t.Errorf("expected %d buckets, got %d", merkle.BucketCount, len(resp.Buckets))
 	}
-	if resp.Root != h.tree.RootHash() {
-		t.Errorf("response root %d does not match tree root %d", resp.Root, h.tree.RootHash())
-	}
 }
 
 func TestGetSyncStateChangesAfterWrite(t *testing.T) {
 	h := newTestHandler(t)
 	h.memberList.Add("self", "localhost:8080")
+	h.selfID = "self"
 
-	before := h.tree.RootHash()
+	// Find which vnode range key "k" falls in so we can query that vnode.
+	keyHash := merkle.HashKey("k")
+	var vnodeHash uint32
+	var found bool
+	for _, vr := range h.ring.GetPrimaryVnodeRanges("self") {
+		if vr.Contains(keyHash) {
+			vnodeHash = vr.End
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("key 'k' not in any primary vnode range")
+	}
+
+	syncURL := fmt.Sprintf("/sync?vnode=%d", vnodeHash)
+
+	reqBefore := httptest.NewRequest(http.MethodGet, syncURL, nil)
+	wBefore := httptest.NewRecorder()
+	h.GetSyncState(wBefore, reqBefore)
+	var before SyncStateResponse
+	if err := json.NewDecoder(wBefore.Body).Decode(&before); err != nil {
+		t.Fatalf("decode before: %v", err)
+	}
 
 	putReq := httptest.NewRequest(http.MethodPut, "/keys/k", bytes.NewBufferString(`{"value":"v"}`))
 	putReq.Header.Set("Content-Type", "application/json")
 	h.PutKey(httptest.NewRecorder(), putReq)
 
-	req := httptest.NewRequest(http.MethodGet, "/sync", nil)
-	w := httptest.NewRecorder()
-	h.GetSyncState(w, req)
-
-	var resp SyncStateResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	reqAfter := httptest.NewRequest(http.MethodGet, syncURL, nil)
+	wAfter := httptest.NewRecorder()
+	h.GetSyncState(wAfter, reqAfter)
+	var after SyncStateResponse
+	if err := json.NewDecoder(wAfter.Body).Decode(&after); err != nil {
+		t.Fatalf("decode after: %v", err)
 	}
 
-	if resp.Root == before {
-		t.Error("root hash should change after a write")
+	if after.Root == before.Root {
+		t.Error("root hash should change after a write to a key in this vnode range")
 	}
 }
 

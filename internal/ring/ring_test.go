@@ -334,3 +334,119 @@ func TestHealthFilterNoHealthyNodes(t *testing.T) {
 		t.Error("expected no node when all nodes are unhealthy")
 	}
 }
+
+// --- VnodeRange.Contains tests ---
+
+func TestVnodeRangeContainsNonWrapping(t *testing.T) {
+	vr := VnodeRange{Start: 10, End: 20}
+	cases := []struct {
+		hash uint32
+		want bool
+	}{
+		{15, true},  // inside
+		{10, false}, // start is exclusive
+		{20, true},  // end is inclusive
+		{5, false},  // below range
+		{25, false}, // above range
+	}
+	for _, tc := range cases {
+		if got := vr.Contains(tc.hash); got != tc.want {
+			t.Errorf("Contains(%d): expected %v, got %v", tc.hash, tc.want, got)
+		}
+	}
+}
+
+func TestVnodeRangeContainsWrapping(t *testing.T) {
+	// Start > End means the range wraps around zero.
+	vr := VnodeRange{Start: 200, End: 50}
+	cases := []struct {
+		hash uint32
+		want bool
+	}{
+		{210, true},  // above Start
+		{30, true},   // below End
+		{50, true},   // End is inclusive
+		{200, false}, // Start is exclusive
+		{100, false}, // in the gap between End and Start
+	}
+	for _, tc := range cases {
+		if got := vr.Contains(tc.hash); got != tc.want {
+			t.Errorf("Contains(%d): expected %v, got %v", tc.hash, tc.want, got)
+		}
+	}
+}
+
+// --- GetPrimaryVnodeRanges tests ---
+
+func TestGetPrimaryVnodeRangesEmptyRing(t *testing.T) {
+	r := NewRing(10)
+	if ranges := r.GetPrimaryVnodeRanges("node1"); ranges != nil {
+		t.Fatalf("expected nil for empty ring, got %v", ranges)
+	}
+}
+
+func TestGetPrimaryVnodeRangesSingleNode(t *testing.T) {
+	const replicas = 5
+	r := NewRing(replicas)
+	r.AddNode("node1", "10.0.0.1")
+
+	ranges := r.GetPrimaryVnodeRanges("node1")
+	if len(ranges) != replicas {
+		t.Fatalf("expected %d ranges for single node, got %d", replicas, len(ranges))
+	}
+}
+
+func TestGetPrimaryVnodeRangesUnknownNode(t *testing.T) {
+	r := NewRing(10)
+	r.AddNode("node1", "10.0.0.1")
+
+	ranges := r.GetPrimaryVnodeRanges("ghost")
+	if len(ranges) != 0 {
+		t.Fatalf("expected 0 ranges for unknown node, got %d", len(ranges))
+	}
+}
+
+func TestGetPrimaryVnodeRangesTotalCount(t *testing.T) {
+	const replicas = 5
+	r := NewRing(replicas)
+	r.AddNode("node1", "10.0.0.1")
+	r.AddNode("node2", "10.0.0.2")
+	r.AddNode("node3", "10.0.0.3")
+
+	total := len(r.GetPrimaryVnodeRanges("node1")) +
+		len(r.GetPrimaryVnodeRanges("node2")) +
+		len(r.GetPrimaryVnodeRanges("node3"))
+
+	want := replicas * 3
+	if total != want {
+		t.Errorf("expected %d total primary ranges across all nodes, got %d", want, total)
+	}
+}
+
+func TestGetPrimaryVnodeRangesPartitionCoverage(t *testing.T) {
+	// Every key hash must fall into exactly one node's primary ranges.
+	const replicas = 10
+	r := NewRing(replicas)
+	r.AddNode("node1", "10.0.0.1")
+	r.AddNode("node2", "10.0.0.2")
+	r.AddNode("node3", "10.0.0.3")
+
+	allRanges := append(
+		r.GetPrimaryVnodeRanges("node1"),
+		append(r.GetPrimaryVnodeRanges("node2"), r.GetPrimaryVnodeRanges("node3")...)...,
+	)
+
+	keys := []string{"alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"}
+	for _, key := range keys {
+		hash := computeHash(key)
+		matches := 0
+		for _, vr := range allRanges {
+			if vr.Contains(hash) {
+				matches++
+			}
+		}
+		if matches != 1 {
+			t.Errorf("key %q (hash %d) matched %d ranges, expected exactly 1", key, hash, matches)
+		}
+	}
+}

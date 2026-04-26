@@ -2,13 +2,13 @@
 
 A distributed key-value store built on consistent hashing, gossip-based membership, and vector clock conflict resolution - written in Go.
 
-Continuum implements the core data layer used in systems like Cassandra and Dynamo: a hash ring that maps keys to nodes with minimal disruption when topology changes, a gossip protocol that propagates membership without a central coordinator, and a replication layer that fans writes out to N nodes and resolves conflicts using vector clocks. It exposes an HTTP API, Prometheus metrics, and a Grafana dashboard out of the box.
+Continuum implements the core data layer used in systems like Cassandra and Dynamo: a hash ring that maps keys to nodes with minimal disruption when topology changes, a gossip protocol that propagates membership without a central coordinator, a replication layer that fans writes out to N nodes and resolves conflicts using vector clocks, and a Merkle tree anti-entropy system that detects and repairs divergent replicas in the background. It exposes an HTTP API, Prometheus metrics, and a Grafana dashboard out of the box.
 
 ---
 
 ## Architecture
 
-Continuum is organized into five layers:
+Continuum is organized into six layers:
 
 ### Core Ring (`internal/ring`)
 
@@ -22,9 +22,15 @@ The gossip layer drives the ring: when membership changes (alive, suspect, dead)
 
 ### KV Store (`internal/store`)
 
-In-memory key-value storage with vector clock versioning. Each entry holds a value, a `VectorClockVersion`, and a precomputed murmur3 hash of the value (reserved for future Merkle tree anti-entropy). Conflict resolution uses the standard Lamport partial order: a write is accepted only if the existing entry's clock happens-before the incoming one. Concurrent writes keep the existing value.
+In-memory key-value storage with vector clock versioning. Each entry holds a value, a `VectorClockVersion`, and a precomputed murmur3 hash of the value used by the anti-entropy layer. Conflict resolution uses the standard Lamport partial order: a write is accepted only if the existing entry's clock happens-before the incoming one. Concurrent writes keep the existing value.
 
 Deletes are implemented as tombstones: a `Deleted` sibling written at an incremented vector clock. Tombstones participate in conflict resolution identically to value writes. A tombstone with a dominating clock wins, a stale tombstone is dropped, and a concurrent write/delete produces siblings. This prevents resurrection: a stale replica that missed a delete cannot revive the key through anti-entropy or a consistent read.
+
+### Anti-Entropy (`internal/antientropy`)
+
+Background repair layer that detects and corrects divergent replicas using Merkle trees. The primary node for each vnode range maintains one Merkle tree, partitioned into 16 hash-range buckets. Every 30 seconds, one vnode is selected at random and compared against each of its replicas. Only divergent buckets are repaired - the manager fetches the replica's entries for the keys in that bucket and applies any that are newer, using the same vector clock logic as a live write.
+
+Replicas do not maintain persistent trees. Instead, they compute bucket and root hashes on-the-fly from their store when the primary asks, which keeps the replica code path simple and avoids synchronization overhead.
 
 ### Stats Aggregator (`internal/stats`)
 
@@ -185,7 +191,7 @@ Last-write-wins timestamps are simple but lose writes silently when two clients 
 
 ### Precomputed value hashes
 
-Each store entry carries `Hash uint32` - a murmur3 hash of the value, computed at write time. This is reserved for Merkle tree anti-entropy: when comparing replica state across nodes, leaf hashes let you identify divergent key ranges without transferring values. Computing at write time makes tree construction cheap.
+Each store entry carries `Hash uint32` - a murmur3 hash of the value, computed at write time and updated via an `onUpdate` callback whenever a write is accepted. The anti-entropy manager registers this callback to keep its Merkle trees current. Computing at write time means tree updates are incremental and cheap - no full scan is needed after each write.
 
 ### Red-Black Tree
 
@@ -323,6 +329,31 @@ curl -X POST http://localhost:8080/gossip \
 
 Used internally by the gossip protocol. Merges the provided member list and returns this node's current view.
 
+### Get sync state (anti-entropy)
+
+```bash
+curl "http://localhost:8080/sync?vnode=<endHash>"
+```
+
+Returns the Merkle tree state for a vnode range, computed on-the-fly from this node's store. Used by primary nodes to compare against replicas during background sync.
+
+```json
+{
+  "root": 3829104721,
+  "buckets": [1234567890, 0, 987654321, ...]
+}
+```
+
+### Sync keys (anti-entropy)
+
+```bash
+curl -X POST http://localhost:8080/sync/keys \
+  -H "Content-Type: application/json" \
+  -d '{"keys": ["user:123", "user:456"]}'
+```
+
+Returns the full sibling sets for the requested keys, including vector clocks and tombstone state. Used by the primary to fetch a replica's version of divergent keys during repair.
+
 ### Prometheus metrics
 
 ```bash
@@ -432,7 +463,7 @@ Continuum shuts down gracefully on `SIGINT` or `SIGTERM`:
 
 ## What's Next
 
-- **Merkle anti-entropy** - use precomputed value hashes to efficiently detect and repair divergent replicas
+- **Tombstone GC** - expire tombstones after a configurable TTL once all replicas have confirmed receipt, to prevent unbounded memory growth
 - **Persistence** - snapshot ring and KV state to disk on shutdown, reload on startup
 - **Weighted vnodes** - nodes with higher capacity receive proportionally more vnodes for heterogeneous clusters
 - **Architecture diagram**

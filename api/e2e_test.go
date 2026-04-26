@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/colingraydon/continuum/internal/gossip"
-	"github.com/colingraydon/continuum/internal/merkle"
 	"github.com/colingraydon/continuum/internal/ring"
 	"github.com/colingraydon/continuum/internal/store"
 )
@@ -37,10 +36,8 @@ func newNamedTestServerQ(t *testing.T, selfID string, rf, wq, rq int) *httptest.
 		t.Fatalf("failed to create transport: %v", err)
 	}
 	g := gossip.NewGossiper(selfID, "0", ml, transport)
-	tree := merkle.New()
 	s := store.New()
-	s.SetOnUpdate(tree.Update)
-	srv := httptest.NewServer(NewServer(r, ml, g, s, tree, selfID, rf, wq, rq, time.Second))
+	srv := httptest.NewServer(NewServer(r, ml, g, s, selfID, rf, wq, rq, time.Second))
 	t.Cleanup(func() {
 		srv.Close()
 		transport.Stop()
@@ -64,10 +61,8 @@ func newTestServer(t *testing.T) *httptest.Server {
 		t.Fatalf("failed to create transport: %v", err)
 	}
 	g := gossip.NewGossiper("self", "0", ml, transport)
-	tree := merkle.New()
 	s := store.New()
-	s.SetOnUpdate(tree.Update)
-	srv := httptest.NewServer(NewServer(r, ml, g, s, tree, "self", 3, 1, 1, time.Second))
+	srv := httptest.NewServer(NewServer(r, ml, g, s, "self", 3, 1, 1, time.Second))
 	t.Cleanup(func() {
 		srv.Close()
 		transport.Stop()
