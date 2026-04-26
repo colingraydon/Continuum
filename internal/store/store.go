@@ -78,30 +78,59 @@ type Entry struct {
 }
 
 type Store struct {
-	mu   sync.RWMutex
-	data map[string]Entry
+	mu       sync.RWMutex
+	data     map[string]Entry
+	onUpdate func(key string, hash uint32)
 }
 
 func New() *Store {
 	return &Store{data: make(map[string]Entry)}
 }
 
+// SetOnUpdate registers a callback invoked after every write that changes the
+// store. hash is the canonical hash of the key's new state, suitable for
+// updating a Merkle tree. Safe to call before any writes.
+func (s *Store) SetOnUpdate(fn func(key string, hash uint32)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onUpdate = fn
+}
+
+// tombstoneSentinel is XOR'd into entryHash for deleted siblings so that a
+// tombstone and a zero-hash value produce different hashes.
+const tombstoneSentinel uint32 = 0x544f4d42 // "TOMB"
+
+// entryHash returns a canonical hash for an entry by XOR-ing all sibling
+// hashes. Commutative across siblings, so sibling order doesn't matter.
+func entryHash(e Entry) uint32 {
+	var h uint32
+	for _, sib := range e.Siblings {
+		if sib.Deleted {
+			h ^= tombstoneSentinel
+		} else {
+			h ^= sib.Hash
+		}
+	}
+	return h
+}
+
 // applySibling applies conflict-resolution logic for incoming against the
-// existing entry. Must be called with s.mu held for writing.
-func (s *Store) applySibling(key string, incoming Sibling) {
+// existing entry. Returns true if the store was modified. Must be called with
+// s.mu held for writing.
+func (s *Store) applySibling(key string, incoming Sibling) bool {
 	existing, ok := s.data[key]
 	if !ok {
 		s.data[key] = Entry{Siblings: []Sibling{incoming}}
-		return
+		return true
 	}
 
 	var survivors []Sibling
 	for _, sib := range existing.Siblings {
 		if incoming.Version.HappensBefore(sib.Version) {
-			return
+			return false
 		}
 		if sib.Version.Equal(incoming.Version) {
-			return
+			return false
 		}
 		if !sib.Version.HappensBefore(incoming.Version) {
 			survivors = append(survivors, sib)
@@ -109,6 +138,7 @@ func (s *Store) applySibling(key string, incoming Sibling) {
 	}
 
 	s.data[key] = Entry{Siblings: append(survivors, incoming)}
+	return true
 }
 
 // Put stores key=value at version v. If v is dominated by any existing sibling
@@ -118,11 +148,13 @@ func (s *Store) applySibling(key string, incoming Sibling) {
 func (s *Store) Put(key, value string, v VectorClockVersion) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.applySibling(key, Sibling{
+	if s.applySibling(key, Sibling{
 		Value:   value,
 		Version: v,
 		Hash:    murmur3.Sum32([]byte(value)),
-	})
+	}) && s.onUpdate != nil {
+		s.onUpdate(key, entryHash(s.data[key]))
+	}
 }
 
 // Delete writes a tombstone for key at version v. The tombstone participates in
@@ -132,7 +164,9 @@ func (s *Store) Put(key, value string, v VectorClockVersion) {
 func (s *Store) Delete(key string, v VectorClockVersion) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.applySibling(key, Sibling{Deleted: true, Version: v})
+	if s.applySibling(key, Sibling{Deleted: true, Version: v}) && s.onUpdate != nil {
+		s.onUpdate(key, entryHash(s.data[key]))
+	}
 }
 
 func (s *Store) Get(key string) (Entry, bool) {
