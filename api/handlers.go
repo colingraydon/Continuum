@@ -20,7 +20,6 @@ type Handler struct {
 	ring              *ring.Ring
 	aggregator        *stats.Aggregator
 	memberList        *gossip.MemberList
-	gossiper          *gossip.Gossiper
 	store             *store.Store
 	selfID            string
 	replicationFactor int
@@ -35,7 +34,6 @@ func NewHandler(r *ring.Ring, ml *gossip.MemberList, g *gossip.Gossiper, s *stor
 		ring:              r,
 		aggregator:        stats.NewAggregator(r, ml),
 		memberList:        ml,
-		gossiper:          g,
 		store:             s,
 		selfID:            selfID,
 		replicationFactor: replicationFactor,

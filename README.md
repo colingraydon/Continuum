@@ -22,7 +22,7 @@ The gossip layer drives the ring: when membership changes (alive, suspect, dead)
 
 ### KV Store (`internal/store`)
 
-In-memory key-value storage with vector clock versioning. Each entry holds a value, a `VectorClockVersion`, and a precomputed murmur3 hash of the value used by the anti-entropy layer. Conflict resolution uses the standard Lamport partial order: a write is accepted only if the existing entry's clock happens-before the incoming one. Concurrent writes keep the existing value.
+In-memory key-value storage with vector clock versioning. Each entry holds a value, a `VectorClockVersion`, and a precomputed murmur3 hash of the value used by the anti-entropy layer. Conflict resolution uses the standard Lamport partial order: an incoming write is dropped if the existing entry's clock dominates it, applied as the sole value if it dominates the existing entry, or appended as a sibling if the two clocks are concurrent.
 
 Deletes are implemented as tombstones: a `Deleted` sibling written at an incremented vector clock. Tombstones participate in conflict resolution identically to value writes. A tombstone with a dominating clock wins, a stale tombstone is dropped, and a concurrent write/delete produces siblings. This prevents resurrection: a stale replica that missed a delete cannot revive the key through anti-entropy or a consistent read.
 
