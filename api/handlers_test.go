@@ -866,3 +866,349 @@ func TestGetSyncKeysInvalidBody(t *testing.T) {
 		t.Errorf("expected 400, got %d", w.Code)
 	}
 }
+
+// --- GetSyncBucketKeys tests ---
+
+func TestGetSyncBucketKeysMissingParams(t *testing.T) {
+	h := newTestHandler(t)
+	h.memberList.Add("self", "localhost:8080")
+
+	cases := []struct {
+		url  string
+		desc string
+	}{
+		{"/sync/bucket-keys", "both missing"},
+		{"/sync/bucket-keys?vnode=123", "bucket missing"},
+		{"/sync/bucket-keys?bucket=0", "vnode missing"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.desc, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.url, nil)
+			w := httptest.NewRecorder()
+			h.GetSyncBucketKeys(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("expected 400, got %d", w.Code)
+			}
+		})
+	}
+}
+
+func TestGetSyncBucketKeysInvalidParams(t *testing.T) {
+	h := newTestHandler(t)
+	h.memberList.Add("self", "localhost:8080")
+
+	cases := []struct {
+		url  string
+		desc string
+	}{
+		{"/sync/bucket-keys?vnode=notanumber&bucket=0", "non-numeric vnode"},
+		{"/sync/bucket-keys?vnode=123&bucket=notanumber", "non-numeric bucket"},
+		{fmt.Sprintf("/sync/bucket-keys?vnode=123&bucket=%d", merkle.BucketCount), "bucket == BucketCount"},
+		{"/sync/bucket-keys?vnode=123&bucket=-1", "negative bucket"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.desc, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.url, nil)
+			w := httptest.NewRecorder()
+			h.GetSyncBucketKeys(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("%s: expected 400, got %d", tc.desc, w.Code)
+			}
+		})
+	}
+}
+
+func TestGetSyncBucketKeysUnknownVnode(t *testing.T) {
+	h := newTestHandler(t)
+	h.memberList.Add("self", "localhost:8080")
+
+	req := httptest.NewRequest(http.MethodGet, "/sync/bucket-keys?vnode=9999999&bucket=0", nil)
+	w := httptest.NewRecorder()
+	h.GetSyncBucketKeys(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for unknown vnode, got %d", w.Code)
+	}
+}
+
+func TestGetSyncBucketKeysEmptyBucket(t *testing.T) {
+	h := newTestHandler(t)
+	h.memberList.Add("self", "localhost:8080")
+
+	ranges := h.ring.GetPrimaryVnodeRanges("self")
+	if len(ranges) == 0 {
+		t.Fatal("expected primary vnode ranges")
+	}
+	url := fmt.Sprintf("/sync/bucket-keys?vnode=%d&bucket=0", ranges[0].End)
+
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	w := httptest.NewRecorder()
+	h.GetSyncBucketKeys(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp SyncBucketKeysResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Keys == nil {
+		t.Error("expected non-nil empty slice, got nil")
+	}
+	if len(resp.Keys) != 0 {
+		t.Errorf("expected 0 keys in empty bucket, got %d: %v", len(resp.Keys), resp.Keys)
+	}
+}
+
+func TestGetSyncBucketKeysReturnsKeysInBucket(t *testing.T) {
+	h := newTestHandler(t)
+	h.memberList.Add("self", "localhost:8080")
+	h.selfID = "self"
+
+	// Find a vnode range and a key that falls in it.
+	ranges := h.ring.GetPrimaryVnodeRanges("self")
+	if len(ranges) == 0 {
+		t.Fatal("expected primary vnode ranges")
+	}
+	vr := ranges[0]
+	var testKey string
+	for i := 0; ; i++ {
+		k := fmt.Sprintf("bk-%d", i)
+		if vr.Contains(merkle.HashKey(k)) {
+			testKey = k
+			break
+		}
+	}
+	targetBucket := merkle.BucketIndex(testKey)
+
+	h.store.Put(testKey, "val", store.VectorClockVersion{Clocks: map[string]uint64{"self": 1}})
+
+	url := fmt.Sprintf("/sync/bucket-keys?vnode=%d&bucket=%d", vr.End, targetBucket)
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	w := httptest.NewRecorder()
+	h.GetSyncBucketKeys(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp SyncBucketKeysResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	found := false
+	for _, k := range resp.Keys {
+		if k == testKey {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected %q in response, got %v", testKey, resp.Keys)
+	}
+}
+
+func TestGetSyncBucketKeysExcludesWrongBucket(t *testing.T) {
+	h := newTestHandler(t)
+	h.memberList.Add("self", "localhost:8080")
+	h.selfID = "self"
+
+	ranges := h.ring.GetPrimaryVnodeRanges("self")
+	if len(ranges) == 0 {
+		t.Fatal("expected primary vnode ranges")
+	}
+	vr := ranges[0]
+
+	// Find two keys in the same vnode range but different buckets.
+	var keyA, keyB string
+	var bucketA int
+	for i := 0; keyA == "" || keyB == ""; i++ {
+		k := fmt.Sprintf("xbk-%d", i)
+		if !vr.Contains(merkle.HashKey(k)) {
+			continue
+		}
+		b := merkle.BucketIndex(k)
+		if keyA == "" {
+			keyA = k
+			bucketA = b
+		} else if b != bucketA {
+			keyB = k
+		}
+	}
+
+	h.store.Put(keyA, "a", store.VectorClockVersion{Clocks: map[string]uint64{"self": 1}})
+	h.store.Put(keyB, "b", store.VectorClockVersion{Clocks: map[string]uint64{"self": 1}})
+
+	// Query only bucket A; keyB must not appear.
+	url := fmt.Sprintf("/sync/bucket-keys?vnode=%d&bucket=%d", vr.End, bucketA)
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	w := httptest.NewRecorder()
+	h.GetSyncBucketKeys(w, req)
+
+	var resp SyncBucketKeysResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, k := range resp.Keys {
+		if k == keyB {
+			t.Errorf("key %q from wrong bucket should not appear in bucket %d response", keyB, bucketA)
+		}
+	}
+}
+
+func TestGetSyncBucketKeysExcludesWrongVnodeRange(t *testing.T) {
+	h := newTestHandler(t)
+	h.memberList.Add("self", "localhost:8080")
+	h.memberList.Add("other", "10.0.0.2:8080")
+	h.selfID = "self"
+
+	selfRanges := h.ring.GetPrimaryVnodeRanges("self")
+	otherRanges := h.ring.GetPrimaryVnodeRanges("other")
+	if len(selfRanges) == 0 || len(otherRanges) == 0 {
+		t.Skip("need ranges for both nodes")
+	}
+
+	// Find a key that falls in other's range (not self's).
+	var outsideKey string
+	for i := 0; ; i++ {
+		k := fmt.Sprintf("out-%d", i)
+		kh := merkle.HashKey(k)
+		inOther := false
+		inSelf := false
+		for _, vr := range otherRanges {
+			if vr.Contains(kh) {
+				inOther = true
+			}
+		}
+		for _, vr := range selfRanges {
+			if vr.Contains(kh) {
+				inSelf = true
+			}
+		}
+		if inOther && !inSelf {
+			outsideKey = k
+			break
+		}
+	}
+	h.store.Put(outsideKey, "v", store.VectorClockVersion{Clocks: map[string]uint64{"self": 1}})
+
+	// Query self's first vnode range — the outside key must not appear.
+	vr := selfRanges[0]
+	url := fmt.Sprintf("/sync/bucket-keys?vnode=%d&bucket=%d", vr.End, merkle.BucketIndex(outsideKey))
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	w := httptest.NewRecorder()
+	h.GetSyncBucketKeys(w, req)
+
+	var resp SyncBucketKeysResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, k := range resp.Keys {
+		if k == outsideKey {
+			t.Errorf("key from a different vnode range must not appear in this bucket response")
+		}
+	}
+}
+
+// --- PushSyncEntries tests ---
+
+func TestPushSyncEntriesInvalidBody(t *testing.T) {
+	h := newTestHandler(t)
+	req := httptest.NewRequest(http.MethodPost, "/sync/push", bytes.NewBufferString("not json"))
+	w := httptest.NewRecorder()
+
+	h.PushSyncEntries(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestPushSyncEntriesAppliesValue(t *testing.T) {
+	h := newTestHandler(t)
+	body := `{"entries":{"fruit":[{"value":"apple","clocks":{"node1":1}}]}}`
+	req := httptest.NewRequest(http.MethodPost, "/sync/push", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+
+	h.PushSyncEntries(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", w.Code)
+	}
+	e, ok := h.store.Get("fruit")
+	if !ok {
+		t.Fatal("pushed entry not found in store")
+	}
+	if len(e.Siblings) != 1 || e.Siblings[0].Value != "apple" {
+		t.Errorf("unexpected store contents: %+v", e.Siblings)
+	}
+}
+
+func TestPushSyncEntriesAppliesTombstone(t *testing.T) {
+	h := newTestHandler(t)
+	body := `{"entries":{"k":[{"deleted":true,"clocks":{"node1":1}}]}}`
+	req := httptest.NewRequest(http.MethodPost, "/sync/push", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+
+	h.PushSyncEntries(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", w.Code)
+	}
+	e, ok := h.store.Get("k")
+	if !ok || !e.Siblings[0].Deleted {
+		t.Error("expected tombstone in store after push")
+	}
+}
+
+func TestPushSyncEntriesMultipleKeys(t *testing.T) {
+	h := newTestHandler(t)
+	body := `{"entries":{
+		"k1":[{"value":"v1","clocks":{"n":1}}],
+		"k2":[{"value":"v2","clocks":{"n":1}}]
+	}}`
+	req := httptest.NewRequest(http.MethodPost, "/sync/push", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+
+	h.PushSyncEntries(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", w.Code)
+	}
+	for _, key := range []string{"k1", "k2"} {
+		if _, ok := h.store.Get(key); !ok {
+			t.Errorf("expected %q in store after push", key)
+		}
+	}
+}
+
+func TestPushSyncEntriesDominatedEntryDropped(t *testing.T) {
+	h := newTestHandler(t)
+	// Seed a newer value first.
+	h.store.Put("k", "new", store.VectorClockVersion{Clocks: map[string]uint64{"n": 2}})
+
+	// Push an older version — must be silently ignored.
+	body := `{"entries":{"k":[{"value":"old","clocks":{"n":1}}]}}`
+	req := httptest.NewRequest(http.MethodPost, "/sync/push", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+	h.PushSyncEntries(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", w.Code)
+	}
+	e, _ := h.store.Get("k")
+	if len(e.Siblings) != 1 || e.Siblings[0].Value != "new" {
+		t.Errorf("dominated push should not overwrite newer local value: %+v", e.Siblings)
+	}
+}
+
+func TestPushSyncEntriesEmptyBody(t *testing.T) {
+	h := newTestHandler(t)
+	body := `{"entries":{}}`
+	req := httptest.NewRequest(http.MethodPost, "/sync/push", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+
+	h.PushSyncEntries(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Errorf("expected 204 for empty push, got %d", w.Code)
+	}
+}
