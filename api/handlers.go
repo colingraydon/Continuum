@@ -646,6 +646,76 @@ type SyncKeysResponse struct {
 	Entries map[string][]SyncSibling `json:"entries"`
 }
 
+// SyncBucketKeysResponse is returned by GET /sync/bucket-keys.
+type SyncBucketKeysResponse struct {
+	Keys []string `json:"keys"`
+}
+
+// GetSyncBucketKeys returns the key names in a specific bucket of a vnode range.
+// Used by the primary during bidirectional anti-entropy to discover keys the
+// replica holds that the primary does not.
+func (h *Handler) GetSyncBucketKeys(w http.ResponseWriter, req *http.Request) {
+	vnodeParam := req.URL.Query().Get("vnode")
+	bucketParam := req.URL.Query().Get("bucket")
+	if vnodeParam == "" || bucketParam == "" {
+		http.Error(w, "vnode and bucket params required", http.StatusBadRequest)
+		return
+	}
+	parsedVnode, err := strconv.ParseUint(vnodeParam, 10, 32)
+	if err != nil {
+		http.Error(w, "invalid vnode param", http.StatusBadRequest)
+		return
+	}
+	parsedBucket, err := strconv.Atoi(bucketParam)
+	if err != nil || parsedBucket < 0 || parsedBucket >= merkle.BucketCount {
+		http.Error(w, "invalid bucket param", http.StatusBadRequest)
+		return
+	}
+	vnodeHash := uint32(parsedVnode)
+
+	vr, ok := h.ring.GetVnodeRange(vnodeHash)
+	if !ok {
+		http.Error(w, "unknown vnode", http.StatusNotFound)
+		return
+	}
+
+	var keys []string
+	for key := range h.store.KeyHashes() {
+		if vr.Contains(merkle.HashKey(key)) && merkle.BucketIndex(key) == parsedBucket {
+			keys = append(keys, key)
+		}
+	}
+	if keys == nil {
+		keys = []string{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(SyncBucketKeysResponse{Keys: keys}); err != nil {
+		http.Error(w, "failed to write response", http.StatusInternalServerError)
+	}
+}
+
+// PushSyncEntries applies a batch of entries sent by a primary node. The
+// request body uses the same format as the SyncKeysResponse so the primary can
+// reuse its existing serialization path.
+func (h *Handler) PushSyncEntries(w http.ResponseWriter, req *http.Request) {
+	var body SyncKeysResponse
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	for key, sibs := range body.Entries {
+		for _, sib := range sibs {
+			v := store.VectorClockVersion{Clocks: sib.Clocks}
+			if sib.Deleted {
+				h.store.Delete(key, v)
+			} else {
+				h.store.Put(key, sib.Value, v)
+			}
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // GetSyncState returns the root hash and per-bucket hashes for the requested
 // vnode (?vnode=<endHash>). Computes bucket hashes on-the-fly from the local
 // store so that replicas can serve sync state without maintaining their own

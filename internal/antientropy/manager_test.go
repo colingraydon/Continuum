@@ -9,6 +9,7 @@ import (
 
 	"github.com/colingraydon/continuum/api"
 	"github.com/colingraydon/continuum/internal/gossip"
+	"github.com/colingraydon/continuum/internal/merkle"
 	"github.com/colingraydon/continuum/internal/ring"
 	"github.com/colingraydon/continuum/internal/store"
 )
@@ -170,6 +171,76 @@ func TestAntiEntropySkipsWhenInSync(t *testing.T) {
 	}
 }
 
+// TestAntiEntropyPushesToReplica verifies the push direction: when the primary
+// holds a key that the replica is missing, syncAll pushes it to the replica.
+func TestAntiEntropyPushesToReplica(t *testing.T) {
+	r1, s1, _ := newSyncNode(t, "node1")
+	r2, s2, srv2 := newSyncNode(t, "node2")
+
+	addr2 := aeServerAddr(srv2)
+	r1.AddNode("node1", "127.0.0.1:0")
+	r1.AddNode("node2", addr2)
+	r2.AddNode("node1", "127.0.0.1:0")
+	r2.AddNode("node2", addr2)
+
+	key := firstPrimaryKey(r1, "node1")
+
+	// Primary has the key; replica has never seen it.
+	clock := store.VectorClockVersion{Clocks: map[string]uint64{"node1": 1}}
+	s1.Put(key, "primary-only", clock)
+
+	mgr := New(r1, s1, "node1", 2, time.Second)
+	syncAll(t, mgr)
+
+	entry, ok := s2.Get(key)
+	if !ok {
+		t.Fatal("replica did not receive pushed entry")
+	}
+	if len(entry.Siblings) != 1 || entry.Siblings[0].Value != "primary-only" {
+		t.Errorf("replica has wrong value after push: %+v", entry.Siblings)
+	}
+}
+
+// TestAntiEntropyGCPurgesTombstone verifies that GCTombstones removes an
+// uncontested tombstone and that removeFromTrees evicts it from the Merkle tree.
+func TestAntiEntropyGCPurgesTombstone(t *testing.T) {
+	r1, s1, _ := newSyncNode(t, "node1")
+	r1.AddNode("node1", "127.0.0.1:0")
+
+	key := firstPrimaryKey(r1, "node1")
+
+	s1.Put(key, "value", store.VectorClockVersion{Clocks: map[string]uint64{"node1": 1}})
+	s1.Delete(key, store.VectorClockVersion{Clocks: map[string]uint64{"node1": 2}})
+
+	mgr := New(r1, s1, "node1", 1, time.Second)
+
+	// A negative TTL makes every tombstone immediately eligible for GC.
+	purged := s1.GCTombstones(-1)
+	if len(purged) != 1 || purged[0] != key {
+		t.Fatalf("expected [%s] purged, got %v", key, purged)
+	}
+	mgr.removeFromTrees(key)
+
+	if _, ok := s1.Get(key); ok {
+		t.Error("key still present in store after GC")
+	}
+
+	// Verify the key is no longer tracked in any of the manager's Merkle trees.
+	keyHash := merkle.HashKey(key)
+	mgr.mu.RLock()
+	defer mgr.mu.RUnlock()
+	for end, vr := range mgr.ranges {
+		if !vr.Contains(keyHash) {
+			continue
+		}
+		for _, k := range mgr.trees[end].BucketKeys(merkle.BucketIndex(key)) {
+			if k == key {
+				t.Errorf("key %q still in Merkle tree after removeFromTrees", key)
+			}
+		}
+	}
+}
+
 // TestAntiEntropyRepairsTombstone verifies that a tombstone on a replica is
 // propagated to the primary by the sync loop.
 func TestAntiEntropyRepairsTombstone(t *testing.T) {
@@ -206,5 +277,40 @@ func TestAntiEntropyRepairsTombstone(t *testing.T) {
 	}
 	if !entry.Siblings[0].Deleted {
 		t.Errorf("expected tombstone in primary after sync, got value=%q", entry.Siblings[0].Value)
+	}
+}
+
+func TestUnion(t *testing.T) {
+	tests := []struct {
+		name string
+		a, b []string
+		want []string
+	}{
+		{"both empty", nil, nil, nil},
+		{"a empty", nil, []string{"x", "y"}, []string{"x", "y"}},
+		{"b empty", []string{"x", "y"}, nil, []string{"x", "y"}},
+		{"no overlap", []string{"a", "b"}, []string{"c", "d"}, []string{"a", "b", "c", "d"}},
+		{"full overlap", []string{"a", "b"}, []string{"a", "b"}, []string{"a", "b"}},
+		{"partial overlap", []string{"a", "b"}, []string{"b", "c"}, []string{"a", "b", "c"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := union(tc.a, tc.b)
+			if len(got) != len(tc.want) {
+				t.Fatalf("union(%v, %v) = %v, want %v", tc.a, tc.b, got, tc.want)
+			}
+			seen := make(map[string]bool, len(got))
+			for _, k := range got {
+				if seen[k] {
+					t.Errorf("duplicate key %q in union result", k)
+				}
+				seen[k] = true
+			}
+			for _, k := range tc.want {
+				if !seen[k] {
+					t.Errorf("expected key %q missing from union result %v", k, got)
+				}
+			}
+		})
 	}
 }

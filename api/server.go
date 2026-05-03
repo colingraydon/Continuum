@@ -24,7 +24,9 @@ func NewServer(r *ring.Ring, ml *gossip.MemberList, g *gossip.Gossiper, s *store
 	mux.HandleFunc("GET /health", h.Health)
 	mux.HandleFunc("POST /gossip", h.Gossip)
 	mux.HandleFunc("GET /sync", h.GetSyncState)
+	mux.HandleFunc("GET /sync/bucket-keys", h.GetSyncBucketKeys)
 	mux.HandleFunc("POST /sync/keys", h.GetSyncKeys)
+	mux.HandleFunc("POST /sync/push", h.PushSyncEntries)
 	mux.Handle("GET /metrics", promhttp.Handler())
 	return metricsMiddleware(mux)
 }

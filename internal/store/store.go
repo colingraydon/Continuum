@@ -2,6 +2,7 @@ package store
 
 import (
 	"sync"
+	"time"
 
 	"github.com/spaolacci/murmur3"
 )
@@ -78,13 +79,17 @@ type Entry struct {
 }
 
 type Store struct {
-	mu       sync.RWMutex
-	data     map[string]Entry
-	onUpdate func(key string, hash uint32)
+	mu             sync.RWMutex
+	data           map[string]Entry
+	onUpdate       func(key string, hash uint32)
+	tombstoneAges  map[string]time.Time // key → when tombstone was first accepted on this node
 }
 
 func New() *Store {
-	return &Store{data: make(map[string]Entry)}
+	return &Store{
+		data:          make(map[string]Entry),
+		tombstoneAges: make(map[string]time.Time),
+	}
 }
 
 // SetOnUpdate registers a callback invoked after every write that changes the
@@ -152,21 +157,60 @@ func (s *Store) Put(key, value string, v VectorClockVersion) {
 		Value:   value,
 		Version: v,
 		Hash:    murmur3.Sum32([]byte(value)),
-	}) && s.onUpdate != nil {
-		s.onUpdate(key, entryHash(s.data[key]))
+	}) {
+		// A live write supersedes any prior tombstone age for this key. If the
+		// key is deleted again later, the new tombstone gets a fresh timestamp.
+		delete(s.tombstoneAges, key)
+		if s.onUpdate != nil {
+			s.onUpdate(key, entryHash(s.data[key]))
+		}
 	}
 }
 
 // Delete writes a tombstone for key at version v. The tombstone participates in
 // conflict resolution identically to a value write: it wins if v dominates
 // existing siblings, loses if dominated, and becomes a sibling on concurrent
-// writes. Tombstones are never garbage-collected until anti-entropy is in place.
+// writes.
 func (s *Store) Delete(key string, v VectorClockVersion) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.applySibling(key, Sibling{Deleted: true, Version: v}) && s.onUpdate != nil {
-		s.onUpdate(key, entryHash(s.data[key]))
+	if s.applySibling(key, Sibling{Deleted: true, Version: v}) {
+		// Always record the current time so that a new deletion event (different
+		// clock) resets the TTL window. Equal-clock re-applications never reach
+		// this branch because applySibling returns false for idempotent writes.
+		s.tombstoneAges[key] = time.Now()
+		if s.onUpdate != nil {
+			s.onUpdate(key, entryHash(s.data[key]))
+		}
 	}
+}
+
+// GCTombstones removes uncontested tombstones — entries with exactly one
+// sibling that is deleted — older than maxAge. It returns the purged keys so
+// callers can remove them from auxiliary structures such as Merkle trees.
+//
+// Safety: only call after bidirectional anti-entropy has had time to propagate
+// tombstones to all replicas. maxAge must be longer than the maximum expected
+// propagation window (see gcTTL in the anti-entropy manager).
+func (s *Store) GCTombstones(maxAge time.Duration) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cutoff := time.Now().Add(-maxAge)
+	var purged []string
+	for key, entry := range s.data {
+		if len(entry.Siblings) != 1 || !entry.Siblings[0].Deleted {
+			continue
+		}
+		age, ok := s.tombstoneAges[key]
+		if !ok || age.After(cutoff) {
+			continue
+		}
+		delete(s.data, key)
+		delete(s.tombstoneAges, key)
+		purged = append(purged, key)
+	}
+	return purged
 }
 
 func (s *Store) Get(key string) (Entry, bool) {

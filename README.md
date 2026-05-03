@@ -28,9 +28,11 @@ Deletes are implemented as tombstones: a `Deleted` sibling written at an increme
 
 ### Anti-Entropy (`internal/antientropy`)
 
-Background repair layer that detects and corrects divergent replicas using Merkle trees. The primary node for each vnode range maintains one Merkle tree, partitioned into 16 hash-range buckets. Every 30 seconds, one vnode is selected at random and compared against each of its replicas. Only divergent buckets are repaired - the manager fetches the replica's entries for the keys in that bucket and applies any that are newer, using the same vector clock logic as a live write.
+Background repair layer that detects and corrects divergent replicas using Merkle trees. The primary node for each vnode range maintains one Merkle tree, partitioned into 16 hash-range buckets. Every 30 seconds, one vnode is selected at random and compared against each of its replicas. Sync is **bidirectional**: for each divergent bucket, the primary both pulls entries from the replica that it is missing or behind on, and pushes entries to the replica that it has but the replica lacks. Vector clock semantics handle all cases - dominated entries are silently dropped, concurrent entries become siblings.
 
 Replicas do not maintain persistent trees. Instead, they compute bucket and root hashes on-the-fly from their store when the primary asks, which keeps the replica code path simple and avoids synchronization overhead.
+
+**Tombstone GC** runs every 5 minutes. Uncontested tombstones (single-sibling, deleted, no concurrent live sibling) older than 1 hour are purged from the store and removed from the primary's Merkle trees. See the design decision below for the safety reasoning behind the TTL choice.
 
 ### Stats Aggregator (`internal/stats`)
 
@@ -209,6 +211,14 @@ The ring uses `sync.RWMutex` rather than a plain mutex. `RWMutex` allows unlimit
 
 Per-node key counts use `sync/atomic.Int64` rather than incrementing under the write lock. This keeps `GetNode` on the read lock path so multiple goroutines can look up keys concurrently.
 
+### Bidirectional sync and tombstone GC
+
+The alternative to TTL-based GC is per-replica confirmation tracking - each primary records which replicas have acknowledged a tombstone and only purges it once every replica has confirmed receipt. This is strictly safer but adds meaningful complexity: the primary must persist acknowledgment state, handle replica churn (nodes joining and leaving mid-tracking), and reason about what "all replicas" means in a dynamic cluster.
+
+Bidirectional sync makes the simpler TTL approach viable. Because the primary both pulls from and pushes to each replica on every sync cycle, a tombstone written on any node propagates outward without waiting for the replica to initiate a sync. With a 30-second sync interval, a 1-hour TTL provides roughly 120 sync cycles of headroom before GC runs - more than enough for tombstones to reach every live replica.
+
+The residual risk is key resurrection: a node partitioned for longer than 1 hour reconnects with a stale live value after the primary has already GC'd its tombstone. For this in-memory store, the risk is theoretical - a node partitioned that long will have restarted and lost all state before reconnecting. For a persistent store, the TTL would need to be substantially longer - or replaced with per-replica confirmation tracking - to remain safe across restarts.
+
 ### Callback pattern
 
 The ring accepts a `SetUpdateCallback` rather than importing Prometheus directly, and the gossip `MemberList` accepts an `onChange` callback rather than holding a ring reference. Both keep internal packages free of external dependencies and make integration points explicit.
@@ -354,6 +364,24 @@ curl -X POST http://localhost:8080/sync/keys \
 
 Returns the full sibling sets for the requested keys, including vector clocks and tombstone state. Used by the primary to fetch a replica's version of divergent keys during repair.
 
+### Sync bucket keys (anti-entropy)
+
+```bash
+curl "http://localhost:8080/sync/bucket-keys?vnode=<endHash>&bucket=<0-15>"
+```
+
+Returns the key names in a specific Merkle bucket within a vnode range. Used by the primary during bidirectional sync to discover keys the replica holds that the primary does not.
+
+### Push sync entries (anti-entropy)
+
+```bash
+curl -X POST http://localhost:8080/sync/push \
+  -H "Content-Type: application/json" \
+  -d '{"entries": {"user:123": [{"value": "alice", "clocks": {"node1": 1}}]}}'
+```
+
+Applies a batch of entries from the primary to the local store. The replica accepts entries whose vector clocks are newer than or concurrent with what it already holds, using the same conflict resolution logic as a live write.
+
 ### Prometheus metrics
 
 ```bash
@@ -402,17 +430,17 @@ In Grafana, add `http://prometheus:9090` as a Prometheus data source and query:
 
 ## Environment Variables
 
-| Variable             | Default          | Description                                      |
-| -------------------- | ---------------- | ------------------------------------------------ |
-| `SELF_ID`            | `SELF_ADDRESS`   | Node identifier                                  |
-| `SELF_ADDRESS`       | `localhost:8080` | HTTP address including port                      |
-| `GOSSIP_PORT`        | `8081`           | UDP port for gossip                              |
-| `REPLICAS`           | `150`            | Virtual nodes per physical node                  |
-| `REPLICATION_FACTOR` | `3`              | Number of replicas per key                       |
-| `WRITE_QUORUM`       | majority         | Replica acks required before returning 204       |
-| `READ_QUORUM`        | majority         | Replica responses required for a consistent read |
+| Variable             | Default          | Description                                                       |
+| -------------------- | ---------------- | ----------------------------------------------------------------- |
+| `SELF_ID`            | `SELF_ADDRESS`   | Node identifier                                                   |
+| `SELF_ADDRESS`       | `localhost:8080` | HTTP address including port                                       |
+| `GOSSIP_PORT`        | `8081`           | UDP port for gossip                                               |
+| `REPLICAS`           | `150`            | Virtual nodes per physical node                                   |
+| `REPLICATION_FACTOR` | `3`              | Number of replicas per key                                        |
+| `WRITE_QUORUM`       | majority         | Replica acks required before returning 204                        |
+| `READ_QUORUM`        | majority         | Replica responses required for a consistent read                  |
 | `REPLICA_TIMEOUT_MS` | `500`            | Timeout in milliseconds for inter-node replication and read calls |
-| `SEED_NODES`         | -                | Comma-separated HTTP addresses to bootstrap from |
+| `SEED_NODES`         | -                | Comma-separated HTTP addresses to bootstrap from                  |
 
 ---
 
@@ -463,7 +491,6 @@ Continuum shuts down gracefully on `SIGINT` or `SIGTERM`:
 
 ## What's Next
 
-- **Tombstone GC** - expire tombstones after a configurable TTL once all replicas have confirmed receipt, to prevent unbounded memory growth
 - **Persistence** - snapshot ring and KV state to disk on shutdown, reload on startup
 - **Weighted vnodes** - nodes with higher capacity receive proportionally more vnodes for heterogeneous clusters
 - **Architecture diagram**

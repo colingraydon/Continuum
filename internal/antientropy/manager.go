@@ -16,7 +16,16 @@ import (
 	"github.com/colingraydon/continuum/internal/store"
 )
 
-const syncInterval = 30 * time.Second
+const (
+	syncInterval = 30 * time.Second
+	gcInterval   = 5 * time.Minute
+	// gcTTL is the minimum age a tombstone must reach before it is eligible for
+	// garbage collection. It must exceed the maximum time anti-entropy takes to
+	// propagate a tombstone to all replicas across any realistic partition window.
+	// With bidirectional sync running every 30 seconds, one hour gives ~120x
+	// headroom. See README for the full safety discussion.
+	gcTTL = time.Hour
+)
 
 // Manager maintains one Merkle tree per primary vnode and drives anti-entropy
 // syncs from primary to replicas (Dynamo-style: primary initiates, replicas are
@@ -84,13 +93,42 @@ func (m *Manager) Start(ctx context.Context) {
 }
 
 func (m *Manager) syncLoop(ctx context.Context) {
-	ticker := time.NewTicker(syncInterval)
-	defer ticker.Stop()
+	syncTicker := time.NewTicker(syncInterval)
+	gcTicker := time.NewTicker(gcInterval)
+	defer syncTicker.Stop()
+	defer gcTicker.Stop()
 	for {
 		select {
-		case <-ticker.C:
+		case <-syncTicker.C:
 			m.syncRound()
+		case <-gcTicker.C:
+			m.runGC()
 		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// runGC removes tombstones older than gcTTL and evicts them from the primary's
+// Merkle trees so future syncs reflect the purged state.
+func (m *Manager) runGC() {
+	purged := m.s.GCTombstones(gcTTL)
+	for _, key := range purged {
+		m.removeFromTrees(key)
+	}
+	if len(purged) > 0 {
+		log.Printf("antientropy: GC purged %d tombstones", len(purged))
+	}
+}
+
+// removeFromTrees removes key from whichever primary vnode tree owns it.
+func (m *Manager) removeFromTrees(key string) {
+	keyHash := merkle.HashKey(key)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for end, vr := range m.ranges {
+		if vr.Contains(keyHash) {
+			m.trees[end].Remove(key)
 			return
 		}
 	}
@@ -125,9 +163,10 @@ func (m *Manager) syncRound() {
 	}
 }
 
-// syncWithReplica compares the primary's Merkle tree for vnodeHash against the
-// replica at addr. For each divergent bucket, it fetches the replica's entries
-// for the primary's bucket keys and applies any that are newer.
+// syncWithReplica bidirectionally syncs the primary's vnode against the replica
+// at addr. For each divergent bucket it:
+//   - pulls entries the replica has that are newer than or absent from the primary
+//   - pushes entries the primary has that are newer than or absent from the replica
 func (m *Manager) syncWithReplica(addr string, vnodeHash uint32, local *merkle.Tree) error {
 	state, err := m.fetchSyncState(addr, vnodeHash)
 	if err != nil {
@@ -137,15 +176,40 @@ func (m *Manager) syncWithReplica(addr string, vnodeHash uint32, local *merkle.T
 		return nil
 	}
 
+	// Collect all entries to push at the end so a single HTTP call carries the
+	// full batch rather than one call per key.
+	toPush := make(map[string][]syncSibling)
+
 	for i, replicaBucketHash := range state.Buckets {
 		if replicaBucketHash == local.BucketHash(i) {
 			continue
 		}
-		keys := local.BucketKeys(i)
-		if len(keys) == 0 {
+
+		// Discover the full set of keys on both sides for this bucket.
+		localKeys := local.BucketKeys(i)
+		remoteKeys, err := m.fetchBucketKeys(addr, vnodeHash, i)
+		if err != nil {
+			return fmt.Errorf("bucket %d keys: %w", i, err)
+		}
+		allKeys := union(localKeys, remoteKeys)
+		if len(allKeys) == 0 {
 			continue
 		}
-		entries, err := m.fetchSyncKeys(addr, keys)
+
+		// Snapshot primary's entries before the pull so we push the pre-merge
+		// state — there is no point sending back data the replica just gave us.
+		for _, key := range localKeys {
+			if entry, ok := m.s.Get(key); ok {
+				sibs := make([]syncSibling, len(entry.Siblings))
+				for j, sib := range entry.Siblings {
+					sibs[j] = syncSibling{Value: sib.Value, Deleted: sib.Deleted, Clocks: sib.Version.Clocks}
+				}
+				toPush[key] = sibs
+			}
+		}
+
+		// Pull: apply the replica's entries to the primary.
+		entries, err := m.fetchSyncKeys(addr, allKeys)
 		if err != nil {
 			return fmt.Errorf("bucket %d: %w", i, err)
 		}
@@ -158,6 +222,13 @@ func (m *Manager) syncWithReplica(addr string, vnodeHash uint32, local *merkle.T
 					m.s.Put(key, sib.Value, v)
 				}
 			}
+		}
+	}
+
+	// Push: send the primary's entries to the replica in one batch.
+	if len(toPush) > 0 {
+		if err := m.pushSyncEntries(addr, toPush); err != nil {
+			return fmt.Errorf("push: %w", err)
 		}
 	}
 	return nil
@@ -204,4 +275,53 @@ func (m *Manager) fetchSyncKeys(addr string, keys []string) (map[string][]syncSi
 	defer func() { _ = resp.Body.Close() }()
 	var result syncKeysResponse
 	return result.Entries, json.NewDecoder(resp.Body).Decode(&result)
+}
+
+// fetchBucketKeys returns the key names in a specific bucket of a vnode range
+// from the replica. Used to discover keys the replica has that the primary
+// does not, enabling the pull side of bidirectional sync.
+func (m *Manager) fetchBucketKeys(addr string, vnodeHash uint32, bucket int) ([]string, error) {
+	resp, err := m.client.Get(fmt.Sprintf("http://%s/sync/bucket-keys?vnode=%d&bucket=%d", addr, vnodeHash, bucket))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var result struct {
+		Keys []string `json:"keys"`
+	}
+	return result.Keys, json.NewDecoder(resp.Body).Decode(&result)
+}
+
+// pushSyncEntries sends a batch of primary entries to the replica via a single
+// HTTP call so the replica can apply any it is missing or behind on.
+func (m *Manager) pushSyncEntries(addr string, entries map[string][]syncSibling) error {
+	body, err := json.Marshal(syncKeysResponse{Entries: entries})
+	if err != nil {
+		return err
+	}
+	resp, err := m.client.Post("http://"+addr+"/sync/push", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("push: replica returned %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// union returns a deduplicated slice containing every string in a or b.
+func union(a, b []string) []string {
+	seen := make(map[string]struct{}, len(a)+len(b))
+	for _, s := range a {
+		seen[s] = struct{}{}
+	}
+	for _, s := range b {
+		seen[s] = struct{}{}
+	}
+	out := make([]string, 0, len(seen))
+	for s := range seen {
+		out = append(out, s)
+	}
+	return out
 }
