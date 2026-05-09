@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/colingraydon/continuum/internal/gossip"
+	"github.com/colingraydon/continuum/internal/hintstore"
 	"github.com/colingraydon/continuum/internal/merkle"
 	"github.com/colingraydon/continuum/internal/ring"
 	"github.com/colingraydon/continuum/internal/stats"
@@ -21,6 +23,7 @@ type Handler struct {
 	aggregator        *stats.Aggregator
 	memberList        *gossip.MemberList
 	store             *store.Store
+	hintStore         *hintstore.HintStore
 	selfID            string
 	replicationFactor int
 	writeQuorum       int
@@ -29,18 +32,104 @@ type Handler struct {
 	replicaClient     *http.Client
 }
 
-func NewHandler(r *ring.Ring, ml *gossip.MemberList, g *gossip.Gossiper, s *store.Store, selfID string, replicationFactor, writeQuorum, readQuorum int, replicaTimeout time.Duration) *Handler {
+func NewHandler(r *ring.Ring, ml *gossip.MemberList, g *gossip.Gossiper, s *store.Store, selfID string, replicationFactor, writeQuorum, readQuorum int, replicaTimeout time.Duration, hs *hintstore.HintStore) *Handler {
 	return &Handler{
 		ring:              r,
 		aggregator:        stats.NewAggregator(r, ml),
 		memberList:        ml,
 		store:             s,
+		hintStore:         hs,
 		selfID:            selfID,
 		replicationFactor: replicationFactor,
 		writeQuorum:       writeQuorum,
 		readQuorum:        readQuorum,
 		startTime:         time.Now(),
 		replicaClient:     &http.Client{Timeout: replicaTimeout},
+	}
+}
+
+// replicaResult carries the outcome of a single replica fan-out attempt.
+type replicaResult struct {
+	nodeID string
+	err    error
+}
+
+func cloneClocks(clocks map[string]uint64) map[string]uint64 {
+	c := make(map[string]uint64, len(clocks))
+	for k, v := range clocks {
+		c[k] = v
+	}
+	return c
+}
+
+// bufferHints stores hints for replicas that failed to ack a write. It handles
+// two cases:
+//   - All results collected (remaining==0): hints are stored synchronously.
+//   - In-flight goroutines remain (remaining>0): a background goroutine drains
+//     the channel and stores hints for any failures, then adds the pre-quorum
+//     failures too. The caller can return 204 immediately without waiting.
+func (h *Handler) bufferHints(template hintstore.Hint, preQuorumFailed []string, remaining int, ch <-chan replicaResult) {
+	storeFn := func(nodeIDs []string) {
+		for _, id := range nodeIDs {
+			hint := template
+			hint.Clocks = cloneClocks(template.Clocks)
+			hint.At = time.Now()
+			h.hintStore.Store(id, hint)
+		}
+	}
+	if remaining > 0 {
+		captured := make([]string, len(preQuorumFailed))
+		copy(captured, preQuorumFailed)
+		go func() {
+			for range remaining {
+				if r := <-ch; r.err != nil {
+					captured = append(captured, r.nodeID)
+				}
+			}
+			storeFn(captured)
+		}()
+	} else {
+		storeFn(preQuorumFailed)
+	}
+}
+
+// DeliverHints drains all buffered hints for nodeID and replays them to
+// address as replica sub-writes. Failures are logged; anti-entropy handles
+// any keys that could not be delivered.
+func (h *Handler) DeliverHints(nodeID, address string) {
+	if h.hintStore == nil {
+		return
+	}
+	hints := h.hintStore.Drain(nodeID)
+	if len(hints) == 0 {
+		return
+	}
+	log.Printf("hinted handoff: delivering %d hints to %s", len(hints), nodeID)
+	for _, hint := range hints {
+		var err error
+		if hint.Deleted {
+			err = h.replicateDeleteToSync(address, hint.Key, hint.Clocks)
+		} else {
+			err = h.replicateToSync(address, hint.Key, hint.Value, hint.Clocks)
+		}
+		if err != nil {
+			log.Printf("hinted handoff: failed to deliver hint for %s to %s: %v", hint.Key, nodeID, err)
+		}
+	}
+}
+
+// FlushHints delivers all buffered hints to any currently-alive nodes. Called
+// during graceful shutdown so hints are not lost when the coordinator exits.
+func (h *Handler) FlushHints() {
+	if h.hintStore == nil {
+		return
+	}
+	for _, nodeID := range h.hintStore.PendingNodes() {
+		m, ok := h.memberList.Get(nodeID)
+		if !ok || m.Status != gossip.MemberAlive {
+			continue
+		}
+		h.DeliverHints(nodeID, m.Address)
 	}
 }
 
@@ -366,27 +455,38 @@ func (h *Handler) PutKey(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	type result struct{ err error }
 	pending := 0
-	results := make(chan result, len(nodes))
+	resultCh := make(chan replicaResult, len(nodes))
 	for _, n := range nodes {
 		if n.ID == h.selfID {
 			continue
 		}
 		pending++
-		go func(addr string) {
-			results <- result{h.replicateToSync(addr, key, body.Value, version.Clocks)}
-		}(n.Address)
+		go func(n *ring.Node) {
+			resultCh <- replicaResult{n.ID, h.replicateToSync(n.Address, key, body.Value, version.Clocks)}
+		}(n)
 	}
 
-	for range pending {
-		r := <-results
+	collected := 0
+	var failed []string
+	for collected < pending {
+		r := <-resultCh
+		collected++
 		if r.err == nil {
 			acks++
+		} else {
+			failed = append(failed, r.nodeID)
 		}
 		if acks >= quorum {
 			break
 		}
+	}
+
+	if h.hintStore != nil {
+		h.bufferHints(
+			hintstore.Hint{Key: key, Value: body.Value, Clocks: version.Clocks},
+			failed, pending-collected, resultCh,
+		)
 	}
 
 	if acks < quorum {
@@ -451,27 +551,38 @@ func (h *Handler) DeleteKey(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	type result struct{ err error }
 	pending := 0
-	results := make(chan result, len(nodes))
+	resultCh := make(chan replicaResult, len(nodes))
 	for _, n := range nodes {
 		if n.ID == h.selfID {
 			continue
 		}
 		pending++
-		go func(addr string) {
-			results <- result{h.replicateDeleteToSync(addr, key, version.Clocks)}
-		}(n.Address)
+		go func(n *ring.Node) {
+			resultCh <- replicaResult{n.ID, h.replicateDeleteToSync(n.Address, key, version.Clocks)}
+		}(n)
 	}
 
-	for range pending {
-		r := <-results
+	collected := 0
+	var failed []string
+	for collected < pending {
+		r := <-resultCh
+		collected++
 		if r.err == nil {
 			acks++
+		} else {
+			failed = append(failed, r.nodeID)
 		}
 		if acks >= quorum {
 			break
 		}
+	}
+
+	if h.hintStore != nil {
+		h.bufferHints(
+			hintstore.Hint{Key: key, Deleted: true, Clocks: version.Clocks},
+			failed, pending-collected, resultCh,
+		)
 	}
 
 	if acks < quorum {

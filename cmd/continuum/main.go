@@ -9,12 +9,14 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/colingraydon/continuum/api"
 	"github.com/colingraydon/continuum/internal/antientropy"
 	"github.com/colingraydon/continuum/internal/gossip"
+	"github.com/colingraydon/continuum/internal/hintstore"
 	"github.com/colingraydon/continuum/internal/ring"
 	"github.com/colingraydon/continuum/internal/store"
 )
@@ -119,11 +121,21 @@ func main() {
 		api.UpdateRingMetrics(nodeCount, vnodeCount)
 	})
 
+	hs := hintstore.New(10_000, time.Hour)
+
+	// hptr lets the gossip onChange callback reference the Handler without a
+	// circular dependency: the callback is registered before the Handler is
+	// created, but DeliverHints is only called after hptr is populated.
+	var hptr atomic.Pointer[api.Handler]
+
 	ml := gossip.NewMemberList(cfg.selfID, cfg.selfAddress, func(m *gossip.Member, status gossip.MemberStatus) {
 		log.Printf("member %s status changed to %s", m.ID, status)
 		switch status {
 		case gossip.MemberAlive:
 			r.AddNode(m.ID, m.Address)
+			if h := hptr.Load(); h != nil {
+				go h.DeliverHints(m.ID, m.Address)
+			}
 		case gossip.MemberDead:
 			r.RemoveNode(m.ID)
 			log.Printf("removed dead member %s from ring", m.ID)
@@ -164,7 +176,25 @@ func main() {
 	ae := antientropy.New(r, s, cfg.selfID, cfg.replicationFactor, cfg.replicaTimeout)
 	s.SetOnUpdate(ae.Update)
 	ae.Start(ctx)
-	mux := api.NewServer(r, ml, g, s, cfg.selfID, cfg.replicationFactor, cfg.writeQuorum, cfg.readQuorum, cfg.replicaTimeout)
+
+	h := api.NewHandler(r, ml, g, s, cfg.selfID, cfg.replicationFactor, cfg.writeQuorum, cfg.readQuorum, cfg.replicaTimeout, hs)
+	hptr.Store(h)
+
+	// Expire stale hints periodically so memory is bounded for long-down nodes.
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				hs.ExpireOld()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	mux := api.BuildMux(h)
 	srv := &http.Server{Addr: ":" + httpPort, Handler: mux}
 
 	go func() {
@@ -178,6 +208,9 @@ func main() {
 	stop()
 	log.Printf("shutdown: notifying peers")
 	g.NotifyDead()
+
+	log.Printf("shutdown: flushing pending hints to alive nodes")
+	h.FlushHints()
 
 	log.Printf("shutdown: draining in-flight requests")
 	drainCtx, drainCancel := context.WithTimeout(context.Background(), 30*time.Second)

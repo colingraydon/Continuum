@@ -2,13 +2,13 @@
 
 A distributed key-value store built on consistent hashing, gossip-based membership, and vector clock conflict resolution - written in Go.
 
-Continuum implements the core data layer used in systems like Cassandra and Dynamo: a hash ring that maps keys to nodes with minimal disruption when topology changes, a gossip protocol that propagates membership without a central coordinator, a replication layer that fans writes out to N nodes and resolves conflicts using vector clocks, and a Merkle tree anti-entropy system that detects and repairs divergent replicas in the background. It exposes an HTTP API, Prometheus metrics, and a Grafana dashboard out of the box.
+Continuum implements the core data layer used in systems like Cassandra and Dynamo: a hash ring that maps keys to nodes with minimal disruption when topology changes, a gossip protocol that propagates membership without a central coordinator, a replication layer that fans writes out to N nodes and resolves conflicts using vector clocks, a Merkle tree anti-entropy system that detects and repairs divergent replicas in the background, and a hinted handoff layer that buffers writes for temporarily unreachable replicas and replays them on recovery. It exposes an HTTP API, Prometheus metrics, and a Grafana dashboard out of the box.
 
 ---
 
 ## Architecture
 
-Continuum is organized into six layers:
+Continuum is organized into seven layers:
 
 ### Core Ring (`internal/ring`)
 
@@ -33,6 +33,14 @@ Background repair layer that detects and corrects divergent replicas using Merkl
 Replicas do not maintain persistent trees. Instead, they compute bucket and root hashes on-the-fly from their store when the primary asks, which keeps the replica code path simple and avoids synchronization overhead.
 
 **Tombstone GC** runs every 5 minutes. Uncontested tombstones (single-sibling, deleted, no concurrent live sibling) older than 1 hour are purged from the store and removed from the primary's Merkle trees. See the design decision below for the safety reasoning behind the TTL choice.
+
+### Hinted Handoff (`internal/hintstore`)
+
+Durability layer that closes the gap between quorum writes and full replication. When a coordinator fans a write out to its replica set and a replica is unreachable, the write is buffered as a *hint* in the coordinator's local store, tagged with the intended recipient. When gossip detects that the node has recovered (alive transition), the coordinator drains its hint buffer and replays each write to the recovered node as a normal replica sub-write.
+
+The hint store is bounded: a per-node cap of 10,000 entries evicts the oldest hints when full, and hints older than 1 hour are expired and discarded. Anti-entropy is the safety net — any keys whose hints were lost will be repaired within the next sync cycle.
+
+Hint delivery is triggered by the gossip `onChange` callback rather than a polling loop, so recovery latency is bounded by gossip convergence time (O(log n) rounds at 1-second intervals) rather than a fixed poll interval.
 
 ### Stats Aggregator (`internal/stats`)
 
@@ -114,6 +122,52 @@ When siblings are present, the read response contains a `siblings` array instead
 The alternative to sibling surfacing is last-write-wins (LWW): on concurrent writes, keep the value with the highest timestamp and silently discard the other. Cassandra uses LWW by default. It is simple and produces no conflicts visible to the client, but it loses writes - if two clients update the same key concurrently, one update disappears with no indication that it happened.
 
 Sibling surfacing (this system, Riak, Dynamo) never discards a write silently. Concurrent writes are preserved and the conflict is made visible. The tradeoff is that reads can return multiple values, and the application must know what to do with them - merge two shopping carts by union, pick the higher counter, defer to a CRDT, or surface the conflict to a user. This pushes complexity to the application layer, which is where the semantics to resolve it correctly live.
+
+---
+
+## Hinted Handoff
+
+### The durability gap
+
+With RF=3 and W=2, a write returns 204 once two replicas acknowledge it. If the third replica is down at write time, it misses the write entirely. Anti-entropy will repair it within the next 30-second sync cycle. Hinted handoff closes that window.
+
+### How it works
+
+When the coordinator fans a write to its replica set and a replica call fails, the write is buffered locally as a hint:
+
+```
+hint {
+    key:     "user:123"
+    value:   "alice"
+    clocks:  {"node1": 3}
+    deleted: false
+    for:     "node3"
+}
+```
+
+Hints survive in-memory on the coordinator. When gossip detects that node3 has recovered (alive transition), the coordinator drains its hint buffer for node3 and replays each write via a normal replica sub-write (`X-Proxied-From`). The receiving node applies them through the standard vector clock conflict resolution path — stale hints are silently dropped, concurrent hints become siblings.
+
+### Quorum interaction
+
+Hinted replicas **never count toward quorum**. A coordinator that already has W acks does not inflate that count with a speculative "I'll retry node3 later." The 204 reflects actual durability at W replicas; the hint is a best-effort repair on top of that.
+
+### Fan-out implementation
+
+The coordinator starts goroutines for all non-self replicas simultaneously. The result collection loop breaks as soon as W acks are received, rather than waiting for all replicas. For in-flight goroutines that hadn't reported when quorum was met, a background goroutine drains their results and records hints for any failures. This keeps write latency bounded by the W-th fastest replica, not the slowest.
+
+### Graceful shutdown
+
+On `SIGINT`/`SIGTERM`, before draining in-flight HTTP requests, the coordinator iterates all pending hints and delivers any that target currently-alive nodes. This prevents hint loss on planned restarts.
+
+### Limits and safety
+
+| Parameter | Value | Rationale |
+| --------- | ----- | --------- |
+| Per-node cap | 10,000 hints | Bounds memory; excess hints are evicted oldest-first |
+| Hint TTL | 1 hour | Anti-entropy repairs anything older within 2 sync cycles |
+| Coordinator restart | Hints lost | In-memory only; anti-entropy is the durable fallback |
+
+The residual risk is a node that recovers after the coordinator that held its hints has restarted. In that case the replica relies on anti-entropy for repair — the same guarantee that existed before hinted handoff was added.
 
 ---
 
@@ -218,6 +272,14 @@ The alternative to TTL-based GC is per-replica confirmation tracking - each prim
 Bidirectional sync makes the simpler TTL approach viable. Because the primary both pulls from and pushes to each replica on every sync cycle, a tombstone written on any node propagates outward without waiting for the replica to initiate a sync. With a 30-second sync interval, a 1-hour TTL provides roughly 120 sync cycles of headroom before GC runs - more than enough for tombstones to reach every live replica.
 
 The residual risk is key resurrection: a node partitioned for longer than 1 hour reconnects with a stale live value after the primary has already GC'd its tombstone. For this in-memory store, the risk is theoretical - a node partitioned that long will have restarted and lost all state before reconnecting. For a persistent store, the TTL would need to be substantially longer - or replaced with per-replica confirmation tracking - to remain safe across restarts.
+
+### Hinted handoff: event-driven delivery over polling
+
+Hint delivery is triggered by the gossip `onChange` callback (alive transition) rather than a background loop that polls member state on a fixed interval. This means recovery latency tracks gossip convergence — typically a few seconds — rather than the polling period. The tradeoff is tighter coupling between the gossip and handler layers, managed by passing a delivery function through `main.go` rather than letting either package import the other.
+
+### Hinted handoff: background goroutine for post-quorum failures
+
+The coordinator breaks out of the replica result collection loop as soon as W acks are received. Goroutines for the remaining replicas are still in-flight at that point. Rather than waiting for all of them (which would add up to `REPLICA_TIMEOUT_MS` to write latency in the worst case) or ignoring them (which would miss failures that occurred after the quorum break), a background goroutine is spawned to drain the remaining results from the buffered channel and record hints for any failures. The client receives 204 immediately after quorum; hint bookkeeping happens concurrently.
 
 ### Callback pattern
 
@@ -491,6 +553,7 @@ Continuum shuts down gracefully on `SIGINT` or `SIGTERM`:
 
 ## What's Next
 
-- **Persistence** - snapshot ring and KV state to disk on shutdown, reload on startup
+- **Read repair** - when a quorum read finds a replica with a stale vector clock, push the current value back to it before returning to the client. Reduces anti-entropy load and closes staleness windows faster than waiting for the next sync cycle.
+- **Persistence** - write-ahead log and snapshot-on-shutdown so state survives restarts. A prerequisite for making the tombstone GC safety argument hold across node restarts (currently it relies on restarted nodes losing all in-memory state).
 - **Weighted vnodes** - nodes with higher capacity receive proportionally more vnodes for heterogeneous clusters
 - **Architecture diagram**
