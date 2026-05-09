@@ -41,7 +41,7 @@ func newTestHandler(t *testing.T) *Handler {
 	r := ring.NewRing(10)
 	ml := newTestMemberList(r)
 	s := store.New()
-	return NewHandler(r, ml, newTestGossiper(t, ml), s, "self", 3, 1, 1, time.Second)
+	return NewHandler(r, ml, newTestGossiper(t, ml), s, "self", 3, 1, 1, time.Second, nil)
 }
 
 func TestAddNode(t *testing.T) {
@@ -526,7 +526,7 @@ func newHandlerWithSlowReplica(t *testing.T, replicaTimeout, hangFor time.Durati
 	g := gossip.NewGossiper("self", "0", ml, transport)
 	// writeQuorum=2, readQuorum=2: self counts as one, slow replica must ack for quorum.
 	s := store.New()
-	h := NewHandler(r, ml, g, s, "self", 3, 2, 2, replicaTimeout)
+	h := NewHandler(r, ml, g, s, "self", 3, 2, 2, replicaTimeout, nil)
 
 	replicaAddr := strings.TrimPrefix(slow.URL, "http://")
 	ml.Add("self", "localhost:8080")

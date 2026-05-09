@@ -5,13 +5,20 @@ import (
 	"time"
 
 	"github.com/colingraydon/continuum/internal/gossip"
+	"github.com/colingraydon/continuum/internal/hintstore"
 	"github.com/colingraydon/continuum/internal/ring"
 	"github.com/colingraydon/continuum/internal/store"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-func NewServer(r *ring.Ring, ml *gossip.MemberList, g *gossip.Gossiper, s *store.Store, selfID string, replicationFactor, writeQuorum, readQuorum int, replicaTimeout time.Duration) http.Handler {
-	h := NewHandler(r, ml, g, s, selfID, replicationFactor, writeQuorum, readQuorum, replicaTimeout)
+// BuildMux registers all routes for h and wraps them in metrics middleware.
+// Use this when you need a reference to the Handler separately from the mux
+// (e.g. to call DeliverHints from a gossip callback).
+func BuildMux(h *Handler) http.Handler {
+	return newMux(h)
+}
+
+func newMux(h *Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /nodes", h.AddNode)
 	mux.HandleFunc("DELETE /nodes/", h.RemoveNode)
@@ -29,4 +36,8 @@ func NewServer(r *ring.Ring, ml *gossip.MemberList, g *gossip.Gossiper, s *store
 	mux.HandleFunc("POST /sync/push", h.PushSyncEntries)
 	mux.Handle("GET /metrics", promhttp.Handler())
 	return metricsMiddleware(mux)
+}
+
+func NewServer(r *ring.Ring, ml *gossip.MemberList, g *gossip.Gossiper, s *store.Store, selfID string, replicationFactor, writeQuorum, readQuorum int, replicaTimeout time.Duration, hs *hintstore.HintStore) http.Handler {
+	return newMux(NewHandler(r, ml, g, s, selfID, replicationFactor, writeQuorum, readQuorum, replicaTimeout, hs))
 }

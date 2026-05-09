@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/colingraydon/continuum/internal/gossip"
+	"github.com/colingraydon/continuum/internal/hintstore"
 	"github.com/colingraydon/continuum/internal/ring"
 	"github.com/colingraydon/continuum/internal/store"
 )
@@ -37,7 +38,7 @@ func newNamedTestServerQ(t *testing.T, selfID string, rf, wq, rq int) *httptest.
 	}
 	g := gossip.NewGossiper(selfID, "0", ml, transport)
 	s := store.New()
-	srv := httptest.NewServer(NewServer(r, ml, g, s, selfID, rf, wq, rq, time.Second))
+	srv := httptest.NewServer(NewServer(r, ml, g, s, selfID, rf, wq, rq, time.Second, nil))
 	t.Cleanup(func() {
 		srv.Close()
 		transport.Stop()
@@ -62,7 +63,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 	}
 	g := gossip.NewGossiper("self", "0", ml, transport)
 	s := store.New()
-	srv := httptest.NewServer(NewServer(r, ml, g, s, "self", 3, 1, 1, time.Second))
+	srv := httptest.NewServer(NewServer(r, ml, g, s, "self", 3, 1, 1, time.Second, nil))
 	t.Cleanup(func() {
 		srv.Close()
 		transport.Stop()
@@ -634,6 +635,187 @@ func TestE2EReadQuorumFailure(t *testing.T) {
 	defer closeBody(t, getResp)
 	if getResp.StatusCode != http.StatusServiceUnavailable {
 		t.Errorf("expected 503 when read quorum unreachable, got %d", getResp.StatusCode)
+	}
+}
+
+// newHintTestNode creates a test server backed by a real Handler and returns
+// both so tests can inspect the handler's ring, store, and hint delivery.
+// RF=3, WQ=2, RQ=2 by default (realistic quorum settings for hint tests).
+func newHintTestNode(t *testing.T, selfID string, hs *hintstore.HintStore) (*httptest.Server, *Handler) {
+	t.Helper()
+	r := ring.NewRing(50)
+	ml := gossip.NewMemberList(selfID, "", func(m *gossip.Member, status gossip.MemberStatus) {
+		switch status {
+		case gossip.MemberAlive:
+			r.AddNode(m.ID, m.Address)
+		case gossip.MemberDead:
+			r.RemoveNode(m.ID)
+		}
+	})
+	transport, err := gossip.NewTransport("0")
+	if err != nil {
+		t.Fatalf("failed to create transport: %v", err)
+	}
+	g := gossip.NewGossiper(selfID, "0", ml, transport)
+	s := store.New()
+	h := NewHandler(r, ml, g, s, selfID, 3, 2, 2, time.Second, hs)
+	srv := httptest.NewServer(newMux(h))
+	t.Cleanup(func() {
+		srv.Close()
+		transport.Stop()
+	})
+	return srv, h
+}
+
+// awaitPendingHint polls the hint store until nodeID has buffered hints or
+// the deadline passes.
+func awaitPendingHint(t *testing.T, hs *hintstore.HintStore, nodeID string) {
+	t.Helper()
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		for _, id := range hs.PendingNodes() {
+			if id == nodeID {
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timeout waiting for hint for node %q; pending: %v", nodeID, hs.PendingNodes())
+}
+
+// TestHintedHandoff_PutHintStoredAndDelivered verifies the full hinted handoff
+// flow for a write: when a replica is down during a PUT, a hint is buffered;
+// when the node recovers and DeliverHints is called, the write is replayed.
+func TestHintedHandoff_PutHintStoredAndDelivered(t *testing.T) {
+	hs := hintstore.New(1000, time.Hour)
+
+	node1Srv, node1Handler := newHintTestNode(t, "node1", hs)
+	addr1 := serverAddress(node1Srv)
+
+	// node3 is a real alive replica that can accept proxied writes.
+	node3Srv, _ := newHintTestNode(t, "node3", nil)
+	addr3 := serverAddress(node3Srv)
+
+	// node2 is simulated as down — returns 503 for any request.
+	downSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "node2 is down", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(downSrv.Close)
+	addr2 := serverAddress(downSrv)
+
+	// Add node1 to its own ring (mirrors what main.go does).
+	node1Handler.ring.AddNode("node1", addr1)
+	// Register node2 and node3 in node1's ring via the HTTP API.
+	r2 := postNode(t, node1Srv.URL+"/nodes", fmt.Sprintf(`{"id":"node2","address":%q}`, addr2))
+	defer closeBody(t, r2)
+	r3 := postNode(t, node1Srv.URL+"/nodes", fmt.Sprintf(`{"id":"node3","address":%q}`, addr3))
+	defer closeBody(t, r3)
+
+	// PUT a key; quorum (node1+node3=2) is met, node2 gets a hint.
+	req, err := http.NewRequest(http.MethodPut, node1Srv.URL+"/keys/hint-key",
+		strings.NewReader(`{"value":"hinted-value"}`))
+	if err != nil {
+		t.Fatalf("failed to create PUT: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT failed: %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", resp.StatusCode)
+	}
+
+	// Wait for the hint (may arrive via background goroutine).
+	awaitPendingHint(t, hs, "node2")
+
+	// Bring node2 back online with a fresh handler.
+	node2Srv, node2Handler := newHintTestNode(t, "node2", nil)
+	recoveredAddr2 := serverAddress(node2Srv)
+
+	// Deliver buffered hints from node1 to recovered node2.
+	node1Handler.DeliverHints("node2", recoveredAddr2)
+
+	// node2's store should now contain the hinted write.
+	entry, ok := node2Handler.store.Get("hint-key")
+	if !ok {
+		t.Fatal("recovered node2 should have 'hint-key' after hint delivery")
+	}
+	if len(entry.Siblings) != 1 || entry.Siblings[0].Value != "hinted-value" {
+		t.Errorf("unexpected entry in recovered node2: %+v", entry)
+	}
+
+	// Hint store should be drained after successful delivery.
+	if nodes := hs.PendingNodes(); len(nodes) != 0 {
+		t.Errorf("hint store should be empty after delivery, still has: %v", nodes)
+	}
+}
+
+// TestHintedHandoff_DeleteHintDelivered verifies that a tombstone (delete) is
+// also buffered as a hint and replayed correctly when the node recovers.
+func TestHintedHandoff_DeleteHintDelivered(t *testing.T) {
+	hs := hintstore.New(1000, time.Hour)
+
+	node1Srv, node1Handler := newHintTestNode(t, "node1", hs)
+	addr1 := serverAddress(node1Srv)
+
+	node3Srv, _ := newHintTestNode(t, "node3", nil)
+	addr3 := serverAddress(node3Srv)
+
+	downSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "node2 is down", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(downSrv.Close)
+	addr2 := serverAddress(downSrv)
+
+	node1Handler.ring.AddNode("node1", addr1)
+	r2 := postNode(t, node1Srv.URL+"/nodes", fmt.Sprintf(`{"id":"node2","address":%q}`, addr2))
+	defer closeBody(t, r2)
+	r3 := postNode(t, node1Srv.URL+"/nodes", fmt.Sprintf(`{"id":"node3","address":%q}`, addr3))
+	defer closeBody(t, r3)
+
+	// DELETE a key while node2 is down.
+	req, err := http.NewRequest(http.MethodDelete, node1Srv.URL+"/keys/delete-key",
+		strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatalf("failed to create DELETE: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE failed: %v", err)
+	}
+	defer closeBody(t, resp)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", resp.StatusCode)
+	}
+
+	awaitPendingHint(t, hs, "node2")
+
+	// Verify the hint is a tombstone.
+	hints := hs.Drain("node2")
+	if len(hints) != 1 {
+		t.Fatalf("expected 1 hint, got %d", len(hints))
+	}
+	if !hints[0].Deleted {
+		t.Errorf("expected Deleted=true in delete hint, got %+v", hints[0])
+	}
+	// Re-store so DeliverHints can drain it.
+	hs.Store("node2", hints[0])
+
+	node2Srv, node2Handler := newHintTestNode(t, "node2", nil)
+	recoveredAddr2 := serverAddress(node2Srv)
+
+	node1Handler.DeliverHints("node2", recoveredAddr2)
+
+	// Recovered node2 should have a tombstone for delete-key.
+	entry, ok := node2Handler.store.Get("delete-key")
+	if !ok {
+		t.Fatal("recovered node2 should have tombstone for 'delete-key'")
+	}
+	if len(entry.Siblings) != 1 || !entry.Siblings[0].Deleted {
+		t.Errorf("expected a tombstone, got: %+v", entry)
 	}
 }
 

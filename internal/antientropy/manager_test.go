@@ -34,7 +34,7 @@ func newSyncNode(t *testing.T, nodeID string) (*ring.Ring, *store.Store, *httpte
 	}
 	g := gossip.NewGossiper(nodeID, "0", ml, transport)
 	s := store.New()
-	srv := httptest.NewServer(api.NewServer(r, ml, g, s, nodeID, 2, 1, 1, time.Second))
+	srv := httptest.NewServer(api.NewServer(r, ml, g, s, nodeID, 2, 1, 1, time.Second, nil))
 	t.Cleanup(func() {
 		srv.Close()
 		transport.Stop()
