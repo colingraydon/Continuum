@@ -819,6 +819,76 @@ func TestHintedHandoff_DeleteHintDelivered(t *testing.T) {
 	}
 }
 
+// TestE2EReadRepair verifies that after a quorum read, a stale replica is
+// asynchronously repaired with the canonical merged value. node1 holds an
+// old version; node2 holds a newer one. The coordinator (node1) must return
+// "new" and then repair its own local store without an additional write.
+func TestE2EReadRepair(t *testing.T) {
+	node1Srv, node1Handler := newHintTestNode(t, "node1", nil)
+	node2Srv, _ := newHintTestNode(t, "node2", nil)
+	addr1 := serverAddress(node1Srv)
+	addr2 := serverAddress(node2Srv)
+
+	// Register both nodes in both rings so quorum reads contact both.
+	for _, srv := range []*httptest.Server{node1Srv, node2Srv} {
+		r1 := postNode(t, srv.URL+"/nodes", fmt.Sprintf(`{"id":"node1","address":%q}`, addr1))
+		defer closeBody(t, r1)
+		r2 := postNode(t, srv.URL+"/nodes", fmt.Sprintf(`{"id":"node2","address":%q}`, addr2))
+		defer closeBody(t, r2)
+	}
+
+	seedWrite := func(srvURL, value, clocksJSON string) {
+		t.Helper()
+		body := fmt.Sprintf(`{"value":%q,"clocks":%s}`, value, clocksJSON)
+		req, err := http.NewRequest(http.MethodPut, srvURL+"/keys/rr-key", strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("create request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Proxied-From", "test")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("seed write: %v", err)
+		}
+		closeBody(t, resp)
+	}
+	// node1 is stale (old clock); node2 has the dominant version.
+	seedWrite(node1Srv.URL, "old", `{"node1":1}`)
+	seedWrite(node2Srv.URL, "new", `{"node1":1,"node2":1}`)
+
+	// Quorum GET from node1 reads both replicas, returns the newer value, and
+	// fires an async goroutine to repair node1's local store.
+	getResp, err := http.Get(node1Srv.URL + "/keys/rr-key")
+	if err != nil {
+		t.Fatalf("GET failed: %v", err)
+	}
+	defer closeBody(t, getResp)
+	if getResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", getResp.StatusCode)
+	}
+	var result NodeResponse
+	if err := json.NewDecoder(getResp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.Value != "new" {
+		t.Fatalf("expected 'new' from quorum read, got %q", result.Value)
+	}
+
+	// Repair is launched in a goroutine; poll until node1's store holds the
+	// new value (direct store write, so very fast in practice).
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if entry, ok := node1Handler.store.Get("rr-key"); ok {
+			if len(entry.Siblings) == 1 && entry.Siblings[0].Value == "new" {
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	entry, _ := node1Handler.store.Get("rr-key")
+	t.Errorf("node1 not repaired within 200ms; store: %+v", entry)
+}
+
 // TestE2EConflictSurfacing verifies that concurrent writes (neither clock
 // happens-before the other) are returned as siblings rather than silently
 // resolved, and that a subsequent dominating write clears the conflict.
