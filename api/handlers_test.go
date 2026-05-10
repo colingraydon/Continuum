@@ -1212,3 +1212,260 @@ func TestPushSyncEntriesEmptyBody(t *testing.T) {
 		t.Errorf("expected 204 for empty push, got %d", w.Code)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// mergeResponses
+// ---------------------------------------------------------------------------
+
+func TestMergeResponses_Empty(t *testing.T) {
+	if got := mergeResponses(nil); got != nil {
+		t.Errorf("expected nil for empty input, got %v", got)
+	}
+}
+
+func TestMergeResponses_NoValue(t *testing.T) {
+	// Responses that carry no value (key not found on replica).
+	responses := []NodeResponse{{ID: "n1"}, {ID: "n2"}}
+	if got := mergeResponses(responses); got != nil {
+		t.Errorf("expected nil when no replica has value, got %v", got)
+	}
+}
+
+func TestMergeResponses_SingleWinner(t *testing.T) {
+	responses := []NodeResponse{
+		{ID: "n1", Value: "v1", Clocks: map[string]uint64{"n1": 2}},
+		{ID: "n2", Value: "v1", Clocks: map[string]uint64{"n1": 1}}, // dominated
+	}
+	got := mergeResponses(responses)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 survivor, got %d", len(got))
+	}
+	if got[0].Value != "v1" || got[0].Clocks["n1"] != 2 {
+		t.Errorf("unexpected winner: %+v", got[0])
+	}
+}
+
+func TestMergeResponses_Dedup(t *testing.T) {
+	// Same clock from two replicas → deduplicated to one survivor.
+	clocks := map[string]uint64{"n1": 1}
+	responses := []NodeResponse{
+		{ID: "n1", Value: "v", Clocks: clocks},
+		{ID: "n2", Value: "v", Clocks: clocks},
+	}
+	got := mergeResponses(responses)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 survivor after dedup, got %d", len(got))
+	}
+}
+
+func TestMergeResponses_Siblings(t *testing.T) {
+	// Concurrent clocks: neither dominates the other.
+	responses := []NodeResponse{
+		{ID: "n1", Value: "alice", Clocks: map[string]uint64{"n1": 1}},
+		{ID: "n2", Value: "bob", Clocks: map[string]uint64{"n2": 1}},
+	}
+	got := mergeResponses(responses)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 siblings, got %d: %v", len(got), got)
+	}
+}
+
+func TestMergeResponses_Tombstone(t *testing.T) {
+	responses := []NodeResponse{
+		{ID: "n1", Deleted: true, Clocks: map[string]uint64{"n1": 2}},
+		{ID: "n2", Value: "v", Clocks: map[string]uint64{"n1": 1}}, // dominated
+	}
+	got := mergeResponses(responses)
+	if len(got) != 1 || !got[0].Deleted {
+		t.Errorf("expected single tombstone survivor, got %v", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// staleReplicas
+// ---------------------------------------------------------------------------
+
+func TestStaleReplicas_NoneStale(t *testing.T) {
+	clocks := map[string]uint64{"n1": 1}
+	responses := []NodeResponse{
+		{ID: "n1", Value: "v", Clocks: clocks},
+		{ID: "n2", Value: "v", Clocks: clocks},
+	}
+	survivors := []SiblingResponse{{Value: "v", Clocks: clocks}}
+	addrByID := map[string]string{"n1": "addr1", "n2": "addr2"}
+
+	stale := staleReplicas(responses, survivors, addrByID)
+	if len(stale) != 0 {
+		t.Errorf("expected no stale replicas, got %v", stale)
+	}
+}
+
+func TestStaleReplicas_OneStale(t *testing.T) {
+	winner := map[string]uint64{"n1": 2}
+	old := map[string]uint64{"n1": 1}
+	responses := []NodeResponse{
+		{ID: "n1", Value: "new", Clocks: winner},
+		{ID: "n2", Value: "old", Clocks: old}, // stale
+	}
+	survivors := []SiblingResponse{{Value: "new", Clocks: winner}}
+	addrByID := map[string]string{"n1": "addr1", "n2": "addr2"}
+
+	stale := staleReplicas(responses, survivors, addrByID)
+	if len(stale) != 1 {
+		t.Fatalf("expected 1 stale replica, got %v", stale)
+	}
+	if addr, ok := stale["n2"]; !ok || addr != "addr2" {
+		t.Errorf("expected n2 stale at addr2, got %v", stale)
+	}
+}
+
+func TestStaleReplicas_MissingSibling(t *testing.T) {
+	// n2 has one sibling; n1 has both. n2 is stale (missing one concurrent version).
+	c1 := map[string]uint64{"n1": 1}
+	c2 := map[string]uint64{"n2": 1}
+	responses := []NodeResponse{
+		{
+			ID:       "n1",
+			Siblings: []SiblingResponse{{Value: "alice", Clocks: c1}, {Value: "bob", Clocks: c2}},
+		},
+		{
+			ID:    "n2",
+			Value: "alice", Clocks: c1, // only has one of the two concurrent writes
+		},
+	}
+	survivors := []SiblingResponse{
+		{Value: "alice", Clocks: c1},
+		{Value: "bob", Clocks: c2},
+	}
+	addrByID := map[string]string{"n1": "addr1", "n2": "addr2"}
+
+	stale := staleReplicas(responses, survivors, addrByID)
+	if _, ok := stale["n2"]; !ok {
+		t.Errorf("expected n2 to be stale (missing sibling), got %v", stale)
+	}
+	if _, ok := stale["n1"]; ok {
+		t.Errorf("n1 should not be stale, got %v", stale)
+	}
+}
+
+func TestStaleReplicas_EmptyResponseIsStale(t *testing.T) {
+	// Replica never had the key at all.
+	clocks := map[string]uint64{"n1": 1}
+	responses := []NodeResponse{
+		{ID: "n1", Value: "v", Clocks: clocks},
+		{ID: "n2"}, // key not found on n2
+	}
+	survivors := []SiblingResponse{{Value: "v", Clocks: clocks}}
+	addrByID := map[string]string{"n1": "addr1", "n2": "addr2"}
+
+	stale := staleReplicas(responses, survivors, addrByID)
+	if _, ok := stale["n2"]; !ok {
+		t.Errorf("expected empty-response replica to be stale, got %v", stale)
+	}
+}
+
+func TestStaleReplicas_SelfStale(t *testing.T) {
+	winner := map[string]uint64{"n2": 1}
+	old := map[string]uint64{"n1": 1}
+	responses := []NodeResponse{
+		{ID: "self", Value: "old", Clocks: old},
+		{ID: "n2", Value: "new", Clocks: winner},
+	}
+	survivors := []SiblingResponse{{Value: "new", Clocks: winner}}
+	addrByID := map[string]string{"self": "selfaddr", "n2": "addr2"}
+
+	stale := staleReplicas(responses, survivors, addrByID)
+	if addr, ok := stale["self"]; !ok || addr != "selfaddr" {
+		t.Errorf("expected self in stale map, got %v", stale)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// repairReplicas
+// ---------------------------------------------------------------------------
+
+func TestRepairReplicas_SelfRepair(t *testing.T) {
+	h := newTestHandler(t)
+	// Seed with old value.
+	h.store.Put("k", "old", store.VectorClockVersion{Clocks: map[string]uint64{"n1": 1}})
+
+	winner := map[string]uint64{"n1": 2}
+	survivors := []SiblingResponse{{Value: "new", Clocks: winner}}
+	stale := map[string]string{h.selfID: "unused-addr"}
+
+	h.repairReplicas("k", survivors, stale)
+
+	entry, ok := h.store.Get("k")
+	if !ok {
+		t.Fatal("key should exist after self-repair")
+	}
+	if len(entry.Siblings) != 1 || entry.Siblings[0].Value != "new" {
+		t.Errorf("self-repair did not apply winner: %+v", entry)
+	}
+}
+
+func TestRepairReplicas_SelfRepairTombstone(t *testing.T) {
+	h := newTestHandler(t)
+	h.store.Put("k", "alive", store.VectorClockVersion{Clocks: map[string]uint64{"n1": 1}})
+
+	tombClock := map[string]uint64{"n1": 2}
+	survivors := []SiblingResponse{{Deleted: true, Clocks: tombClock}}
+	stale := map[string]string{h.selfID: "unused-addr"}
+
+	h.repairReplicas("k", survivors, stale)
+
+	entry, ok := h.store.Get("k")
+	if !ok {
+		t.Fatal("key should exist (as tombstone) after self-repair")
+	}
+	if len(entry.Siblings) != 1 || !entry.Siblings[0].Deleted {
+		t.Errorf("self-repair should have applied tombstone: %+v", entry)
+	}
+}
+
+func TestRepairReplicas_HTTPRepair(t *testing.T) {
+	h := newTestHandler(t)
+
+	var received []string
+	replicaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received = append(received, r.Method+" "+r.URL.Path)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(replicaSrv.Close)
+	replicaAddr := strings.TrimPrefix(replicaSrv.URL, "http://")
+
+	winner := map[string]uint64{"n1": 1}
+	survivors := []SiblingResponse{{Value: "v", Clocks: winner}}
+	stale := map[string]string{"remote": replicaAddr}
+
+	h.repairReplicas("mykey", survivors, stale)
+
+	if len(received) != 1 || received[0] != "PUT /keys/mykey" {
+		t.Errorf("expected one PUT to replica, got %v", received)
+	}
+}
+
+func TestRepairReplicas_HTTPRepairSiblings(t *testing.T) {
+	// Two surviving siblings should both be pushed to the stale replica.
+	h := newTestHandler(t)
+
+	var received []string
+	replicaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received = append(received, r.Method)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(replicaSrv.Close)
+	replicaAddr := strings.TrimPrefix(replicaSrv.URL, "http://")
+
+	survivors := []SiblingResponse{
+		{Value: "alice", Clocks: map[string]uint64{"n1": 1}},
+		{Value: "bob", Clocks: map[string]uint64{"n2": 1}},
+	}
+	stale := map[string]string{"remote": replicaAddr}
+
+	h.repairReplicas("k", survivors, stale)
+
+	if len(received) != 2 {
+		t.Errorf("expected 2 repair writes for 2 siblings, got %d: %v", len(received), received)
+	}
+}

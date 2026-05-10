@@ -210,19 +210,18 @@ func entryToResponse(id, status string, entry store.Entry) NodeResponse {
 	return r
 }
 
-// mergeResponses merges sibling sets from multiple replica responses into a
-// single canonical result. Entries dominated by a higher-clock sibling are
-// dropped; genuinely concurrent entries are preserved as siblings.
-// deleted=true means the winning result is a tombstone with no siblings.
-func mergeResponses(responses []NodeResponse) (value string, siblings []SiblingResponse, deleted bool) {
+// mergeResponses merges sibling sets from multiple replica responses into the
+// canonical set of surviving siblings. Entries dominated by a higher-clock
+// sibling are dropped; genuinely concurrent entries are preserved. The caller
+// interprets a single Deleted survivor as a tombstone (404) and multiple
+// survivors as a conflict (siblings). Nil means no replica held the key.
+func mergeResponses(responses []NodeResponse) []SiblingResponse {
 	type candidate struct {
 		value   string
 		clocks  map[string]uint64
 		deleted bool
 	}
 
-	// Flatten all (value, clock) pairs across every replica response,
-	// including tombstones.
 	var all []candidate
 	for _, r := range responses {
 		if len(r.Siblings) > 0 {
@@ -233,12 +232,10 @@ func mergeResponses(responses []NodeResponse) (value string, siblings []SiblingR
 			all = append(all, candidate{r.Value, r.Clocks, r.Deleted})
 		}
 	}
-
 	if len(all) == 0 {
-		return "", nil, false
+		return nil
 	}
 
-	// Retain only non-dominated, deduplicated candidates.
 	var survivors []candidate
 	for i, c := range all {
 		cv := store.VectorClockVersion{Clocks: c.clocks}
@@ -267,14 +264,76 @@ func mergeResponses(responses []NodeResponse) (value string, siblings []SiblingR
 		}
 	}
 
-	if len(survivors) == 1 {
-		return survivors[0].value, nil, survivors[0].deleted
+	out := make([]SiblingResponse, len(survivors))
+	for i, s := range survivors {
+		out[i] = SiblingResponse{Value: s.value, Clocks: s.clocks, Deleted: s.deleted}
 	}
-	var sibs []SiblingResponse
+	return out
+}
+
+// staleReplicas returns a nodeID→address map for every response that is
+// missing at least one surviving sibling. A replica is stale if its sibling
+// set is a proper subset of the survivors (matched by equal clocks).
+func staleReplicas(responses []NodeResponse, survivors []SiblingResponse, addrByID map[string]string) map[string]string {
+	stale := make(map[string]string)
+	for _, r := range responses {
+		if !responseHasAllSurvivors(r, survivors) {
+			if addr, ok := addrByID[r.ID]; ok {
+				stale[r.ID] = addr
+			}
+		}
+	}
+	return stale
+}
+
+func responseHasAllSurvivors(r NodeResponse, survivors []SiblingResponse) bool {
 	for _, s := range survivors {
-		sibs = append(sibs, SiblingResponse{Value: s.value, Clocks: s.clocks, Deleted: s.deleted})
+		sv := store.VectorClockVersion{Clocks: s.Clocks}
+		found := false
+		if len(r.Siblings) > 0 {
+			for _, rs := range r.Siblings {
+				if sv.Equal(store.VectorClockVersion{Clocks: rs.Clocks}) {
+					found = true
+					break
+				}
+			}
+		} else {
+			found = sv.Equal(store.VectorClockVersion{Clocks: r.Clocks})
+		}
+		if !found {
+			return false
+		}
 	}
-	return "", sibs, false
+	return true
+}
+
+// repairReplicas pushes all surviving siblings to each stale replica. For the
+// coordinator itself the write goes directly to the local store; for remote
+// nodes it uses the existing replica HTTP path. Failures are logged; anti-
+// entropy covers any keys that could not be repaired.
+func (h *Handler) repairReplicas(key string, survivors []SiblingResponse, stale map[string]string) {
+	for nodeID, addr := range stale {
+		for _, s := range survivors {
+			v := store.VectorClockVersion{Clocks: s.Clocks}
+			if nodeID == h.selfID {
+				if s.Deleted {
+					h.store.Delete(key, v)
+				} else {
+					h.store.Put(key, s.Value, v)
+				}
+				continue
+			}
+			var err error
+			if s.Deleted {
+				err = h.replicateDeleteToSync(addr, key, s.Clocks)
+			} else {
+				err = h.replicateToSync(addr, key, s.Value, s.Clocks)
+			}
+			if err != nil {
+				log.Printf("read repair: failed to repair %s for key %s: %v", nodeID, key, err)
+			}
+		}
+	}
 }
 
 func (h *Handler) AddNode(w http.ResponseWriter, req *http.Request) {
@@ -356,11 +415,11 @@ func (h *Handler) GetNode(w http.ResponseWriter, req *http.Request) {
 		quorum = len(nodes)
 	}
 
-	type replicaResult struct {
+	type readResult struct {
 		resp NodeResponse
 		err  error
 	}
-	results := make(chan replicaResult, len(nodes))
+	results := make(chan readResult, len(nodes))
 
 	for _, n := range nodes {
 		go func(node *ring.Node) {
@@ -369,10 +428,10 @@ func (h *Handler) GetNode(w http.ResponseWriter, req *http.Request) {
 				if entry, ok := h.store.Get(key); ok {
 					r = entryToResponse(h.selfID, h.nodeStatus(h.selfID), entry)
 				}
-				results <- replicaResult{resp: r}
+				results <- readResult{resp: r}
 			} else {
 				r, err := h.readFromReplica(node.Address, key)
-				results <- replicaResult{resp: r, err: err}
+				results <- readResult{resp: r, err: err}
 			}
 		}(n)
 	}
@@ -393,18 +452,37 @@ func (h *Handler) GetNode(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	value, siblings, deleted := mergeResponses(responses)
-	if deleted && len(siblings) == 0 {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
+	survivors := mergeResponses(responses)
+
+	// Trigger async read repair for any replica whose sibling set was dominated
+	// by or missing a surviving entry.
+	if len(survivors) > 0 {
+		addrByID := make(map[string]string, len(nodes))
+		for _, n := range nodes {
+			addrByID[n.ID] = n.Address
+		}
+		if stale := staleReplicas(responses, survivors, addrByID); len(stale) > 0 {
+			go h.repairReplicas(key, survivors, stale)
+		}
 	}
+
 	primary := nodes[0]
 	resp := NodeResponse{
-		ID:       primary.ID,
-		Address:  primary.Address,
-		Status:   h.nodeStatus(primary.ID),
-		Value:    value,
-		Siblings: siblings,
+		ID:      primary.ID,
+		Address: primary.Address,
+		Status:  h.nodeStatus(primary.ID),
+	}
+	switch len(survivors) {
+	case 0:
+		// No replica held this key; return node info with no value.
+	case 1:
+		if survivors[0].Deleted {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		resp.Value = survivors[0].Value
+	default:
+		resp.Siblings = survivors
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
