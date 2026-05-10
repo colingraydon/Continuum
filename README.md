@@ -2,7 +2,7 @@
 
 A distributed key-value store built on consistent hashing, gossip-based membership, and vector clock conflict resolution - written in Go.
 
-Continuum implements the core data layer used in systems like Cassandra and Dynamo: a hash ring that maps keys to nodes with minimal disruption when topology changes, a gossip protocol that propagates membership without a central coordinator, a replication layer that fans writes out to N nodes and resolves conflicts using vector clocks, a Merkle tree anti-entropy system that detects and repairs divergent replicas in the background, and a hinted handoff layer that buffers writes for temporarily unreachable replicas and replays them on recovery. It exposes an HTTP API, Prometheus metrics, and a Grafana dashboard out of the box.
+Continuum implements the core data layer used in systems like Cassandra and Dynamo: a hash ring that maps keys to nodes with minimal disruption when topology changes, a gossip protocol that propagates membership without a central coordinator, a replication layer that fans writes out to N nodes and resolves conflicts using vector clocks, a Merkle tree anti-entropy system that detects and repairs divergent replicas in the background, a hinted handoff layer that buffers writes for temporarily unreachable replicas and replays them on recovery, and a read repair layer that pushes the canonical merged value back to stale replicas after every quorum read. It exposes an HTTP API, Prometheus metrics, and a Grafana dashboard out of the box.
 
 ---
 
@@ -41,6 +41,12 @@ Durability layer that closes the gap between quorum writes and full replication.
 The hint store is bounded: a per-node cap of 10,000 entries evicts the oldest hints when full, and hints older than 1 hour are expired and discarded. Anti-entropy is the safety net — any keys whose hints were lost will be repaired within the next sync cycle.
 
 Hint delivery is triggered by the gossip `onChange` callback rather than a polling loop, so recovery latency is bounded by gossip convergence time (O(log n) rounds at 1-second intervals) rather than a fixed poll interval.
+
+### Read Repair (`api`)
+
+Inline repair layer that piggybacks on quorum reads. After the coordinator collects R responses and merges the sibling sets into a canonical result, it compares each replica's response against the survivors. A replica is stale if its sibling set is a proper subset of — or missing — any surviving entry (matched by equal vector clocks). Stale replicas are repaired asynchronously in a background goroutine so the client's read latency is not affected.
+
+For the coordinator itself the repair is a direct store write. For remote replicas it uses the same proxied write path as hinted handoff (`X-Proxied-From`). Failures are logged; anti-entropy covers any keys that could not be repaired immediately.
 
 ### Stats Aggregator (`internal/stats`)
 
@@ -187,7 +193,9 @@ A key lookup (`GET /keys/:key`) flows like this:
 1. `GetNode` handler extracts the key
 2. `ring.GetReplicationNodes(key, factor)` returns the replica set
 3. Goroutines fan the read out to each replica with `X-Proxied-From` set; each replica returns its local entry with its vector clock
-4. The coordinator waits for R responses, picks the entry with the highest vector clock, and returns it
+4. The coordinator waits for R responses and merges the sibling sets into the canonical result
+5. Any replica whose response was dominated by or missing a surviving entry is repaired asynchronously in a background goroutine
+6. The merged result is returned to the client
 
 ---
 
@@ -276,6 +284,14 @@ The residual risk is key resurrection: a node partitioned for longer than 1 hour
 ### Hinted handoff: event-driven delivery over polling
 
 Hint delivery is triggered by the gossip `onChange` callback (alive transition) rather than a background loop that polls member state on a fixed interval. This means recovery latency tracks gossip convergence — typically a few seconds — rather than the polling period. The tradeoff is tighter coupling between the gossip and handler layers, managed by passing a delivery function through `main.go` rather than letting either package import the other.
+
+### Read repair: async over sync
+
+Read repair could be synchronous — wait for all stale replicas to ack before returning to the client. This would guarantee that the next read from any replica sees the updated value. The tradeoff is that the client's read latency is now bounded by the slowest stale replica rather than the R-th fastest responding one. Since stale replicas are likely slower (they may have been partitioned or lagging), this is the worst case to wait on. Async repair accepts a short window where a stale replica could be read again, but that window is bounded by how fast the background goroutine completes — typically sub-millisecond for local writes and a single network round-trip for remote ones.
+
+### Read repair: always repair even when siblings exist
+
+When a quorum read surfaces a conflict (concurrent siblings), the temptation is to skip repair and let the application resolve the conflict first. The problem is that skipping leaves different replicas with different subsets of siblings — one might have `{alice}` and another `{bob}`, when both should see `{alice, bob}`. Repairing even during a conflict ensures all replicas converge to the same sibling set, so the application sees a consistent conflict regardless of which replica it reads from next.
 
 ### Hinted handoff: background goroutine for post-quorum failures
 
@@ -553,7 +569,6 @@ Continuum shuts down gracefully on `SIGINT` or `SIGTERM`:
 
 ## What's Next
 
-- **Read repair** - when a quorum read finds a replica with a stale vector clock, push the current value back to it before returning to the client. Reduces anti-entropy load and closes staleness windows faster than waiting for the next sync cycle.
 - **Persistence** - write-ahead log and snapshot-on-shutdown so state survives restarts. A prerequisite for making the tombstone GC safety argument hold across node restarts (currently it relies on restarted nodes losing all in-memory state).
 - **Weighted vnodes** - nodes with higher capacity receive proportionally more vnodes for heterogeneous clusters
 - **Architecture diagram**
