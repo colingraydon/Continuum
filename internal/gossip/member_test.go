@@ -359,6 +359,107 @@ func TestMergeFiresOnChangeForStatusChange(t *testing.T) {
 	}
 }
 
+func TestSetBootstrapping_SetsFlag(t *testing.T) {
+	ml := newTestMemberList()
+	ml.SetBootstrapping("self", true)
+	m, ok := ml.Get("self")
+	if !ok || !m.Bootstrapping {
+		t.Fatal("expected Bootstrapping=true after SetBootstrapping(true)")
+	}
+}
+
+func TestSetBootstrapping_IncrementsHeartbeat(t *testing.T) {
+	ml := newTestMemberList()
+	before := ml.self.Heartbeat
+	ml.SetBootstrapping("self", true)
+	if ml.self.Heartbeat != before+1 {
+		t.Errorf("expected heartbeat %d, got %d", before+1, ml.self.Heartbeat)
+	}
+}
+
+func TestSetBootstrapping_NoopIfSameValue(t *testing.T) {
+	ml := newTestMemberList()
+	ml.SetBootstrapping("self", false) // already false
+	if ml.self.Heartbeat != 0 {
+		t.Error("expected no heartbeat increment when value unchanged")
+	}
+}
+
+func TestSetBootstrapping_FalseTriggersCallback(t *testing.T) {
+	var fired MemberStatus = -1
+	ml := NewMemberList("self", "10.0.0.1", func(m *Member, s MemberStatus) {
+		fired = s
+	})
+	ml.SetBootstrapping("self", true)
+	fired = -1 // reset — setting true does not fire
+	ml.SetBootstrapping("self", false)
+	if fired != MemberBootstrapped {
+		t.Errorf("expected MemberBootstrapped callback, got %v", fired)
+	}
+}
+
+func TestSetBootstrapping_TrueDoesNotTriggerCallback(t *testing.T) {
+	called := false
+	ml := NewMemberList("self", "10.0.0.1", func(m *Member, s MemberStatus) {
+		called = true
+	})
+	ml.SetBootstrapping("self", true)
+	if called {
+		t.Error("expected no callback when setting bootstrapping=true")
+	}
+}
+
+func TestMerge_BootstrappingPropagates(t *testing.T) {
+	ml := newTestMemberList()
+	ml.Merge([]*Member{
+		{ID: "node1", Address: "10.0.0.2", Heartbeat: 1, Status: MemberAlive, Bootstrapping: true},
+	})
+	m, ok := ml.Get("node1")
+	if !ok || !m.Bootstrapping {
+		t.Fatal("expected Bootstrapping=true to propagate via Merge")
+	}
+}
+
+func TestMerge_BootstrappedCallbackFiresOnTransition(t *testing.T) {
+	var fired MemberStatus = -1
+	ml := NewMemberList("self", "10.0.0.1", func(m *Member, s MemberStatus) {
+		fired = s
+	})
+	ml.Merge([]*Member{
+		{ID: "node1", Address: "10.0.0.2", Heartbeat: 1, Status: MemberAlive, Bootstrapping: true},
+	})
+	fired = -1
+	ml.Merge([]*Member{
+		{ID: "node1", Address: "10.0.0.2", Heartbeat: 2, Status: MemberAlive, Bootstrapping: false},
+	})
+	if fired != MemberBootstrapped {
+		t.Errorf("expected MemberBootstrapped on bootstrapping transition, got %v", fired)
+	}
+}
+
+func TestMerge_NoBootstrappedCallbackWithoutTransition(t *testing.T) {
+	var fired MemberStatus = -1
+	ml := NewMemberList("self", "10.0.0.1", func(m *Member, s MemberStatus) {
+		fired = s
+	})
+	ml.Merge([]*Member{
+		{ID: "node1", Address: "10.0.0.2", Heartbeat: 1, Status: MemberAlive, Bootstrapping: false},
+	})
+	fired = -1
+	ml.Merge([]*Member{
+		{ID: "node1", Address: "10.0.0.2", Heartbeat: 2, Status: MemberAlive, Bootstrapping: false},
+	})
+	if fired == MemberBootstrapped {
+		t.Error("expected no MemberBootstrapped callback when bootstrapping was already false")
+	}
+}
+
+func TestMemberBootstrappedString(t *testing.T) {
+	if MemberBootstrapped.String() != "bootstrapped" {
+		t.Errorf("expected 'bootstrapped', got %q", MemberBootstrapped.String())
+	}
+}
+
 func TestSize(t *testing.T) {
 	// Arrange
 	ml := newTestMemberList()

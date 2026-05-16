@@ -79,10 +79,11 @@ type Entry struct {
 }
 
 type Store struct {
-	mu             sync.RWMutex
-	data           map[string]Entry
-	onUpdate       func(key string, hash uint32)
-	tombstoneAges  map[string]time.Time // key → when tombstone was first accepted on this node
+	mu            sync.RWMutex
+	data          map[string]Entry
+	onUpdate      func(key string, hash uint32)
+	onEvict       func(key string)
+	tombstoneAges map[string]time.Time // key → when tombstone was first accepted on this node
 }
 
 func New() *Store {
@@ -99,6 +100,29 @@ func (s *Store) SetOnUpdate(fn func(key string, hash uint32)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onUpdate = fn
+}
+
+// SetOnEvict registers a callback invoked when a key is evicted via Evict.
+// The anti-entropy manager uses this to remove the key from its Merkle trees.
+func (s *Store) SetOnEvict(fn func(key string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onEvict = fn
+}
+
+// Evict removes key from the store without creating a tombstone. This is a
+// local bookkeeping operation for keys that have migrated to another node; it
+// must not be used for logical deletes (use Delete for that). The onEvict
+// callback fires so the anti-entropy manager can drop the key from its trees.
+func (s *Store) Evict(key string) {
+	s.mu.Lock()
+	onEvict := s.onEvict
+	delete(s.data, key)
+	delete(s.tombstoneAges, key)
+	s.mu.Unlock()
+	if onEvict != nil {
+		onEvict(key)
+	}
 }
 
 // tombstoneSentinel is XOR'd into entryHash for deleted siblings so that a

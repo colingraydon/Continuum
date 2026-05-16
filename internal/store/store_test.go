@@ -566,3 +566,41 @@ func TestTombstoneAgeUpdatedByNewerDeletion(t *testing.T) {
 		t.Error("tombstone from newer deletion should not be prematurely GC'd")
 	}
 }
+
+func TestEvict_RemovesKey(t *testing.T) {
+	s := New()
+	s.Put("k", "v", clock(map[string]uint64{"n1": 1}))
+	s.Evict("k")
+	if _, ok := s.Get("k"); ok {
+		t.Fatal("key should be gone after Evict")
+	}
+}
+
+func TestEvict_NoopOnMissingKey(t *testing.T) {
+	s := New()
+	s.Evict("missing") // must not panic
+}
+
+func TestEvict_CallsOnEvictCallback(t *testing.T) {
+	s := New()
+	var evicted string
+	s.SetOnEvict(func(key string) { evicted = key })
+	s.Put("k", "v", clock(map[string]uint64{"n1": 1}))
+	s.Evict("k")
+	if evicted != "k" {
+		t.Errorf("expected onEvict called with 'k', got %q", evicted)
+	}
+}
+
+func TestEvict_DoesNotCreateTombstone(t *testing.T) {
+	s := New()
+	v := clock(map[string]uint64{"n1": 1})
+	s.Put("k", "v", v)
+	s.Evict("k")
+	// A subsequent Put with the same clock should succeed (no dominated-by-tombstone logic).
+	s.Put("k", "v2", v)
+	e, ok := s.Get("k")
+	if !ok || len(e.Siblings) != 1 || e.Siblings[0].Value != "v2" {
+		t.Errorf("put after evict should succeed cleanly, got %+v", e)
+	}
+}

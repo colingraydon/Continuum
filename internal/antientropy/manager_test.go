@@ -219,7 +219,7 @@ func TestAntiEntropyGCPurgesTombstone(t *testing.T) {
 	if len(purged) != 1 || purged[0] != key {
 		t.Fatalf("expected [%s] purged, got %v", key, purged)
 	}
-	mgr.removeFromTrees(key)
+	mgr.RemoveFromTrees(key)
 
 	if _, ok := s1.Get(key); ok {
 		t.Error("key still present in store after GC")
