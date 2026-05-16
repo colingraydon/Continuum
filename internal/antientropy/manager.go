@@ -114,15 +114,16 @@ func (m *Manager) syncLoop(ctx context.Context) {
 func (m *Manager) runGC() {
 	purged := m.s.GCTombstones(gcTTL)
 	for _, key := range purged {
-		m.removeFromTrees(key)
+		m.RemoveFromTrees(key)
 	}
 	if len(purged) > 0 {
 		log.Printf("antientropy: GC purged %d tombstones", len(purged))
 	}
 }
 
-// removeFromTrees removes key from whichever primary vnode tree owns it.
-func (m *Manager) removeFromTrees(key string) {
+// RemoveFromTrees removes key from whichever primary vnode tree owns it.
+// Called by the store's onEvict callback when a key is evicted during cleanup.
+func (m *Manager) RemoveFromTrees(key string) {
 	keyHash := merkle.HashKey(key)
 	m.mu.RLock()
 	defer m.mu.RUnlock()

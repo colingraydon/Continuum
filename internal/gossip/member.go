@@ -11,6 +11,10 @@ const (
 	MemberAlive MemberStatus = iota
 	MemberSuspect
 	MemberDead
+	// MemberBootstrapped is a callback-only signal fired when a member
+	// transitions from Bootstrapping=true to Bootstrapping=false. It is never
+	// stored in Member.Status; callers use it to trigger local cleanup.
+	MemberBootstrapped
 )
 
 func (s MemberStatus) String() string {
@@ -21,17 +25,20 @@ func (s MemberStatus) String() string {
 		return "suspect"
 	case MemberDead:
 		return "dead"
+	case MemberBootstrapped:
+		return "bootstrapped"
 	default:
 		return "unknown"
 	}
 }
 
 type Member struct {
-	ID        string
-	Address   string
-	Heartbeat uint64
-	UpdatedAt time.Time
-	Status    MemberStatus
+	ID            string
+	Address       string
+	Heartbeat     uint64
+	UpdatedAt     time.Time
+	Status        MemberStatus
+	Bootstrapping bool
 }
 
 type MemberList struct {
@@ -75,6 +82,7 @@ func (ml *MemberList) Merge(incoming []*Member) {
 		}
 		existing, ok := ml.members[m.ID]
 		if !ok || m.Heartbeat > existing.Heartbeat {
+			wasBootstrapping := ok && existing.Bootstrapping
 			previous := MemberAlive
 			if ok {
 				previous = existing.Status
@@ -84,8 +92,32 @@ func (ml *MemberList) Merge(incoming []*Member) {
 				if ml.onChange != nil {
 					ml.onChange(m, m.Status)
 				}
+			} else if wasBootstrapping && !m.Bootstrapping && ml.onChange != nil {
+				ml.onChange(m, MemberBootstrapped)
 			}
 		}
+	}
+}
+
+// SetBootstrapping updates the Bootstrapping flag for id and increments its
+// heartbeat so the change propagates via gossip. When transitioning to false,
+// the onChange callback is fired with MemberBootstrapped so callers can trigger
+// cleanup (e.g. evicting keys that migrated to the newly-ready node).
+func (ml *MemberList) SetBootstrapping(id string, v bool) {
+	ml.mu.Lock()
+	m, ok := ml.members[id]
+	if !ok || m.Bootstrapping == v {
+		ml.mu.Unlock()
+		return
+	}
+	wasBootstrapping := m.Bootstrapping
+	m.Bootstrapping = v
+	m.Heartbeat++
+	m.UpdatedAt = time.Now()
+	onChange := ml.onChange
+	ml.mu.Unlock()
+	if !v && wasBootstrapping && onChange != nil {
+		onChange(m, MemberBootstrapped)
 	}
 }
 

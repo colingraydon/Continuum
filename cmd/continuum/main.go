@@ -139,6 +139,10 @@ func main() {
 		case gossip.MemberDead:
 			r.RemoveNode(m.ID)
 			log.Printf("removed dead member %s from ring", m.ID)
+		case gossip.MemberBootstrapped:
+			if h := hptr.Load(); h != nil {
+				go h.CleanupStaleKeys()
+			}
 		}
 	})
 
@@ -159,7 +163,10 @@ func main() {
 
 	g.Start(ctx)
 
+	// Mark self as bootstrapping before the gossip exchange so seed nodes
+	// exclude us from read replica sets until data migration is complete.
 	if len(cfg.seedNodes) > 0 {
+		ml.SetBootstrapping(cfg.selfID, true)
 		log.Printf("bootstrapping from seed nodes: %v", cfg.seedNodes)
 		g.Bootstrap(cfg.seedNodes)
 	}
@@ -175,6 +182,7 @@ func main() {
 	s := store.New()
 	ae := antientropy.New(r, s, cfg.selfID, cfg.replicationFactor, cfg.replicaTimeout)
 	s.SetOnUpdate(ae.Update)
+	s.SetOnEvict(ae.RemoveFromTrees)
 	ae.Start(ctx)
 
 	h := api.NewHandler(r, ml, g, s, cfg.selfID, cfg.replicationFactor, cfg.writeQuorum, cfg.readQuorum, cfg.replicaTimeout, hs)
@@ -204,8 +212,19 @@ func main() {
 		}
 	}()
 
+	// Pull primary vnode ranges from existing replicas, then exit bootstrapping.
+	if len(cfg.seedNodes) > 0 {
+		go func() {
+			h.Bootstrap()
+			ml.SetBootstrapping(cfg.selfID, false)
+		}()
+	}
+
 	<-ctx.Done()
 	stop()
+	log.Printf("shutdown: pushing keys to successors")
+	h.PushKeysToSuccessors()
+
 	log.Printf("shutdown: notifying peers")
 	g.NotifyDead()
 

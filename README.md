@@ -44,9 +44,13 @@ Hint delivery is triggered by the gossip `onChange` callback rather than a polli
 
 ### Read Repair (`api`)
 
-Inline repair layer that piggybacks on quorum reads. After the coordinator collects R responses and merges the sibling sets into a canonical result, it compares each replica's response against the survivors. A replica is stale if its sibling set is a proper subset of — or missing — any surviving entry (matched by equal vector clocks). Stale replicas are repaired asynchronously in a background goroutine so the client's read latency is not affected.
+Inline repair layer that piggybacks on quorum reads. After the coordinator collects R responses and merges the sibling sets into a canonical result, it compares each replica's response against the survivors. A replica is stale if its sibling set is a proper subset of, or missing, any surviving entry (matched by equal vector clocks). Stale replicas are repaired asynchronously in a background goroutine so the client's read latency is not affected.
 
 For the coordinator itself the repair is a direct store write. For remote replicas it uses the same proxied write path as hinted handoff (`X-Proxied-From`). Failures are logged; anti-entropy covers any keys that could not be repaired immediately.
+
+### Data Migration (`api`)
+
+Handles data movement when nodes join or leave the ring. On join, a new node marks itself bootstrapping via gossip, then pulls all keys in its primary vnode ranges from existing replicas using the existing sync endpoints, merging entries through the standard vector clock path. Coordinators exclude bootstrapping nodes from read replica sets and the bootstrapping node itself rejects coordinator-role requests with 503 until migration completes. When bootstrapping finishes, every peer receives the state change via gossip and evicts keys that now belong to the new node. On planned departure, a node pushes all locally-held keys to its alive successors in a single batched request per target before the HTTP server drains.
 
 ### Stats Aggregator (`internal/stats`)
 
@@ -80,7 +84,11 @@ Each node runs three background loops:
 
 ### Bootstrapping
 
-New nodes specify one or more seed nodes via the `SEED_NODES` environment variable. On startup, the node sends its member list to each seed, which triggers a gossip exchange. Within a few seconds the new node's membership has propagated to the full cluster.
+New nodes specify one or more seed nodes via the `SEED_NODES` environment variable. On startup, the joining node marks itself as bootstrapping and sends its member list to each seed, triggering a gossip exchange. Within a few seconds the new node's membership has propagated to the full cluster.
+
+While bootstrapping, the joining node rejects coordinator-role reads and writes with 503. Other nodes exclude it from read replica sets. It still accepts replica sub-requests (identified by `X-Proxied-From`) so it can receive writes during migration.
+
+Once the HTTP server is up and the ring is populated from gossip, the joining node pulls its primary vnode ranges from existing replicas. On completion it clears the bootstrapping flag, which propagates via gossip. Each peer that receives the transition evicts keys that now belong to the new node.
 
 ---
 
@@ -280,6 +288,12 @@ The alternative to TTL-based GC is per-replica confirmation tracking - each prim
 Bidirectional sync makes the simpler TTL approach viable. Because the primary both pulls from and pushes to each replica on every sync cycle, a tombstone written on any node propagates outward without waiting for the replica to initiate a sync. With a 30-second sync interval, a 1-hour TTL provides roughly 120 sync cycles of headroom before GC runs - more than enough for tombstones to reach every live replica.
 
 The residual risk is key resurrection: a node partitioned for longer than 1 hour reconnects with a stale live value after the primary has already GC'd its tombstone. For this in-memory store, the risk is theoretical - a node partitioned that long will have restarted and lost all state before reconnecting. For a persistent store, the TTL would need to be substantially longer - or replaced with per-replica confirmation tracking - to remain safe across restarts.
+
+### Data migration: pull on join, push on leave
+
+When a node joins, it could receive data via push from existing nodes (each existing node detects the join and sends relevant keys) or via pull (the joining node fetches its own ranges). Pull is simpler: only the joining node knows which ranges it owns, so it can issue targeted requests without every existing node needing to compute what to send. It also avoids redundant pushes when multiple existing nodes each send the same range.
+
+On departure the direction reverses. The leaving node knows exactly what it holds and which nodes are its successors, so a single batched push per target is more efficient than waiting for anti-entropy to repair the gap.
 
 ### Hinted handoff: event-driven delivery over polling
 
@@ -560,10 +574,11 @@ make coverage  # generate coverage report
 
 Continuum shuts down gracefully on `SIGINT` or `SIGTERM`:
 
-1. Marks self as dead in the member list and broadcasts the updated state to all alive peers (not just the usual fanout of 3). Peers remove this node from their rings immediately rather than waiting up to 10 seconds for the stale threshold.
-2. Stops accepting new HTTP connections.
-3. Drains in-flight requests with a 30-second timeout.
-4. Stops the gossip transport.
+1. Pushes all locally-held keys to alive successor nodes so data survives the departure.
+2. Marks self as dead in the member list and broadcasts the updated state to all alive peers (not just the usual fanout of 3). Peers remove this node from their rings immediately rather than waiting up to 10 seconds for the stale threshold.
+3. Stops accepting new HTTP connections.
+4. Drains in-flight requests with a 30-second timeout.
+5. Stops the gossip transport.
 
 ---
 

@@ -401,6 +401,12 @@ func (h *Handler) GetNode(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// Reject coordinator reads while this node is still bootstrapping.
+	if m, ok := h.memberList.Get(h.selfID); ok && m.Bootstrapping {
+		http.Error(w, "node is bootstrapping", http.StatusServiceUnavailable)
+		return
+	}
+
 	// Consistent read: fan out to the replica set, merge sibling sets, and
 	// return the canonical result - either a single value or a siblings list.
 	nodes := h.ring.GetReplicationNodes(key, h.replicationFactor)
@@ -410,18 +416,30 @@ func (h *Handler) GetNode(w http.ResponseWriter, req *http.Request) {
 	}
 	RecordKeyLookup()
 
+	// Exclude bootstrapping nodes — they don't have complete data yet.
+	readNodes := make([]*ring.Node, 0, len(nodes))
+	for _, n := range nodes {
+		if m, ok := h.memberList.Get(n.ID); !ok || !m.Bootstrapping {
+			readNodes = append(readNodes, n)
+		}
+	}
+	if len(readNodes) == 0 {
+		http.Error(w, "no nodes available", http.StatusServiceUnavailable)
+		return
+	}
+
 	quorum := h.readQuorum
-	if quorum > len(nodes) {
-		quorum = len(nodes)
+	if quorum > len(readNodes) {
+		quorum = len(readNodes)
 	}
 
 	type readResult struct {
 		resp NodeResponse
 		err  error
 	}
-	results := make(chan readResult, len(nodes))
+	results := make(chan readResult, len(readNodes))
 
-	for _, n := range nodes {
+	for _, n := range readNodes {
 		go func(node *ring.Node) {
 			if node.ID == h.selfID {
 				r := NodeResponse{ID: h.selfID, Status: h.nodeStatus(h.selfID)}
@@ -437,7 +455,7 @@ func (h *Handler) GetNode(w http.ResponseWriter, req *http.Request) {
 	}
 
 	var responses []NodeResponse
-	for i := 0; i < len(nodes); i++ {
+	for i := 0; i < len(readNodes); i++ {
 		r := <-results
 		if r.err == nil {
 			responses = append(responses, r.resp)
@@ -457,8 +475,8 @@ func (h *Handler) GetNode(w http.ResponseWriter, req *http.Request) {
 	// Trigger async read repair for any replica whose sibling set was dominated
 	// by or missing a surviving entry.
 	if len(survivors) > 0 {
-		addrByID := make(map[string]string, len(nodes))
-		for _, n := range nodes {
+		addrByID := make(map[string]string, len(readNodes))
+		for _, n := range readNodes {
 			addrByID[n.ID] = n.Address
 		}
 		if stale := staleReplicas(responses, survivors, addrByID); len(stale) > 0 {
@@ -515,6 +533,12 @@ func (h *Handler) PutKey(w http.ResponseWriter, req *http.Request) {
 	if req.Header.Get("X-Proxied-From") != "" {
 		h.store.Put(key, body.Value, incoming)
 		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// Reject coordinator writes while this node is still bootstrapping.
+	if m, ok := h.memberList.Get(h.selfID); ok && m.Bootstrapping {
+		http.Error(w, "node is bootstrapping", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -599,6 +623,12 @@ func (h *Handler) DeleteKey(w http.ResponseWriter, req *http.Request) {
 	if req.Header.Get("X-Proxied-From") != "" {
 		h.store.Delete(key, incoming)
 		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// Reject coordinator deletes while this node is still bootstrapping.
+	if m, ok := h.memberList.Get(h.selfID); ok && m.Bootstrapping {
+		http.Error(w, "node is bootstrapping", http.StatusServiceUnavailable)
 		return
 	}
 
