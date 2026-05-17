@@ -31,6 +31,7 @@ type config struct {
 	gossipPort        string
 	seedNodes         []string
 	replicaTimeout    time.Duration
+	selfWeight        float64
 }
 
 func loadConfig() config {
@@ -100,6 +101,13 @@ func loadConfig() config {
 		}
 	}
 
+	selfWeight := 1.0
+	if val := os.Getenv("SELF_WEIGHT"); val != "" {
+		if parsed, err := strconv.ParseFloat(val, 64); err == nil && parsed > 0 {
+			selfWeight = parsed
+		}
+	}
+
 	return config{
 		replicas:          replicas,
 		replicationFactor: replicationFactor,
@@ -110,6 +118,7 @@ func loadConfig() config {
 		gossipPort:        gossipPort,
 		seedNodes:         seedNodes,
 		replicaTimeout:    replicaTimeout,
+		selfWeight:        selfWeight,
 	}
 }
 
@@ -132,7 +141,7 @@ func main() {
 		log.Printf("member %s status changed to %s", m.ID, status)
 		switch status {
 		case gossip.MemberAlive:
-			r.AddNode(m.ID, m.Address)
+			r.AddWeightedNode(m.ID, m.Address, m.Weight)
 			if h := hptr.Load(); h != nil {
 				go h.DeliverHints(m.ID, m.Address)
 			}
@@ -145,6 +154,7 @@ func main() {
 			}
 		}
 	})
+	ml.SetSelfWeight(cfg.selfWeight)
 
 	r.SetHealthFilter(func(id string) bool {
 		m, ok := ml.Get(id)
@@ -172,7 +182,7 @@ func main() {
 	}
 
 	// add self to ring
-	r.AddNode(cfg.selfID, cfg.selfAddress)
+	r.AddWeightedNode(cfg.selfID, cfg.selfAddress, cfg.selfWeight)
 
 	_, httpPort, err := net.SplitHostPort(cfg.selfAddress)
 	if err != nil {

@@ -1,6 +1,7 @@
 package ring
 
 import (
+	"math"
 	"sync"
 	"sync/atomic"
 )
@@ -10,6 +11,7 @@ type Ring struct {
 	tree         *Tree
 	nodes        map[string]*Node
 	replicas     int
+	vnodeCounts  map[string]int
 	keyCounts    map[string]*atomic.Int64
 	onUpdate     func(nodeCount, vnodeCount int)
 	healthFilter func(nodeID string) bool
@@ -17,14 +19,14 @@ type Ring struct {
 
 func NewRing(replicas int) *Ring {
 	return &Ring{
-		tree:      NewTree(),
-		nodes:     make(map[string]*Node),
-		replicas:  replicas,
-		keyCounts: make(map[string]*atomic.Int64),
-		onUpdate:  func(nodeCount, vnodeCount int) {},
+		tree:        NewTree(),
+		nodes:       make(map[string]*Node),
+		replicas:    replicas,
+		vnodeCounts: make(map[string]int),
+		keyCounts:   make(map[string]*atomic.Int64),
+		onUpdate:    func(nodeCount, vnodeCount int) {},
 	}
 }
-
 
 func (r *Ring) SetUpdateCallback(fn func(nodeCount, vnodeCount int)) {
 	r.mu.Lock()
@@ -38,14 +40,31 @@ func (r *Ring) SetHealthFilter(fn func(nodeID string) bool) {
 	r.healthFilter = fn
 }
 
+// AddNode adds a node with the default weight of 1.0, receiving r.replicas vnodes.
 func (r *Ring) AddNode(id, address string) {
+	r.AddWeightedNode(id, address, 1.0)
+}
+
+// AddWeightedNode adds a node with a capacity weight relative to the base replica
+// count. A weight of 2.0 gives twice as many vnodes as the default; 0.5 gives half.
+// Weights <= 0 are treated as 1.0. The vnode count is always at least 1.
+func (r *Ring) AddWeightedNode(id, address string, weight float64) {
+	if weight <= 0 {
+		weight = 1.0
+	}
+	vnodes := int(math.Round(float64(r.replicas) * weight))
+	if vnodes < 1 {
+		vnodes = 1
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	node := NewNode(id, address)
 	r.nodes[id] = node
+	r.vnodeCounts[id] = vnodes
 	r.keyCounts[id] = &atomic.Int64{}
-	r.tree.Insert(node, r.replicas)
+	r.tree.Insert(node, vnodes)
 	r.onUpdate(len(r.nodes), r.tree.Tree.Size())
 }
 
@@ -58,8 +77,9 @@ func (r *Ring) RemoveNode(id string) {
 		return
 	}
 
-	r.tree.Remove(node, r.replicas)
+	r.tree.Remove(node, r.vnodeCounts[id])
 	delete(r.nodes, id)
+	delete(r.vnodeCounts, id)
 	delete(r.keyCounts, id)
 	r.onUpdate(len(r.nodes), r.tree.Tree.Size())
 }

@@ -39,6 +39,7 @@ type Member struct {
 	UpdatedAt     time.Time
 	Status        MemberStatus
 	Bootstrapping bool
+	Weight        float64 // relative capacity; 0 is treated as 1.0 by the ring
 }
 
 type MemberList struct {
@@ -55,6 +56,7 @@ func NewMemberList(selfID, selfAddress string, onChange func(member *Member, sta
 		Heartbeat: 0,
 		UpdatedAt: time.Now(),
 		Status:    MemberAlive,
+		Weight:    1.0,
 	}
 	ml := &MemberList{
 		members:  make(map[string]*Member),
@@ -63,6 +65,17 @@ func NewMemberList(selfID, selfAddress string, onChange func(member *Member, sta
 	}
 	ml.members[selfID] = self
 	return ml
+}
+
+// SetSelfWeight sets this node's capacity weight and increments its heartbeat so
+// the change propagates to peers on the next gossip round. A weight of 2.0 causes
+// other nodes to assign this node twice as many vnodes on their local rings.
+func (ml *MemberList) SetSelfWeight(weight float64) {
+	ml.mu.Lock()
+	defer ml.mu.Unlock()
+	ml.self.Weight = weight
+	ml.self.Heartbeat++
+	ml.self.UpdatedAt = time.Now()
 }
 
 func (ml *MemberList) IncrementHeartbeat() {

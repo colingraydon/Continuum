@@ -450,3 +450,96 @@ func TestGetPrimaryVnodeRangesPartitionCoverage(t *testing.T) {
 		}
 	}
 }
+
+// --- AddWeightedNode tests ---
+
+func TestAddWeightedNode_DoubleWeight(t *testing.T) {
+	const base = 10
+	r := NewRing(base)
+	r.AddWeightedNode("heavy", "10.0.0.1", 2.0)
+	r.AddWeightedNode("normal", "10.0.0.2", 1.0)
+
+	if r.vnodeCounts["heavy"] != 20 {
+		t.Errorf("expected 20 vnodes for weight 2.0, got %d", r.vnodeCounts["heavy"])
+	}
+	if r.vnodeCounts["normal"] != 10 {
+		t.Errorf("expected 10 vnodes for weight 1.0, got %d", r.vnodeCounts["normal"])
+	}
+}
+
+func TestAddWeightedNode_HalfWeight(t *testing.T) {
+	const base = 10
+	r := NewRing(base)
+	r.AddWeightedNode("light", "10.0.0.1", 0.5)
+
+	if r.vnodeCounts["light"] != 5 {
+		t.Errorf("expected 5 vnodes for weight 0.5, got %d", r.vnodeCounts["light"])
+	}
+}
+
+func TestAddWeightedNode_ZeroWeightClampsToDefault(t *testing.T) {
+	r := NewRing(10)
+	r.AddWeightedNode("n", "10.0.0.1", 0)
+
+	if r.vnodeCounts["n"] != 10 {
+		t.Errorf("expected 10 vnodes for weight 0 (default), got %d", r.vnodeCounts["n"])
+	}
+}
+
+func TestAddWeightedNode_NegativeWeightClampsToDefault(t *testing.T) {
+	r := NewRing(10)
+	r.AddWeightedNode("n", "10.0.0.1", -1.0)
+
+	if r.vnodeCounts["n"] != 10 {
+		t.Errorf("expected 10 vnodes for negative weight, got %d", r.vnodeCounts["n"])
+	}
+}
+
+func TestAddWeightedNode_RemoveUsesCorrectCount(t *testing.T) {
+	r := NewRing(10)
+	r.AddWeightedNode("heavy", "10.0.0.1", 2.0)
+	r.AddWeightedNode("normal", "10.0.0.2", 1.0)
+
+	r.RemoveNode("heavy")
+
+	if r.NodeCount() != 1 {
+		t.Fatalf("expected 1 node after remove, got %d", r.NodeCount())
+	}
+	// All remaining vnodes should belong to normal (10 vnodes).
+	if r.tree.Tree.Size() != 10 {
+		t.Errorf("expected 10 vnodes after removing heavy node, got %d", r.tree.Tree.Size())
+	}
+}
+
+func TestAddWeightedNode_HeavierNodeGetsMoreKeys(t *testing.T) {
+	// A node with 3x weight should attract roughly 3x the keys.
+	r := NewRing(100)
+	r.AddWeightedNode("heavy", "10.0.0.1", 3.0)
+	r.AddWeightedNode("normal", "10.0.0.2", 1.0)
+
+	heavyCount, normalCount := 0, 0
+	for i := 0; i < 10000; i++ {
+		key := generateHashInput("key", i)
+		node, _ := r.GetNode(key)
+		if node.ID == "heavy" {
+			heavyCount++
+		} else {
+			normalCount++
+		}
+	}
+
+	ratio := float64(heavyCount) / float64(normalCount)
+	// Expect roughly 3:1; allow 20% tolerance.
+	if ratio < 2.0 || ratio > 4.0 {
+		t.Errorf("expected heavy:normal ratio near 3.0, got %.2f (%d:%d)", ratio, heavyCount, normalCount)
+	}
+}
+
+func TestAddNode_DefaultWeightEqualsOne(t *testing.T) {
+	r := NewRing(50)
+	r.AddNode("n", "10.0.0.1")
+
+	if r.vnodeCounts["n"] != 50 {
+		t.Errorf("AddNode should use weight 1.0 (50 vnodes), got %d", r.vnodeCounts["n"])
+	}
+}
