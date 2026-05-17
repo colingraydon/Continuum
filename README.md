@@ -533,6 +533,7 @@ In Grafana, add `http://prometheus:9090` as a Prometheus data source and query:
 | `READ_QUORUM`        | majority         | Replica responses required for a consistent read                  |
 | `REPLICA_TIMEOUT_MS` | `500`            | Timeout in milliseconds for inter-node replication and read calls |
 | `SEED_NODES`         | -                | Comma-separated HTTP addresses to bootstrap from                  |
+| `SELF_WEIGHT`        | `1.0`            | Capacity weight for vnode allocation; 2.0 gives twice the vnodes  |
 
 ---
 
@@ -585,5 +586,4 @@ Continuum shuts down gracefully on `SIGINT` or `SIGTERM`:
 ## What's Next
 
 - **Persistence** - write-ahead log and snapshot-on-shutdown so state survives restarts. A prerequisite for making the tombstone GC safety argument hold across node restarts (currently it relies on restarted nodes losing all in-memory state).
-- **Weighted vnodes** - nodes with higher capacity receive proportionally more vnodes for heterogeneous clusters
 - **Architecture diagram**

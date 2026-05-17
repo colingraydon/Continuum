@@ -460,6 +460,44 @@ func TestMemberBootstrappedString(t *testing.T) {
 	}
 }
 
+func TestSetSelfWeight_UpdatesWeight(t *testing.T) {
+	ml := newTestMemberList()
+	ml.SetSelfWeight(2.0)
+	if ml.self.Weight != 2.0 {
+		t.Errorf("expected weight 2.0, got %f", ml.self.Weight)
+	}
+}
+
+func TestSetSelfWeight_IncrementsHeartbeat(t *testing.T) {
+	ml := newTestMemberList()
+	before := ml.self.Heartbeat
+	ml.SetSelfWeight(2.0)
+	if ml.self.Heartbeat != before+1 {
+		t.Errorf("expected heartbeat %d, got %d", before+1, ml.self.Heartbeat)
+	}
+}
+
+func TestMerge_WeightPropagates(t *testing.T) {
+	ml := newTestMemberList()
+	ml.Merge([]*Member{
+		{ID: "node1", Address: "10.0.0.2", Heartbeat: 1, Status: MemberAlive, Weight: 2.5},
+	})
+	m, ok := ml.Get("node1")
+	if !ok {
+		t.Fatal("node1 not found after merge")
+	}
+	if m.Weight != 2.5 {
+		t.Errorf("expected weight 2.5, got %f", m.Weight)
+	}
+}
+
+func TestNewMemberList_SelfWeightDefaultsToOne(t *testing.T) {
+	ml := newTestMemberList()
+	if ml.self.Weight != 1.0 {
+		t.Errorf("expected default self weight 1.0, got %f", ml.self.Weight)
+	}
+}
+
 func TestSize(t *testing.T) {
 	// Arrange
 	ml := newTestMemberList()
