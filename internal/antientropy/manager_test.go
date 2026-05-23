@@ -392,6 +392,47 @@ func TestRunGC_NothingToGC(t *testing.T) {
 	mgr.runGC()
 }
 
+// TestAETreeUpdatedViaOnUpdateCallback verifies that a store write arriving AFTER
+// the anti-entropy manager is initialized is reflected in the Merkle trees via the
+// OnUpdate callback (not the initial rebuild). This tests the wiring that main.go
+// establishes with s.SetOnUpdate(ae.Update): a post-init write must be visible to
+// subsequent sync rounds so it propagates to replicas.
+func TestAETreeUpdatedViaOnUpdateCallback(t *testing.T) {
+	r1, s1, _ := newSyncNode(t, "node1")
+	r2, s2, srv2 := newSyncNode(t, "node2")
+
+	addr2 := aeServerAddr(srv2)
+	r1.AddNode("node1", "127.0.0.1:0")
+	r1.AddNode("node2", addr2)
+	r2.AddNode("node1", "127.0.0.1:0")
+	r2.AddNode("node2", addr2)
+
+	// Create the manager on an empty store, then wire OnUpdate — this mirrors
+	// the sequence in main.go: ae := New(...); s.SetOnUpdate(ae.Update).
+	// Any data written before this point would be picked up by rebuild(); data
+	// written after must flow through the OnUpdate callback.
+	mgr := New(r1, s1, "node1", 2, time.Second)
+	s1.SetOnUpdate(mgr.Update)
+
+	key := firstPrimaryKey(r1, "node1")
+
+	// Write after the manager is initialized — must trigger OnUpdate → mgr.Update,
+	// inserting the key into the appropriate primary vnode's Merkle tree.
+	s1.Put(key, "post-init", store.VectorClockVersion{Clocks: map[string]uint64{"node1": 1}})
+
+	// syncAll should find the key in the tree (populated via OnUpdate) and push
+	// it to node2's replica.
+	syncAll(t, mgr)
+
+	entry, ok := s2.Get(key)
+	if !ok {
+		t.Fatal("node2 should have the key after AE sync of a post-init write")
+	}
+	if len(entry.Siblings) != 1 || entry.Siblings[0].Value != "post-init" {
+		t.Errorf("unexpected entry on node2: %+v", entry.Siblings)
+	}
+}
+
 func TestPushSyncEntries_NonOK(t *testing.T) {
 	badSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)

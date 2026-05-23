@@ -484,6 +484,70 @@ func TestProcessDeleteTombstoneBeatsStaleWrite(t *testing.T) {
 	}
 }
 
+// TestProcessHintedHandoffDelivery verifies the full hinted-handoff flow at the
+// binary level: when a replica is unreachable during a quorum write a hint is
+// buffered, and when the node is later registered via POST /nodes the hint is
+// delivered and the recovered node holds the written value.
+func TestProcessHintedHandoffDelivery(t *testing.T) {
+	rf := "REPLICATION_FACTOR=3"
+	wq := "WRITE_QUORUM=2"
+	rq := "READ_QUORUM=1"
+
+	n1 := startNode(t, rf, wq, rq)
+	n3 := startNode(t, rf, wq, rq)
+
+	// Register n1 and n3 with each other.
+	n1.registerPeer(t, n3)
+	n3.registerPeer(t, n1)
+
+	// Register an unreachable ghost node2 with both real nodes so the ring
+	// believes RF=3 is achievable. Writes will fan-out to it but get connection
+	// refused, causing a hint to be buffered on n1.
+	const ghostID = "ghost-node2"
+	const ghostAddr = "127.0.0.1:19998"
+	for _, n := range []*testNode{n1, n3} {
+		body := fmt.Sprintf(`{"id":%q,"address":%q}`, ghostID, ghostAddr)
+		resp, err := http.Post(n.baseURL+"/nodes", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("register ghost on %s: %v", n.id, err)
+		}
+		resp.Body.Close()
+	}
+
+	// Write with WQ=2: n1+n3 satisfy quorum; ghost-node2 fails, hint buffered.
+	if code := n1.put(t, "hint-key", "hinted"); code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", code)
+	}
+
+	// Give the async hint-buffering goroutine time to complete (fires when the
+	// failed replica result arrives after quorum was already met).
+	time.Sleep(200 * time.Millisecond)
+
+	// Start the real node2 and register it with itself so it can serve reads.
+	n2 := startNode(t, rf, wq, rq)
+	n2.registerPeer(t, n2)
+
+	// Register the recovered node2 with n1 under the ghost ID: this calls
+	// ml.Add(ghostID, n2.addr) → onChange(MemberAlive) → go h.DeliverHints(ghostID, n2.addr).
+	body := fmt.Sprintf(`{"id":%q,"address":%q}`, ghostID, n2.addr)
+	resp, err := http.Post(n1.baseURL+"/nodes", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("register recovered n2 with n1: %v", err)
+	}
+	resp.Body.Close()
+
+	// Poll n2 until the hinted value arrives (hint delivery is async).
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		nr, code := n2.get(t, "hint-key")
+		if code == http.StatusOK && nr.Value == "hinted" {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Error("hinted value was not delivered to recovered node2 within 3 seconds")
+}
+
 // TestProcessGracefulShutdown verifies that the server exits cleanly on
 // SIGTERM and stops accepting connections after shutdown completes.
 func TestProcessGracefulShutdown(t *testing.T) {
