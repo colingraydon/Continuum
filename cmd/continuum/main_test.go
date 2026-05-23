@@ -1,19 +1,19 @@
 package main
 
 import (
-	"os"
 	"testing"
 	"time"
 )
 
 func TestLoadConfig_Defaults(t *testing.T) {
-	// Clear all env vars that loadConfig reads.
+	// Clear all env vars that loadConfig reads by setting them via t.Setenv
+	// with empty strings, then relying on the unset-after-test cleanup.
 	for _, key := range []string{
 		"REPLICAS", "REPLICATION_FACTOR", "WRITE_QUORUM", "READ_QUORUM",
 		"SELF_ADDRESS", "SELF_ID", "GOSSIP_PORT", "SEED_NODES",
 		"REPLICA_TIMEOUT_MS", "SELF_WEIGHT",
 	} {
-		os.Unsetenv(key)
+		t.Setenv(key, "")
 	}
 
 	cfg := loadConfig()
@@ -103,8 +103,8 @@ func TestLoadConfig_InvalidEnvIgnored(t *testing.T) {
 	t.Setenv("REPLICA_TIMEOUT_MS", "notanumber")
 	t.Setenv("SELF_WEIGHT", "notanumber")
 	// Clear quorum vars so defaults are used.
-	os.Unsetenv("WRITE_QUORUM")
-	os.Unsetenv("READ_QUORUM")
+	t.Setenv("WRITE_QUORUM", "")
+	t.Setenv("READ_QUORUM", "")
 
 	cfg := loadConfig()
 
@@ -127,7 +127,7 @@ func TestLoadConfig_QuorumInvalidZero(t *testing.T) {
 	t.Setenv("REPLICATION_FACTOR", "3")
 	t.Setenv("WRITE_QUORUM", "0")
 	t.Setenv("READ_QUORUM", "-1")
-	os.Unsetenv("REPLICAS")
+	t.Setenv("REPLICAS", "")
 
 	cfg := loadConfig()
 

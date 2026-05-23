@@ -187,7 +187,8 @@ func TestConcurrentSafety(t *testing.T) {
 }
 
 func TestHashKey(t *testing.T) {
-	if HashKey("mykey") != HashKey("mykey") {
+	h1, h2 := HashKey("mykey"), HashKey("mykey")
+	if h1 != h2 {
 		t.Error("HashKey should be deterministic")
 	}
 	if HashKey("aaa") == HashKey("bbb") {
