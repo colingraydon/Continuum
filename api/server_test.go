@@ -11,6 +11,20 @@ import (
 	"github.com/colingraydon/continuum/internal/store"
 )
 
+func TestBuildMux(t *testing.T) {
+	h := newTestHandler(t)
+	mux := BuildMux(h)
+	if mux == nil {
+		t.Fatal("expected non-nil mux from BuildMux")
+	}
+	req := httptest.NewRequest(http.MethodGet, "/nodes", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 on GET /nodes, got %d", w.Code)
+	}
+}
+
 func TestRoutes(t *testing.T) {
 	// Arrange
 	r := ring.NewRing(50)
