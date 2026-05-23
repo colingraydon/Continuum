@@ -185,3 +185,93 @@ func TestConcurrentSafety(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestHashKey(t *testing.T) {
+	h1, h2 := HashKey("mykey"), HashKey("mykey")
+	if h1 != h2 {
+		t.Error("HashKey should be deterministic")
+	}
+	if HashKey("aaa") == HashKey("bbb") {
+		t.Error("HashKey should differ for distinct keys")
+	}
+	// Consistent with bucketIndex: HashKey(k) % BucketCount == BucketIndex(k).
+	key := "consistent-test"
+	if int(HashKey(key))%BucketCount != BucketIndex(key) {
+		t.Error("HashKey % BucketCount should equal BucketIndex")
+	}
+}
+
+func TestBucketIndex(t *testing.T) {
+	key := "testkey"
+	idx := BucketIndex(key)
+	if idx < 0 || idx >= BucketCount {
+		t.Fatalf("BucketIndex out of range: %d", idx)
+	}
+	// Update the key and verify it lands in the expected bucket.
+	tree := New()
+	tree.Update(key, 0x1234)
+	keys := tree.BucketKeys(idx)
+	found := false
+	for _, k := range keys {
+		if k == key {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("key %q not in expected bucket %d", key, idx)
+	}
+}
+
+func TestComputeBucketHash(t *testing.T) {
+	// Empty map returns zero.
+	if h := ComputeBucketHash(map[string]uint32{}); h != 0 {
+		t.Errorf("empty map: expected 0, got %d", h)
+	}
+
+	// Matches the tree's bucket hash for the same entries.
+	key := "probe"
+	hash := uint32(0xabcdef01)
+	idx := BucketIndex(key)
+	tree := New()
+	tree.Update(key, hash)
+
+	got := ComputeBucketHash(map[string]uint32{key: hash})
+	want := tree.BucketHash(idx)
+	if got != want {
+		t.Errorf("ComputeBucketHash=%d, tree.BucketHash=%d", got, want)
+	}
+
+	// Order-independent (same result regardless of map iteration order).
+	a := ComputeBucketHash(map[string]uint32{"z": 1, "a": 2})
+	b := ComputeBucketHash(map[string]uint32{"a": 2, "z": 1})
+	if a != b {
+		t.Error("ComputeBucketHash should be order-independent")
+	}
+}
+
+func TestComputeRootHash(t *testing.T) {
+	// Deterministic for the same input.
+	h1 := ComputeRootHash([]uint32{1, 2, 3})
+	h2 := ComputeRootHash([]uint32{1, 2, 3})
+	if h1 != h2 {
+		t.Error("ComputeRootHash should be deterministic")
+	}
+
+	// Order-sensitive (unlike bucket hash, root hash is over ordered buckets).
+	if ComputeRootHash([]uint32{1, 2, 3}) == ComputeRootHash([]uint32{3, 2, 1}) {
+		t.Error("ComputeRootHash should be order-sensitive")
+	}
+
+	// Matches tree.RootHash for the same bucket hash sequence.
+	tree := New()
+	tree.Update("k1", 0x1111)
+	tree.Update("k2", 0x2222)
+
+	buckets := make([]uint32, BucketCount)
+	for i := range buckets {
+		buckets[i] = tree.BucketHash(i)
+	}
+	if ComputeRootHash(buckets) != tree.RootHash() {
+		t.Error("ComputeRootHash(bucket hashes) should equal tree.RootHash()")
+	}
+}

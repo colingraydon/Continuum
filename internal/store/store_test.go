@@ -604,3 +604,42 @@ func TestEvict_DoesNotCreateTombstone(t *testing.T) {
 		t.Errorf("put after evict should succeed cleanly, got %+v", e)
 	}
 }
+
+// --- KeyHashes tests ---
+
+func TestKeyHashes_EmptyStore(t *testing.T) {
+	s := New()
+	if hashes := s.KeyHashes(); len(hashes) != 0 {
+		t.Errorf("expected empty map, got %v", hashes)
+	}
+}
+
+func TestKeyHashes_ContainsAllKeys(t *testing.T) {
+	s := New()
+	v := clock(map[string]uint64{"node1": 1})
+	s.Put("a", "foo", v)
+	s.Put("b", "bar", v)
+	s.Delete("c", v)
+
+	hashes := s.KeyHashes()
+	if len(hashes) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(hashes))
+	}
+	for _, key := range []string{"a", "b", "c"} {
+		if _, ok := hashes[key]; !ok {
+			t.Errorf("key %q missing from KeyHashes", key)
+		}
+	}
+}
+
+func TestKeyHashes_MatchesEntryHash(t *testing.T) {
+	s := New()
+	v := clock(map[string]uint64{"node1": 1})
+	s.Put("k", "value", v)
+
+	hashes := s.KeyHashes()
+	entry, _ := s.Get("k")
+	if hashes["k"] != entryHash(entry) {
+		t.Errorf("KeyHashes[k]=%d, entryHash=%d", hashes["k"], entryHash(entry))
+	}
+}
