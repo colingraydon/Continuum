@@ -7,7 +7,10 @@ run:
 	go run ./cmd/continuum
 
 test:
-	go test -v ./...
+	go test -v -coverprofile=coverage.out -covermode=atomic ./...
+
+test-race:
+	go test -race ./...
 
 e2e:
 	go test -v ./api/... -run E2E
