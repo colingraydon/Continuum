@@ -543,3 +543,200 @@ func TestAddNode_DefaultWeightEqualsOne(t *testing.T) {
 		t.Errorf("AddNode should use weight 1.0 (50 vnodes), got %d", r.vnodeCounts["n"])
 	}
 }
+
+func TestAddWeightedNode_VnodesClampedToOne(t *testing.T) {
+	// replicas=1, weight=0.4 → round(0.4)=0 → clamped to 1.
+	r := NewRing(1)
+	r.AddWeightedNode("n", "10.0.0.1", 0.4)
+	if r.vnodeCounts["n"] != 1 {
+		t.Errorf("expected vnodes clamped to 1, got %d", r.vnodeCounts["n"])
+	}
+}
+
+func TestGetReplicationNodes_WrapAround(t *testing.T) {
+	// With 2 nodes and factor 2, and a key that sorts after all vnodes in the tree,
+	// GetReplicationNodes must wrap around and still return 2 distinct nodes.
+	r := NewRing(3)
+	r.AddNode("node1", "10.0.0.1")
+	r.AddNode("node2", "10.0.0.2")
+
+	// Try many keys to exercise the wrap-around path.
+	for _, key := range []string{"wrap1", "wrap2", "wrap3", "wrap4", "wrap5"} {
+		nodes := r.GetReplicationNodes(key, 2)
+		if len(nodes) != 2 {
+			t.Errorf("key %s: expected 2 nodes, got %d", key, len(nodes))
+		}
+		seen := make(map[string]bool)
+		for _, n := range nodes {
+			if seen[n.ID] {
+				t.Errorf("key %s: duplicate node %s", key, n.ID)
+			}
+			seen[n.ID] = true
+		}
+	}
+}
+
+func TestGetReplicationNodesForHash_WrapAround(t *testing.T) {
+	r := NewRing(3)
+	r.AddNode("node1", "10.0.0.1")
+	r.AddNode("node2", "10.0.0.2")
+
+	// Use hash=0 which is before all vnodes → forces wrap-around iteration.
+	nodes := r.GetReplicationNodesForHash(0, 2)
+	if len(nodes) != 2 {
+		t.Errorf("expected 2 nodes on wrap-around, got %d", len(nodes))
+	}
+	seen := make(map[string]bool)
+	for _, n := range nodes {
+		if seen[n.ID] {
+			t.Errorf("duplicate node %s in wrap-around result", n.ID)
+		}
+		seen[n.ID] = true
+	}
+}
+
+// --- GetReplicationNodesForHash tests ---
+
+func TestGetReplicationNodesForHash_EmptyRing(t *testing.T) {
+	r := NewRing(10)
+	if nodes := r.GetReplicationNodesForHash(0, 3); nodes != nil {
+		t.Fatalf("expected nil for empty ring, got %v", nodes)
+	}
+}
+
+func TestGetReplicationNodesForHash_FewerNodesThanFactor(t *testing.T) {
+	r := NewRing(10)
+	r.AddNode("node1", "10.0.0.1")
+	r.AddNode("node2", "10.0.0.2")
+
+	nodes := r.GetReplicationNodesForHash(0, 5)
+	if len(nodes) != 2 {
+		t.Errorf("expected 2 (capped at node count), got %d", len(nodes))
+	}
+}
+
+func TestGetReplicationNodesForHash_ReturnsDistinctNodes(t *testing.T) {
+	r := NewRing(10)
+	r.AddNode("node1", "10.0.0.1")
+	r.AddNode("node2", "10.0.0.2")
+	r.AddNode("node3", "10.0.0.3")
+
+	ranges := r.GetPrimaryVnodeRanges("node1")
+	if len(ranges) == 0 {
+		t.Fatal("expected primary vnode ranges")
+	}
+	nodes := r.GetReplicationNodesForHash(ranges[0].End, 3)
+	if len(nodes) != 3 {
+		t.Errorf("expected 3 nodes, got %d", len(nodes))
+	}
+	seen := make(map[string]bool)
+	for _, n := range nodes {
+		if seen[n.ID] {
+			t.Errorf("duplicate node %s", n.ID)
+		}
+		seen[n.ID] = true
+	}
+}
+
+func TestGetReplicationNodesForHash_ConsistentWithKeyLookup(t *testing.T) {
+	r := NewRing(50)
+	r.AddNode("node1", "10.0.0.1")
+	r.AddNode("node2", "10.0.0.2")
+
+	key := "testkey"
+	keyNodes := r.GetReplicationNodes(key, 2)
+	hashNodes := r.GetReplicationNodesForHash(computeHash(key), 2)
+
+	if len(keyNodes) != len(hashNodes) {
+		t.Fatalf("expected same length: key=%d hash=%d", len(keyNodes), len(hashNodes))
+	}
+	for i := range keyNodes {
+		if keyNodes[i].ID != hashNodes[i].ID {
+			t.Errorf("pos %d: key lookup=%s, hash lookup=%s", i, keyNodes[i].ID, hashNodes[i].ID)
+		}
+	}
+}
+
+// --- GetVnodeRange tests ---
+
+func TestGetVnodeRange_EmptyRing(t *testing.T) {
+	r := NewRing(10)
+	_, ok := r.GetVnodeRange(0)
+	if ok {
+		t.Error("expected false for empty ring")
+	}
+}
+
+func TestGetVnodeRange_ExistingEndHash(t *testing.T) {
+	r := NewRing(5)
+	r.AddNode("node1", "10.0.0.1")
+	r.AddNode("node2", "10.0.0.2")
+
+	for _, want := range r.GetPrimaryVnodeRanges("node1") {
+		vr, ok := r.GetVnodeRange(want.End)
+		if !ok {
+			t.Errorf("GetVnodeRange(%d) returned false", want.End)
+			continue
+		}
+		if vr.End != want.End {
+			t.Errorf("expected End=%d, got %d", want.End, vr.End)
+		}
+		// The range's End should be contained in the range itself.
+		if !vr.Contains(vr.End) {
+			t.Errorf("range does not contain its own End hash %d", vr.End)
+		}
+	}
+}
+
+func TestGetVnodeRange_UnknownHash(t *testing.T) {
+	r := NewRing(10)
+	r.AddNode("node1", "10.0.0.1")
+
+	known := make(map[uint32]bool)
+	for _, vr := range r.GetPrimaryVnodeRanges("node1") {
+		known[vr.End] = true
+	}
+	var missing uint32
+	for h := uint32(1); ; h++ {
+		if !known[h] {
+			missing = h
+			break
+		}
+	}
+
+	_, ok := r.GetVnodeRange(missing)
+	if ok {
+		t.Errorf("GetVnodeRange(%d) should return false for non-vnode hash", missing)
+	}
+}
+
+func TestGetVnodeRange_WrapAroundSingleNode(t *testing.T) {
+	// With a single node, the first vnode's predecessor is the last vnode,
+	// which produces a wrapping range (Start > End for the first vnode).
+	r := NewRing(3)
+	r.AddNode("node1", "10.0.0.1")
+
+	ranges := r.GetPrimaryVnodeRanges("node1")
+	if len(ranges) != 3 {
+		t.Fatalf("expected 3 ranges, got %d", len(ranges))
+	}
+	// At least one range must wrap (Start >= End) since there is only one node.
+	hasWrap := false
+	for _, vr := range ranges {
+		if vr.Start >= vr.End {
+			hasWrap = true
+		}
+		// Verify the retrieved range matches.
+		got, ok := r.GetVnodeRange(vr.End)
+		if !ok {
+			t.Errorf("GetVnodeRange(%d) returned false", vr.End)
+			continue
+		}
+		if got.Start != vr.Start || got.End != vr.End {
+			t.Errorf("range mismatch: got {%d,%d}, want {%d,%d}", got.Start, got.End, vr.Start, vr.End)
+		}
+	}
+	if !hasWrap {
+		t.Error("expected at least one wrapping range for single-node ring")
+	}
+}

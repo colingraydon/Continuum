@@ -126,3 +126,17 @@ func TestGetStatsTotalNodes(t *testing.T) {
 		t.Errorf("expected 3 total nodes, got %d", stats.TotalNodes)
 	}
 }
+
+func TestGetStats_NodeNotInMemberList(t *testing.T) {
+	// A node present in the ring but absent from the member list is counted dead.
+	r := ring.NewRing(10)
+	ml := gossip.NewMemberList("self", "localhost", nil)
+	a := NewAggregator(r, ml)
+
+	r.AddNode("ghost", "10.0.0.1") // not added to ml
+
+	stats := a.GetStats()
+	if stats.DeadNodes != 1 {
+		t.Errorf("expected 1 dead node for ring-only member, got %d", stats.DeadNodes)
+	}
+}
