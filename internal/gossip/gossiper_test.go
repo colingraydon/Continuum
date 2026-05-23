@@ -413,3 +413,94 @@ func TestGossipRoundIncrementsHeartbeat(t *testing.T) {
 		}
 	}
 }
+func TestGossipRound_WithPeers(t *testing.T) {
+	receiver := newTestTransport(t)
+	receiver.Start()
+	port := fmt.Sprintf("%d", receiver.conn.LocalAddr().(*net.UDPAddr).Port)
+
+	ml := newTestMemberList()
+	senderTransport, err := NewTransport("0")
+	if err != nil {
+		t.Fatalf("failed to create transport: %v", err)
+	}
+	defer senderTransport.Stop()
+
+	g := NewGossiper("self", port, ml, senderTransport)
+	ml.Add("node1", "127.0.0.1:8080")
+
+	g.gossipRound()
+
+	select {
+	case msg := <-receiver.Incoming():
+		if msg.From != "self" {
+			t.Errorf("expected from=self, got %s", msg.From)
+		}
+		if msg.Type != MessagePushPull {
+			t.Errorf("expected PushPull, got %d", msg.Type)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("timeout: no gossip message received")
+	}
+}
+
+func TestBootstrap_NoSeeds(t *testing.T) {
+	ml := newTestMemberList()
+	g, transport, err := newTestGossiper("self", ml)
+	if err != nil {
+		t.Fatalf("failed to create gossiper: %v", err)
+	}
+	defer transport.Stop()
+
+	g.Bootstrap(nil)
+	g.Bootstrap([]string{})
+}
+
+func TestBootstrap_SendsToSeeds(t *testing.T) {
+	receiver := newTestTransport(t)
+	receiver.Start()
+	port := fmt.Sprintf("%d", receiver.conn.LocalAddr().(*net.UDPAddr).Port)
+
+	ml := newTestMemberList()
+	senderTransport, err := NewTransport("0")
+	if err != nil {
+		t.Fatalf("failed to create transport: %v", err)
+	}
+	defer senderTransport.Stop()
+
+	g := NewGossiper("self", port, ml, senderTransport)
+	g.Bootstrap([]string{"127.0.0.1:9999"})
+
+	select {
+	case msg := <-receiver.Incoming():
+		if msg.From != "self" {
+			t.Errorf("expected from=self, got %s", msg.From)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("timeout: no bootstrap message received")
+	}
+}
+
+func TestBootstrap_LogsOnSendFailure(t *testing.T) {
+	ml := newTestMemberList()
+	g, transport, err := newTestGossiper("self", ml)
+	if err != nil {
+		t.Fatalf("failed to create gossiper: %v", err)
+	}
+	defer transport.Stop()
+
+	g.Bootstrap([]string{"invalid-host:notaport"})
+}
+
+func TestGossipHost_NoPort(t *testing.T) {
+	got := gossipHost("10.0.0.1")
+	if got != "10.0.0.1" {
+		t.Errorf("expected 10.0.0.1, got %s", got)
+	}
+}
+
+func TestGossipHost_WithPort(t *testing.T) {
+	got := gossipHost("10.0.0.1:8080")
+	if got != "10.0.0.1" {
+		t.Errorf("expected 10.0.0.1, got %s", got)
+	}
+}

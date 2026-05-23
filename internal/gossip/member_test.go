@@ -512,3 +512,74 @@ func TestSize(t *testing.T) {
 		t.Errorf("expected 3, got %d", size)
 	}
 }
+func TestMarkSuspect_NonAliveMember(t *testing.T) {
+	ml := newTestMemberList()
+	ml.Add("node1", "10.0.0.2")
+	ml.MarkDead("node1")
+
+	before := func() MemberStatus {
+		m, _ := ml.Get("node1")
+		return m.Status
+	}()
+	ml.MarkSuspect("node1")
+	after, _ := ml.Get("node1")
+	if after.Status != before {
+		t.Errorf("MarkSuspect on dead node should be a no-op, was %s", after.Status)
+	}
+}
+
+func TestMarkSuspect_UnknownMember(t *testing.T) {
+	ml := newTestMemberList()
+	ml.MarkSuspect("ghost") // must not panic
+}
+
+func TestMarkDead_AlreadyDead(t *testing.T) {
+	ml := newTestMemberList()
+	ml.Add("node1", "10.0.0.2")
+	ml.MarkDead("node1")
+
+	callCount := 0
+	ml.onChange = func(m *Member, s MemberStatus) { callCount++ }
+	ml.MarkDead("node1")
+
+	if callCount != 0 {
+		t.Errorf("MarkDead on already-dead member should not trigger onChange, got %d calls", callCount)
+	}
+}
+
+func TestMarkDead_UnknownMember(t *testing.T) {
+	ml := newTestMemberList()
+	ml.MarkDead("ghost") // must not panic
+}
+
+func TestMarkSuspect_AliveWithOnChange(t *testing.T) {
+	ml := newTestMemberList()
+	ml.Add("node1", "10.0.0.2")
+
+	called := false
+	ml.onChange = func(m *Member, s MemberStatus) {
+		if s == MemberSuspect {
+			called = true
+		}
+	}
+	ml.MarkSuspect("node1")
+	if !called {
+		t.Error("onChange should be called when marking alive node suspect")
+	}
+}
+
+func TestMarkDead_AliveWithOnChange(t *testing.T) {
+	ml := newTestMemberList()
+	ml.Add("node1", "10.0.0.2")
+
+	called := false
+	ml.onChange = func(m *Member, s MemberStatus) {
+		if s == MemberDead {
+			called = true
+		}
+	}
+	ml.MarkDead("node1")
+	if !called {
+		t.Error("onChange should be called when marking alive node dead")
+	}
+}

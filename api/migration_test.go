@@ -358,3 +358,229 @@ func TestBootstrappingNodeExcludedFromReads(t *testing.T) {
 		t.Errorf("expected 200, got %d", getResp.StatusCode)
 	}
 }
+
+func TestBootstrap_PullsTombstoneFromSource(t *testing.T) {
+	existSrv, existHandler := newMigrationTestNode(t, "existing", 2, 1, 1)
+	existAddr := serverAddress(existSrv)
+
+	_, joinHandler := newMigrationTestNode(t, "joining", 2, 1, 1)
+
+	for _, h := range []*Handler{existHandler, joinHandler} {
+		h.ring.AddNode("existing", existAddr)
+		h.ring.AddNode("joining", "127.0.0.1:0")
+	}
+
+	var tombKey string
+	for _, vr := range joinHandler.ring.GetPrimaryVnodeRanges("joining") {
+		for _, c := range []string{"del-alpha", "del-beta", "del-gamma", "del-delta",
+			"del-epsilon", "del-zeta", "del-eta", "del-theta", "del-iota", "del-kappa"} {
+			if vr.Contains(merkle.HashKey(c)) {
+				tombKey = c
+				break
+			}
+		}
+		if tombKey != "" {
+			break
+		}
+	}
+	if tombKey == "" {
+		t.Skip("no test key found in joining node's primary ranges")
+	}
+
+	existHandler.store.Delete(tombKey, store.VectorClockVersion{Clocks: map[string]uint64{"existing": 1}})
+	joinHandler.Bootstrap()
+
+	entry, ok := joinHandler.store.Get(tombKey)
+	if !ok {
+		t.Fatal("Bootstrap should have pulled tombstone from existing into joining")
+	}
+	if len(entry.Siblings) != 1 || !entry.Siblings[0].Deleted {
+		t.Errorf("expected tombstone on joining, got %+v", entry.Siblings)
+	}
+}
+
+func TestBootstrap_PullError(t *testing.T) {
+	deadSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadAddr := strings.TrimPrefix(deadSrv.URL, "http://")
+	deadSrv.Close()
+
+	r := ring.NewRing(10)
+	ml := gossip.NewMemberList("joining", "localhost", nil)
+	s := store.New()
+	transport, err := gossip.NewTransport("0")
+	if err != nil {
+		t.Fatalf("transport: %v", err)
+	}
+	t.Cleanup(func() { transport.Stop() })
+	g := gossip.NewGossiper("joining", "0", ml, transport)
+	h := NewHandler(r, ml, g, s, "joining", 2, 1, 1, time.Second, nil)
+	r.AddNode("existing", deadAddr)
+	r.AddNode("joining", "127.0.0.1:0")
+
+	h.Bootstrap() // logs errors, must not panic
+}
+
+func TestMigFetchBucketKeys_HTTPError(t *testing.T) {
+	_, h := newMigrationTestNode(t, "node1", 1, 1, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	srv.Close()
+
+	_, err := h.migFetchBucketKeys(addr, 1, 0)
+	if err == nil {
+		t.Error("expected error from migFetchBucketKeys when server is unreachable")
+	}
+}
+
+func TestMigFetchBucketKeys_InvalidJSON(t *testing.T) {
+	_, h := newMigrationTestNode(t, "node1", 1, 1, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("not-json"))
+	}))
+	defer srv.Close()
+
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	_, err := h.migFetchBucketKeys(addr, 1, 0)
+	if err == nil {
+		t.Error("expected error from migFetchBucketKeys on invalid JSON response")
+	}
+}
+
+func TestMigFetchSyncKeys_HTTPError(t *testing.T) {
+	_, h := newMigrationTestNode(t, "node1", 1, 1, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	srv.Close()
+
+	_, err := h.migFetchSyncKeys(addr, []string{"k"})
+	if err == nil {
+		t.Error("expected error from migFetchSyncKeys when server is unreachable")
+	}
+}
+
+func TestMigFetchSyncKeys_InvalidJSON(t *testing.T) {
+	_, h := newMigrationTestNode(t, "node1", 1, 1, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("not-json"))
+	}))
+	defer srv.Close()
+
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	_, err := h.migFetchSyncKeys(addr, []string{"k"})
+	if err == nil {
+		t.Error("expected error from migFetchSyncKeys on invalid JSON response")
+	}
+}
+
+func TestMigPushSyncEntries_NonOKStatus(t *testing.T) {
+	badSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}))
+	defer badSrv.Close()
+
+	_, h := newMigrationTestNode(t, "node1", 1, 1, 1)
+	addr := strings.TrimPrefix(badSrv.URL, "http://")
+	err := h.migPushSyncEntries(addr, map[string][]SyncSibling{
+		"k": {{Value: "v", Clocks: map[string]uint64{"n1": 1}}},
+	})
+	if err == nil {
+		t.Error("expected error when server returns non-204")
+	}
+}
+
+func TestMigPushSyncEntries_HTTPError(t *testing.T) {
+	_, h := newMigrationTestNode(t, "node1", 1, 1, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	srv.Close()
+
+	err := h.migPushSyncEntries(addr, map[string][]SyncSibling{
+		"k": {{Value: "v", Clocks: map[string]uint64{"n1": 1}}},
+	})
+	if err == nil {
+		t.Error("expected error from migPushSyncEntries when server is unreachable")
+	}
+}
+
+func TestPullVnodeRange_FetchKeysError(t *testing.T) {
+	_, h := newMigrationTestNode(t, "node1", 1, 1, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	srv.Close()
+
+	err := h.pullVnodeRange(addr, 1)
+	if err == nil {
+		t.Error("expected error from pullVnodeRange when bucket-keys fetch fails")
+	}
+}
+
+func TestPullVnodeRange_FetchEntriesError(t *testing.T) {
+	_, h := newMigrationTestNode(t, "node1", 1, 1, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sync/bucket-keys" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"keys":["some-key"]}`))
+		} else {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("not-json"))
+		}
+	}))
+	defer srv.Close()
+
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	err := h.pullVnodeRange(addr, 1)
+	if err == nil {
+		t.Error("expected error from pullVnodeRange when sync/keys fetch fails")
+	}
+}
+
+func TestPushKeysToSuccessors_NonAliveMemberInRing(t *testing.T) {
+	r := ring.NewRing(10)
+	ml := gossip.NewMemberList("node1", "localhost", nil)
+	s := store.New()
+	transport, err := gossip.NewTransport("0")
+	if err != nil {
+		t.Fatalf("transport: %v", err)
+	}
+	t.Cleanup(func() { transport.Stop() })
+	g := gossip.NewGossiper("node1", "0", ml, transport)
+	h := NewHandler(r, ml, g, s, "node1", 2, 1, 1, time.Second, nil)
+
+	r.AddNode("node1", "127.0.0.1:0")
+	r.AddNode("node2", "127.0.0.2:0")
+	ml.Add("node2", "127.0.0.2:0")
+	ml.MarkDead("node2")
+
+	s.Put("some-key", "v", store.VectorClockVersion{Clocks: map[string]uint64{"node1": 1}})
+
+	h.PushKeysToSuccessors() // must not push to dead node
+}
+
+func TestPushKeysToSuccessors_PushFails(t *testing.T) {
+	failSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "server error", http.StatusInternalServerError)
+	}))
+	defer failSrv.Close()
+	failAddr := strings.TrimPrefix(failSrv.URL, "http://")
+
+	r := ring.NewRing(10)
+	ml := gossip.NewMemberList("node1", "localhost", nil)
+	s := store.New()
+	transport, err := gossip.NewTransport("0")
+	if err != nil {
+		t.Fatalf("transport: %v", err)
+	}
+	t.Cleanup(func() { transport.Stop() })
+	g := gossip.NewGossiper("node1", "0", ml, transport)
+	h := NewHandler(r, ml, g, s, "node1", 2, 1, 1, time.Second, nil)
+
+	r.AddNode("node1", "127.0.0.1:0")
+	r.AddNode("node2", failAddr)
+	ml.Add("node2", failAddr)
+
+	s.Put("some-key", "v", store.VectorClockVersion{Clocks: map[string]uint64{"node1": 1}})
+
+	h.PushKeysToSuccessors() // push fails, must log and not panic
+}
