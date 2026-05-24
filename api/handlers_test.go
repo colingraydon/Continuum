@@ -1757,3 +1757,146 @@ func findKeyInOtherRange(otherRanges, selfRanges []ring.VnodeRange) string {
 		}
 	}
 }
+// --- Coverage gap tests ---
+
+func TestPutKey_EmptyKey(t *testing.T) {
+	h := newTestHandler(t)
+	req := httptest.NewRequest(http.MethodPut, "/keys/", bytes.NewBufferString(`{"value":"v"}`))
+	w := httptest.NewRecorder()
+	h.PutKey(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for empty key, got %d", w.Code)
+	}
+}
+
+func TestPutKey_InvalidBody(t *testing.T) {
+	h := newTestHandler(t)
+	req := httptest.NewRequest(http.MethodPut, "/keys/mykey", bytes.NewBufferString("not-json"))
+	w := httptest.NewRecorder()
+	h.PutKey(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for invalid body, got %d", w.Code)
+	}
+}
+
+func TestDeleteKey_InvalidBody(t *testing.T) {
+	h := newTestHandler(t)
+	req := httptest.NewRequest(http.MethodDelete, "/keys/mykey", bytes.NewBufferString("not-json"))
+	w := httptest.NewRecorder()
+	h.DeleteKey(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for invalid body, got %d", w.Code)
+	}
+}
+
+func TestRepairReplicas_HTTPRepairTombstone(t *testing.T) {
+	h := newTestHandler(t)
+	var method string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method = r.Method
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	survivors := []SiblingResponse{{Deleted: true, Clocks: map[string]uint64{"n1": 2}}}
+	h.repairReplicas("mykey", survivors, map[string]string{"remote": addr})
+
+	if method != http.MethodDelete {
+		t.Errorf("expected DELETE for tombstone repair, got %q", method)
+	}
+}
+
+func TestRepairReplicas_HTTPRepairError(t *testing.T) {
+	h := newTestHandler(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	survivors := []SiblingResponse{{Value: "v", Clocks: map[string]uint64{"n1": 1}}}
+	h.repairReplicas("mykey", survivors, map[string]string{"remote": addr}) // error is only logged
+}
+
+func TestGetNode_AllNodesBootstrapping(t *testing.T) {
+	h := newTestHandler(t)
+	h.memberList.Add("nodeA", "10.0.0.1:8080")
+	h.memberList.Add("nodeB", "10.0.0.2:8080")
+	h.memberList.SetBootstrapping("nodeA", true)
+	h.memberList.SetBootstrapping("nodeB", true)
+
+	req := httptest.NewRequest(http.MethodGet, "/keys/anykey", nil)
+	w := httptest.NewRecorder()
+	h.GetNode(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 when all read nodes are bootstrapping, got %d", w.Code)
+	}
+}
+
+func TestDeliverHints_DirectNilHintStore(t *testing.T) {
+	h := newTestHandler(t) // hintStore is nil
+	h.DeliverHints("node1", "10.0.0.1:8080") // must not panic
+}
+
+func TestDeliverHints_DirectEmptyHints(t *testing.T) {
+	r := ring.NewRing(10)
+	ml := newTestMemberList(r)
+	s := store.New()
+	hs := hintstore.New(100, time.Hour)
+	h := NewHandler(r, ml, s, HandlerConfig{SelfID: "self", ReplicationFactor: 1, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, hs)
+	// No hints buffered for this node; Drain returns empty.
+	h.DeliverHints("no-hints-node", "10.0.0.1:8080") // must not panic
+}
+
+func TestDeliverHints_DirectDeliveryError(t *testing.T) {
+	r := ring.NewRing(10)
+	ml := newTestMemberList(r)
+	s := store.New()
+	hs := hintstore.New(100, time.Hour)
+	h := NewHandler(r, ml, s, HandlerConfig{SelfID: "self", ReplicationFactor: 1, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, hs)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	hs.Store("fail-node", hintstore.Hint{
+		Key:    "k",
+		Value:  "v",
+		Clocks: map[string]uint64{"self": 1},
+		At:     time.Now(),
+	})
+	h.DeliverHints("fail-node", addr) // error is only logged, must not panic
+}
+
+func TestBufferHints_RemainingGoroutine(t *testing.T) {
+	r := ring.NewRing(10)
+	ml := newTestMemberList(r)
+	s := store.New()
+	hs := hintstore.New(100, time.Hour)
+	h := NewHandler(r, ml, s, HandlerConfig{SelfID: "self", ReplicationFactor: 1, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, hs)
+
+	ch := make(chan replicaResult, 1)
+	ch <- replicaResult{nodeID: "late-node", err: fmt.Errorf("timeout")}
+
+	h.bufferHints(
+		hintstore.Hint{Key: "k", Value: "v", Clocks: map[string]uint64{"self": 1}},
+		nil, 1, ch,
+	)
+
+	// Goroutine drains ch and stores the hint asynchronously.
+	deadline := time.Now().Add(100 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if len(hs.PendingNodes()) > 0 {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	if nodes := hs.PendingNodes(); len(nodes) != 1 || nodes[0] != "late-node" {
+		t.Errorf("expected buffered hint for late-node, got %v", nodes)
+	}
+}

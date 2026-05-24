@@ -740,3 +740,46 @@ func TestGetVnodeRange_WrapAroundSingleNode(t *testing.T) {
 		t.Error("expected at least one wrapping range for single-node ring")
 	}
 }
+func TestGetReplicationNodes_FactorOne(t *testing.T) {
+	r := NewRing(50)
+	r.AddNode("node1", "10.0.0.1")
+	r.AddNode("node2", "10.0.0.2")
+
+	nodes := r.GetReplicationNodes("somekey", 1)
+	if len(nodes) != 1 {
+		t.Errorf("factor=1 should return exactly 1 node, got %d", len(nodes))
+	}
+}
+
+func TestGetReplicationNodesForHash_MaxHashWrapAround(t *testing.T) {
+	r := NewRing(50)
+	r.AddNode("node1", "10.0.0.1")
+	r.AddNode("node2", "10.0.0.2")
+
+	// ^uint32(0) is the max hash value, past all vnodes, so the ceiling loop
+	// finds nothing and the continuation must wrap to the beginning of the ring.
+	nodes := r.GetReplicationNodesForHash(^uint32(0), 2)
+	if len(nodes) != 2 {
+		t.Errorf("wrap-around should return 2 distinct nodes, got %d", len(nodes))
+	}
+}
+
+func TestWalkRingHealthy_WrapAround(t *testing.T) {
+	r := NewRing(50)
+	r.AddNode("node1", "10.0.0.1")
+	r.AddNode("node2", "10.0.0.2")
+	r.SetHealthFilter(func(id string) bool { return true })
+
+	// ^uint32(0) is past all vnode hashes; the ceiling loop finds nothing and
+	// the continuation loop must wrap around to the start of the ring.
+	r.mu.RLock()
+	node, found := r.walkRingHealthy(^uint32(0))
+	r.mu.RUnlock()
+
+	if !found {
+		t.Fatal("expected to find a healthy node after wrap-around")
+	}
+	if node == nil {
+		t.Error("expected non-nil node")
+	}
+}
