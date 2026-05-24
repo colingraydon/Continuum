@@ -2,7 +2,6 @@ package api
 
 import (
 	"net/http"
-	"time"
 
 	"github.com/colingraydon/continuum/internal/gossip"
 	"github.com/colingraydon/continuum/internal/hintstore"
@@ -38,6 +37,6 @@ func newMux(h *Handler) http.Handler {
 	return metricsMiddleware(mux)
 }
 
-func NewServer(r *ring.Ring, ml *gossip.MemberList, g *gossip.Gossiper, s *store.Store, selfID string, replicationFactor, writeQuorum, readQuorum int, replicaTimeout time.Duration, hs *hintstore.HintStore) http.Handler {
-	return newMux(NewHandler(r, ml, g, s, selfID, replicationFactor, writeQuorum, readQuorum, replicaTimeout, hs))
+func NewServer(r *ring.Ring, ml *gossip.MemberList, s *store.Store, cfg HandlerConfig, hs *hintstore.HintStore) http.Handler {
+	return newMux(NewHandler(r, ml, s, cfg, hs))
 }

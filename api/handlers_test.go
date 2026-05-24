@@ -28,21 +28,12 @@ func newTestMemberList(r *ring.Ring) *gossip.MemberList {
 	})
 }
 
-func newTestGossiper(t *testing.T, ml *gossip.MemberList) *gossip.Gossiper {
-	t.Helper()
-	transport, err := gossip.NewTransport("0")
-	if err != nil {
-		t.Fatalf("failed to create transport: %v", err)
-	}
-	t.Cleanup(func() { transport.Stop() })
-	return gossip.NewGossiper("self", "0", ml, transport)
-}
-
 func newTestHandler(t *testing.T) *Handler {
+	t.Helper()
 	r := ring.NewRing(10)
 	ml := newTestMemberList(r)
 	s := store.New()
-	return NewHandler(r, ml, newTestGossiper(t, ml), s, "self", 3, 1, 1, time.Second, nil)
+	return NewHandler(r, ml, s, HandlerConfig{SelfID: "self", ReplicationFactor: 3, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, nil)
 }
 
 func TestAddNode(t *testing.T) {
@@ -519,15 +510,9 @@ func newHandlerWithSlowReplica(t *testing.T, replicaTimeout, hangFor time.Durati
 			r.RemoveNode(m.ID)
 		}
 	})
-	transport, err := gossip.NewTransport("0")
-	if err != nil {
-		t.Fatalf("failed to create transport: %v", err)
-	}
-	t.Cleanup(func() { transport.Stop() })
-	g := gossip.NewGossiper("self", "0", ml, transport)
 	// writeQuorum=2, readQuorum=2: self counts as one, slow replica must ack for quorum.
 	s := store.New()
-	h := NewHandler(r, ml, g, s, "self", 3, 2, 2, replicaTimeout, nil)
+	h := NewHandler(r, ml, s, HandlerConfig{SelfID: "self", ReplicationFactor: 3, WriteQuorum: 2, ReadQuorum: 2, ReplicaTimeout: replicaTimeout}, nil)
 
 	replicaAddr := strings.TrimPrefix(slow.URL, "http://")
 	ml.Add("self", "localhost:8080")
@@ -1068,27 +1053,7 @@ func TestGetSyncBucketKeysExcludesWrongVnodeRange(t *testing.T) {
 	}
 
 	// Find a key that falls in other's range (not self's).
-	var outsideKey string
-	for i := 0; ; i++ {
-		k := fmt.Sprintf("out-%d", i)
-		kh := merkle.HashKey(k)
-		inOther := false
-		inSelf := false
-		for _, vr := range otherRanges {
-			if vr.Contains(kh) {
-				inOther = true
-			}
-		}
-		for _, vr := range selfRanges {
-			if vr.Contains(kh) {
-				inSelf = true
-			}
-		}
-		if inOther && !inSelf {
-			outsideKey = k
-			break
-		}
-	}
+	outsideKey := findKeyInOtherRange(otherRanges, selfRanges)
 	h.store.Put(outsideKey, "v", store.VectorClockVersion{Clocks: map[string]uint64{"self": 1}})
 
 	// Query self's first vnode range — the outside key must not appear.
@@ -1481,7 +1446,7 @@ func TestFlushHints_NodeNotInMemberList(t *testing.T) {
 	ml := newTestMemberList(r)
 	s := store.New()
 	hs := hintstore.New(100, time.Hour)
-	h := NewHandler(r, ml, newTestGossiper(t, ml), s, "self", 3, 1, 1, time.Second, hs)
+	h := NewHandler(r, ml, s, HandlerConfig{SelfID: "self", ReplicationFactor: 3, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, hs)
 
 	hs.Store("unknown-node", hintstore.Hint{
 		Key:    "k",
@@ -1502,7 +1467,7 @@ func TestFlushHints_NodeDeadInMemberList(t *testing.T) {
 	ml := newTestMemberList(r)
 	s := store.New()
 	hs := hintstore.New(100, time.Hour)
-	h := NewHandler(r, ml, newTestGossiper(t, ml), s, "self", 3, 1, 1, time.Second, hs)
+	h := NewHandler(r, ml, s, HandlerConfig{SelfID: "self", ReplicationFactor: 3, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, hs)
 
 	ml.Add("dead-node", "10.0.0.99")
 	ml.MarkDead("dead-node")
@@ -1525,20 +1490,14 @@ func TestDeliverHints_DeletedHint(t *testing.T) {
 	targetRing := ring.NewRing(10)
 	targetML := gossip.NewMemberList("target", "localhost", nil)
 	targetStore := store.New()
-	targetTransport, err := gossip.NewTransport("0")
-	if err != nil {
-		t.Fatalf("failed to create transport: %v", err)
-	}
-	defer targetTransport.Stop()
-	targetGossiper := gossip.NewGossiper("target", "0", targetML, targetTransport)
-	targetSrv := httptest.NewServer(NewServer(targetRing, targetML, targetGossiper, targetStore, "target", 1, 1, 1, time.Second, nil))
+	targetSrv := httptest.NewServer(NewServer(targetRing, targetML, targetStore, HandlerConfig{SelfID: "target", ReplicationFactor: 1, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, nil))
 	defer targetSrv.Close()
 
 	r := ring.NewRing(10)
 	ml := newTestMemberList(r)
 	s := store.New()
 	hs := hintstore.New(100, time.Hour)
-	h := NewHandler(r, ml, newTestGossiper(t, ml), s, "self", 3, 1, 1, time.Second, hs)
+	h := NewHandler(r, ml, s, HandlerConfig{SelfID: "self", ReplicationFactor: 3, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, hs)
 
 	targetAddr := targetSrv.Listener.Addr().String()
 	ml.Add("target-node", targetAddr)
@@ -1561,20 +1520,14 @@ func TestFlushHints_AliveNodeDeliversHints(t *testing.T) {
 	targetRing := ring.NewRing(10)
 	targetML := gossip.NewMemberList("target", "localhost", nil)
 	targetStore := store.New()
-	targetTransport, err := gossip.NewTransport("0")
-	if err != nil {
-		t.Fatalf("failed to create transport: %v", err)
-	}
-	defer targetTransport.Stop()
-	targetGossiper := gossip.NewGossiper("target", "0", targetML, targetTransport)
-	targetSrv := httptest.NewServer(NewServer(targetRing, targetML, targetGossiper, targetStore, "target", 1, 1, 1, time.Second, nil))
+	targetSrv := httptest.NewServer(NewServer(targetRing, targetML, targetStore, HandlerConfig{SelfID: "target", ReplicationFactor: 1, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, nil))
 	defer targetSrv.Close()
 
 	r := ring.NewRing(10)
 	ml := newTestMemberList(r)
 	s := store.New()
 	hs := hintstore.New(100, time.Hour)
-	h := NewHandler(r, ml, newTestGossiper(t, ml), s, "self", 3, 1, 1, time.Second, hs)
+	h := NewHandler(r, ml, s, HandlerConfig{SelfID: "self", ReplicationFactor: 3, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, hs)
 
 	targetAddr := targetSrv.Listener.Addr().String()
 	ml.Add("target-node", targetAddr)
@@ -1779,5 +1732,28 @@ func TestGetSyncKeys_MissingKeys(t *testing.T) {
 	}
 	if len(resp.Entries) != 0 {
 		t.Errorf("expected empty entries for missing keys, got %v", resp.Entries)
+	}
+}
+
+// findKeyInOtherRange returns the first key that falls in otherRanges but not
+// in selfRanges, by iterating candidate keys until one is found.
+func findKeyInOtherRange(otherRanges, selfRanges []ring.VnodeRange) string {
+	for i := 0; ; i++ {
+		k := fmt.Sprintf("out-%d", i)
+		kh := merkle.HashKey(k)
+		inOther, inSelf := false, false
+		for _, vr := range otherRanges {
+			if vr.Contains(kh) {
+				inOther = true
+			}
+		}
+		for _, vr := range selfRanges {
+			if vr.Contains(kh) {
+				inSelf = true
+			}
+		}
+		if inOther && !inSelf {
+			return k
+		}
 	}
 }

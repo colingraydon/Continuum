@@ -30,17 +30,9 @@ func newSyncNode(t *testing.T, nodeID string) (*ring.Ring, *store.Store, *httpte
 			r.RemoveNode(m.ID)
 		}
 	})
-	transport, err := gossip.NewTransport("0")
-	if err != nil {
-		t.Fatalf("failed to create transport: %v", err)
-	}
-	g := gossip.NewGossiper(nodeID, "0", ml, transport)
 	s := store.New()
-	srv := httptest.NewServer(api.NewServer(r, ml, g, s, nodeID, 2, 1, 1, time.Second, nil))
-	t.Cleanup(func() {
-		srv.Close()
-		transport.Stop()
-	})
+	srv := httptest.NewServer(api.NewServer(r, ml, s, api.HandlerConfig{SelfID: nodeID, ReplicationFactor: 2, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, nil))
+	t.Cleanup(func() { srv.Close() })
 	return r, s, srv
 }
 
@@ -297,23 +289,28 @@ func TestUnion(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := union(tc.a, tc.b)
-			if len(got) != len(tc.want) {
-				t.Fatalf("union(%v, %v) = %v, want %v", tc.a, tc.b, got, tc.want)
-			}
-			seen := make(map[string]bool, len(got))
-			for _, k := range got {
-				if seen[k] {
-					t.Errorf("duplicate key %q in union result", k)
-				}
-				seen[k] = true
-			}
-			for _, k := range tc.want {
-				if !seen[k] {
-					t.Errorf("expected key %q missing from union result %v", k, got)
-				}
-			}
+			checkUnion(t, tc.a, tc.b, tc.want)
 		})
+	}
+}
+
+func checkUnion(t *testing.T, a, b, want []string) {
+	t.Helper()
+	got := union(a, b)
+	if len(got) != len(want) {
+		t.Fatalf("union(%v, %v) = %v, want %v", a, b, got, want)
+	}
+	seen := make(map[string]bool, len(got))
+	for _, k := range got {
+		if seen[k] {
+			t.Errorf("duplicate key %q in union result", k)
+		}
+		seen[k] = true
+	}
+	for _, k := range want {
+		if !seen[k] {
+			t.Errorf("expected key %q missing from union result %v", k, got)
+		}
 	}
 }
 

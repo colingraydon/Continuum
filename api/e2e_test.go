@@ -32,17 +32,9 @@ func newNamedTestServerQ(t *testing.T, selfID string, rf, wq, rq int) *httptest.
 			r.RemoveNode(m.ID)
 		}
 	})
-	transport, err := gossip.NewTransport("0")
-	if err != nil {
-		t.Fatalf("failed to create transport: %v", err)
-	}
-	g := gossip.NewGossiper(selfID, "0", ml, transport)
 	s := store.New()
-	srv := httptest.NewServer(NewServer(r, ml, g, s, selfID, rf, wq, rq, time.Second, nil))
-	t.Cleanup(func() {
-		srv.Close()
-		transport.Stop()
-	})
+	srv := httptest.NewServer(NewServer(r, ml, s, HandlerConfig{SelfID: selfID, ReplicationFactor: rf, WriteQuorum: wq, ReadQuorum: rq, ReplicaTimeout: time.Second}, nil))
+	t.Cleanup(func() { srv.Close() })
 	return srv
 }
 
@@ -57,17 +49,9 @@ func newTestServer(t *testing.T) *httptest.Server {
 			r.RemoveNode(m.ID)
 		}
 	})
-	transport, err := gossip.NewTransport("0")
-	if err != nil {
-		t.Fatalf("failed to create transport: %v", err)
-	}
-	g := gossip.NewGossiper("self", "0", ml, transport)
 	s := store.New()
-	srv := httptest.NewServer(NewServer(r, ml, g, s, "self", 3, 1, 1, time.Second, nil))
-	t.Cleanup(func() {
-		srv.Close()
-		transport.Stop()
-	})
+	srv := httptest.NewServer(NewServer(r, ml, s, HandlerConfig{SelfID: "self", ReplicationFactor: 3, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, nil))
+	t.Cleanup(func() { srv.Close() })
 	return srv
 }
 
@@ -649,18 +633,10 @@ func newHintTestNode(t *testing.T, selfID string, hs *hintstore.HintStore) (*htt
 			r.RemoveNode(m.ID)
 		}
 	})
-	transport, err := gossip.NewTransport("0")
-	if err != nil {
-		t.Fatalf("failed to create transport: %v", err)
-	}
-	g := gossip.NewGossiper(selfID, "0", ml, transport)
 	s := store.New()
-	h := NewHandler(r, ml, g, s, selfID, 3, 2, 2, time.Second, hs)
+	h := NewHandler(r, ml, s, HandlerConfig{SelfID: selfID, ReplicationFactor: 3, WriteQuorum: 2, ReadQuorum: 2, ReplicaTimeout: time.Second}, hs)
 	srv := httptest.NewServer(newMux(h))
-	t.Cleanup(func() {
-		srv.Close()
-		transport.Stop()
-	})
+	t.Cleanup(func() { srv.Close() })
 	return srv, h
 }
 
@@ -834,24 +810,9 @@ func TestE2EReadRepair(t *testing.T) {
 		defer r2.Body.Close()
 	}
 
-	seedWrite := func(srvURL, value, clocksJSON string) {
-		t.Helper()
-		body := fmt.Sprintf(`{"value":%q,"clocks":%s}`, value, clocksJSON)
-		req, err := http.NewRequest(http.MethodPut, srvURL+"/keys/rr-key", strings.NewReader(body))
-		if err != nil {
-			t.Fatalf("create request: %v", err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-Proxied-From", "test")
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatalf("seed write: %v", err)
-		}
-		defer resp.Body.Close()
-	}
 	// node1 is stale (old clock); node2 has the dominant version.
-	seedWrite(node1Srv.URL, "old", `{"node1":1}`)
-	seedWrite(node2Srv.URL, "new", `{"node1":1,"node2":1}`)
+	seedDirectWrite(t, node1Srv.URL, "old", `{"node1":1}`)
+	seedDirectWrite(t, node2Srv.URL, "new", `{"node1":1,"node2":1}`)
 
 	// Quorum GET from node1 reads both replicas, returns the newer value, and
 	// fires an async goroutine to repair node1's local store.
@@ -959,4 +920,20 @@ func TestE2EConflictSurfacing(t *testing.T) {
 	if resolved.Value != "resolved" {
 		t.Errorf("expected 'resolved' after conflict resolution, got %q (siblings=%v)", resolved.Value, resolved.Siblings)
 	}
+}
+
+func seedDirectWrite(t *testing.T, srvURL, value, clocksJSON string) {
+	t.Helper()
+	body := fmt.Sprintf(`{"value":%q,"clocks":%s}`, value, clocksJSON)
+	req, err := http.NewRequest(http.MethodPut, srvURL+"/keys/rr-key", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Proxied-From", "test")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("seed write: %v", err)
+	}
+	defer resp.Body.Close()
 }
