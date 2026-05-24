@@ -34,110 +34,87 @@ type config struct {
 	selfWeight        float64
 }
 
+func getEnvInt(key string, dflt int) int {
+	if val := os.Getenv(key); val != "" {
+		if parsed, err := strconv.Atoi(val); err == nil {
+			return parsed
+		}
+	}
+	return dflt
+}
+
+func getEnvPositiveInt(key string, dflt int) int {
+	if val := os.Getenv(key); val != "" {
+		if parsed, err := strconv.Atoi(val); err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return dflt
+}
+
+func getEnvFloat64(key string, dflt float64) float64 {
+	if val := os.Getenv(key); val != "" {
+		if parsed, err := strconv.ParseFloat(val, 64); err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return dflt
+}
+
+func getEnvDurationMs(key string, dflt time.Duration) time.Duration {
+	if val := os.Getenv(key); val != "" {
+		if parsed, err := strconv.Atoi(val); err == nil && parsed > 0 {
+			return time.Duration(parsed) * time.Millisecond
+		}
+	}
+	return dflt
+}
+
+func getEnvString(key, dflt string) string {
+	if val := os.Getenv(key); val != "" {
+		return val
+	}
+	return dflt
+}
+
 func loadConfig() config {
-	replicas := 150
-	if val := os.Getenv("REPLICAS"); val != "" {
-		if parsed, err := strconv.Atoi(val); err == nil {
-			replicas = parsed
-		}
-	}
-
-	replicationFactor := 3
-	if val := os.Getenv("REPLICATION_FACTOR"); val != "" {
-		if parsed, err := strconv.Atoi(val); err == nil {
-			replicationFactor = parsed
-		}
-	}
-
-	// Default quorum is majority: floor(RF/2) + 1. For RF=3 → 2, RF=1 → 1.
+	replicationFactor := getEnvInt("REPLICATION_FACTOR", 3)
 	defaultQuorum := replicationFactor/2 + 1
-
-	writeQuorum := defaultQuorum
-	if val := os.Getenv("WRITE_QUORUM"); val != "" {
-		if parsed, err := strconv.Atoi(val); err == nil && parsed > 0 {
-			writeQuorum = parsed
-		}
-	}
-
-	readQuorum := defaultQuorum
-	if val := os.Getenv("READ_QUORUM"); val != "" {
-		if parsed, err := strconv.Atoi(val); err == nil && parsed > 0 {
-			readQuorum = parsed
-		}
-	}
+	writeQuorum := getEnvPositiveInt("WRITE_QUORUM", defaultQuorum)
+	readQuorum := getEnvPositiveInt("READ_QUORUM", defaultQuorum)
 
 	if writeQuorum > replicationFactor {
 		log.Fatalf("WRITE_QUORUM (%d) exceeds REPLICATION_FACTOR (%d): writes will always fail", writeQuorum, replicationFactor)
 	}
-
 	if readQuorum > replicationFactor {
 		log.Fatalf("READ_QUORUM (%d) exceeds REPLICATION_FACTOR (%d): reads will always fail", readQuorum, replicationFactor)
 	}
 
-	selfAddress := os.Getenv("SELF_ADDRESS")
-	if selfAddress == "" {
-		selfAddress = "localhost:8080"
-	}
-
-	selfID := os.Getenv("SELF_ID")
-	if selfID == "" {
-		selfID = selfAddress
-	}
-
-	gossipPort := os.Getenv("GOSSIP_PORT")
-	if gossipPort == "" {
-		gossipPort = "8081"
-	}
-
+	selfAddress := getEnvString("SELF_ADDRESS", "localhost:8080")
 	var seedNodes []string
 	if val := os.Getenv("SEED_NODES"); val != "" {
 		seedNodes = strings.Split(val, ",")
 	}
 
-	replicaTimeout := 500 * time.Millisecond
-	if val := os.Getenv("REPLICA_TIMEOUT_MS"); val != "" {
-		if parsed, err := strconv.Atoi(val); err == nil && parsed > 0 {
-			replicaTimeout = time.Duration(parsed) * time.Millisecond
-		}
-	}
-
-	selfWeight := 1.0
-	if val := os.Getenv("SELF_WEIGHT"); val != "" {
-		if parsed, err := strconv.ParseFloat(val, 64); err == nil && parsed > 0 {
-			selfWeight = parsed
-		}
-	}
-
 	return config{
-		replicas:          replicas,
+		replicas:          getEnvInt("REPLICAS", 150),
 		replicationFactor: replicationFactor,
 		writeQuorum:       writeQuorum,
 		readQuorum:        readQuorum,
-		selfID:            selfID,
+		selfID:            getEnvString("SELF_ID", selfAddress),
 		selfAddress:       selfAddress,
-		gossipPort:        gossipPort,
+		gossipPort:        getEnvString("GOSSIP_PORT", "8081"),
 		seedNodes:         seedNodes,
-		replicaTimeout:    replicaTimeout,
-		selfWeight:        selfWeight,
+		replicaTimeout:    getEnvDurationMs("REPLICA_TIMEOUT_MS", 500*time.Millisecond),
+		selfWeight:        getEnvFloat64("SELF_WEIGHT", 1.0),
 	}
 }
 
-func main() {
-	cfg := loadConfig()
-
-	r := ring.NewRing(cfg.replicas)
-	r.SetUpdateCallback(func(nodeCount, vnodeCount int) {
-		api.UpdateRingMetrics(nodeCount, vnodeCount)
-	})
-
-	hs := hintstore.New(10_000, time.Hour)
-
-	// hptr lets the gossip onChange callback reference the Handler without a
-	// circular dependency: the callback is registered before the Handler is
-	// created, but DeliverHints is only called after hptr is populated.
-	var hptr atomic.Pointer[api.Handler]
-
-	ml := gossip.NewMemberList(cfg.selfID, cfg.selfAddress, func(m *gossip.Member, status gossip.MemberStatus) {
+// makeMemberChangeCallback returns the gossip onChange handler. hptr is an
+// atomic pointer so the callback can reference the Handler before it exists —
+// the pointer is populated after NewHandler returns.
+func makeMemberChangeCallback(r *ring.Ring, hptr *atomic.Pointer[api.Handler]) func(*gossip.Member, gossip.MemberStatus) {
+	return func(m *gossip.Member, status gossip.MemberStatus) {
 		log.Printf("member %s status changed to %s", m.ID, status)
 		switch status {
 		case gossip.MemberAlive:
@@ -153,7 +130,35 @@ func main() {
 				go h.CleanupStaleKeys()
 			}
 		}
+	}
+}
+
+func runHintExpiry(ctx context.Context, hs *hintstore.HintStore) {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			hs.ExpireOld()
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func main() {
+	cfg := loadConfig()
+
+	r := ring.NewRing(cfg.replicas)
+	r.SetUpdateCallback(func(nodeCount, vnodeCount int) {
+		api.UpdateRingMetrics(nodeCount, vnodeCount)
 	})
+
+	hs := hintstore.New(10_000, time.Hour)
+
+	var hptr atomic.Pointer[api.Handler]
+
+	ml := gossip.NewMemberList(cfg.selfID, cfg.selfAddress, makeMemberChangeCallback(r, &hptr))
 	ml.SetSelfWeight(cfg.selfWeight)
 
 	r.SetHealthFilter(func(id string) bool {
@@ -195,22 +200,16 @@ func main() {
 	s.SetOnEvict(ae.RemoveFromTrees)
 	ae.Start(ctx)
 
-	h := api.NewHandler(r, ml, g, s, cfg.selfID, cfg.replicationFactor, cfg.writeQuorum, cfg.readQuorum, cfg.replicaTimeout, hs)
+	h := api.NewHandler(r, ml, s, api.HandlerConfig{
+		SelfID:            cfg.selfID,
+		ReplicationFactor: cfg.replicationFactor,
+		WriteQuorum:       cfg.writeQuorum,
+		ReadQuorum:        cfg.readQuorum,
+		ReplicaTimeout:    cfg.replicaTimeout,
+	}, hs)
 	hptr.Store(h)
 
-	// Expire stale hints periodically so memory is bounded for long-down nodes.
-	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				hs.ExpireOld()
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
+	go runHintExpiry(ctx, hs)
 
 	mux := api.BuildMux(h)
 	srv := &http.Server{Addr: ":" + httpPort, Handler: mux}

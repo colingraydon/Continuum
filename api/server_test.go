@@ -36,14 +36,8 @@ func TestRoutes(t *testing.T) {
 			r.RemoveNode(m.ID)
 		}
 	})
-	transport, err := gossip.NewTransport("0")
-	if err != nil {
-		t.Fatalf("failed to create transport: %v", err)
-	}
-	defer transport.Stop()
-	g := gossip.NewGossiper("self", "0", ml, transport)
 	s := store.New()
-	srv := NewServer(r, ml, g, s, "self", 3, 1, 1, time.Second, nil)
+	srv := NewServer(r, ml, s, HandlerConfig{SelfID: "self", ReplicationFactor: 3, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, nil)
 
 	tests := []struct {
 		name   string

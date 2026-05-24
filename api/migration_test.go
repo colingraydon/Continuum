@@ -25,18 +25,10 @@ func newMigrationTestNode(t *testing.T, selfID string, rf, wq, rq int) (*httptes
 			r.RemoveNode(m.ID)
 		}
 	})
-	transport, err := gossip.NewTransport("0")
-	if err != nil {
-		t.Fatalf("transport: %v", err)
-	}
-	g := gossip.NewGossiper(selfID, "0", ml, transport)
 	s := store.New()
-	h := NewHandler(r, ml, g, s, selfID, rf, wq, rq, time.Second, nil)
+	h := NewHandler(r, ml, s, HandlerConfig{SelfID: selfID, ReplicationFactor: rf, WriteQuorum: wq, ReadQuorum: rq, ReplicaTimeout: time.Second}, nil)
 	srv := httptest.NewServer(newMux(h))
-	t.Cleanup(func() {
-		srv.Close()
-		transport.Stop()
-	})
+	t.Cleanup(func() { srv.Close() })
 	return srv, h
 }
 
@@ -288,7 +280,7 @@ func TestBootstrappingNodeRejectedAsCoordinator(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PUT failed: %v", err)
 	}
-	closeBody(t, resp)
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Errorf("expected 503 for coordinator PUT during bootstrap, got %d", resp.StatusCode)
 	}
@@ -298,7 +290,7 @@ func TestBootstrappingNodeRejectedAsCoordinator(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET failed: %v", err)
 	}
-	closeBody(t, getResp)
+	defer getResp.Body.Close()
 	if getResp.StatusCode != http.StatusServiceUnavailable {
 		t.Errorf("expected 503 for coordinator GET during bootstrap, got %d", getResp.StatusCode)
 	}
@@ -312,7 +304,7 @@ func TestBootstrappingNodeRejectedAsCoordinator(t *testing.T) {
 	if err != nil {
 		t.Fatalf("replica PUT failed: %v", err)
 	}
-	closeBody(t, resp2)
+	defer resp2.Body.Close()
 	if resp2.StatusCode != http.StatusNoContent {
 		t.Errorf("expected 204 for replica PUT during bootstrap, got %d", resp2.StatusCode)
 	}
@@ -351,9 +343,7 @@ func TestBootstrappingNodeExcludedFromReads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET failed: %v", err)
 	}
-
-	closeBody(t, getResp)
-	
+	defer getResp.Body.Close()
 	if getResp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", getResp.StatusCode)
 	}
@@ -407,13 +397,7 @@ func TestBootstrap_PullError(t *testing.T) {
 	r := ring.NewRing(10)
 	ml := gossip.NewMemberList("joining", "localhost", nil)
 	s := store.New()
-	transport, err := gossip.NewTransport("0")
-	if err != nil {
-		t.Fatalf("transport: %v", err)
-	}
-	t.Cleanup(func() { transport.Stop() })
-	g := gossip.NewGossiper("joining", "0", ml, transport)
-	h := NewHandler(r, ml, g, s, "joining", 2, 1, 1, time.Second, nil)
+	h := NewHandler(r, ml, s, HandlerConfig{SelfID: "joining", ReplicationFactor: 2, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, nil)
 	r.AddNode("existing", deadAddr)
 	r.AddNode("joining", "127.0.0.1:0")
 
@@ -540,13 +524,7 @@ func TestPushKeysToSuccessors_NonAliveMemberInRing(t *testing.T) {
 	r := ring.NewRing(10)
 	ml := gossip.NewMemberList("node1", "localhost", nil)
 	s := store.New()
-	transport, err := gossip.NewTransport("0")
-	if err != nil {
-		t.Fatalf("transport: %v", err)
-	}
-	t.Cleanup(func() { transport.Stop() })
-	g := gossip.NewGossiper("node1", "0", ml, transport)
-	h := NewHandler(r, ml, g, s, "node1", 2, 1, 1, time.Second, nil)
+	h := NewHandler(r, ml, s, HandlerConfig{SelfID: "node1", ReplicationFactor: 2, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, nil)
 
 	r.AddNode("node1", "127.0.0.1:0")
 	r.AddNode("node2", "127.0.0.2:0")
@@ -568,13 +546,7 @@ func TestPushKeysToSuccessors_PushFails(t *testing.T) {
 	r := ring.NewRing(10)
 	ml := gossip.NewMemberList("node1", "localhost", nil)
 	s := store.New()
-	transport, err := gossip.NewTransport("0")
-	if err != nil {
-		t.Fatalf("transport: %v", err)
-	}
-	t.Cleanup(func() { transport.Stop() })
-	g := gossip.NewGossiper("node1", "0", ml, transport)
-	h := NewHandler(r, ml, g, s, "node1", 2, 1, 1, time.Second, nil)
+	h := NewHandler(r, ml, s, HandlerConfig{SelfID: "node1", ReplicationFactor: 2, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, nil)
 
 	r.AddNode("node1", "127.0.0.1:0")
 	r.AddNode("node2", failAddr)

@@ -32,6 +32,21 @@ func (h *Handler) Bootstrap() {
 	log.Printf("migration: bootstrap complete")
 }
 
+// applyEntries merges a map of key→siblings into the local store using the
+// standard vector clock path. Used during bootstrap bucket pulls.
+func (h *Handler) applyEntries(entries map[string][]SyncSibling) {
+	for key, sibs := range entries {
+		for _, sib := range sibs {
+			v := store.VectorClockVersion{Clocks: sib.Clocks}
+			if sib.Deleted {
+				h.store.Delete(key, v)
+			} else {
+				h.store.Put(key, sib.Value, v)
+			}
+		}
+	}
+}
+
 // pullVnodeRange fetches all keys in the vnode range ending at vnodeHash from
 // srcAddr by iterating all 16 Merkle buckets and merging each entry into the
 // local store via the standard vector clock path.
@@ -48,18 +63,36 @@ func (h *Handler) pullVnodeRange(srcAddr string, vnodeHash uint32) error {
 		if err != nil {
 			return fmt.Errorf("bucket %d entries: %w", b, err)
 		}
-		for key, sibs := range entries {
-			for _, sib := range sibs {
-				v := store.VectorClockVersion{Clocks: sib.Clocks}
-				if sib.Deleted {
-					h.store.Delete(key, v)
-				} else {
-					h.store.Put(key, sib.Value, v)
-				}
-			}
-		}
+		h.applyEntries(entries)
 	}
 	return nil
+}
+
+// collectKeyForPush adds the given key's siblings to toPush, keyed by the
+// address of each alive non-self replica that owns the key.
+func (h *Handler) collectKeyForPush(key string, toPush map[string]map[string][]SyncSibling) {
+	entry, ok := h.store.Get(key)
+	if !ok {
+		return
+	}
+	sibs := make([]SyncSibling, len(entry.Siblings))
+	for i, sib := range entry.Siblings {
+		sibs[i] = SyncSibling{Value: sib.Value, Deleted: sib.Deleted, Clocks: sib.Version.Clocks}
+	}
+	nodes := h.ring.GetReplicationNodes(key, h.replicationFactor)
+	for _, n := range nodes {
+		if n.ID == h.selfID {
+			continue
+		}
+		m, ok := h.memberList.Get(n.ID)
+		if !ok || m.Status != gossip.MemberAlive {
+			continue
+		}
+		if toPush[m.Address] == nil {
+			toPush[m.Address] = make(map[string][]SyncSibling)
+		}
+		toPush[m.Address][key] = sibs
+	}
 }
 
 // PushKeysToSuccessors sends all locally-held keys to the alive replica nodes
@@ -67,30 +100,8 @@ func (h *Handler) pullVnodeRange(srcAddr string, vnodeHash uint32) error {
 // HTTP drain so data survives a planned node departure.
 func (h *Handler) PushKeysToSuccessors() {
 	toPush := make(map[string]map[string][]SyncSibling) // addr → key → siblings
-
 	for key := range h.store.KeyHashes() {
-		entry, ok := h.store.Get(key)
-		if !ok {
-			continue
-		}
-		sibs := make([]SyncSibling, len(entry.Siblings))
-		for i, sib := range entry.Siblings {
-			sibs[i] = SyncSibling{Value: sib.Value, Deleted: sib.Deleted, Clocks: sib.Version.Clocks}
-		}
-		nodes := h.ring.GetReplicationNodes(key, h.replicationFactor)
-		for _, n := range nodes {
-			if n.ID == h.selfID {
-				continue
-			}
-			m, ok := h.memberList.Get(n.ID)
-			if !ok || m.Status != gossip.MemberAlive {
-				continue
-			}
-			if toPush[m.Address] == nil {
-				toPush[m.Address] = make(map[string][]SyncSibling)
-			}
-			toPush[m.Address][key] = sibs
-		}
+		h.collectKeyForPush(key, toPush)
 	}
 
 	log.Printf("migration: pushing keys to %d successor nodes", len(toPush))

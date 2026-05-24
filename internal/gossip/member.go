@@ -85,6 +85,17 @@ func (ml *MemberList) IncrementHeartbeat() {
 	ml.self.UpdatedAt = time.Now()
 }
 
+func (ml *MemberList) notifyMemberChange(m *Member, ok bool, prevStatus MemberStatus, wasBootstrapping bool) {
+	if ml.onChange == nil {
+		return
+	}
+	if !ok || prevStatus != m.Status {
+		ml.onChange(m, m.Status)
+	} else if wasBootstrapping && !m.Bootstrapping {
+		ml.onChange(m, MemberBootstrapped)
+	}
+}
+
 func (ml *MemberList) Merge(incoming []*Member) {
 	ml.mu.Lock()
 	defer ml.mu.Unlock()
@@ -96,18 +107,12 @@ func (ml *MemberList) Merge(incoming []*Member) {
 		existing, ok := ml.members[m.ID]
 		if !ok || m.Heartbeat > existing.Heartbeat {
 			wasBootstrapping := ok && existing.Bootstrapping
-			previous := MemberAlive
+			prevStatus := MemberAlive
 			if ok {
-				previous = existing.Status
+				prevStatus = existing.Status
 			}
 			ml.members[m.ID] = m
-			if !ok || previous != m.Status {
-				if ml.onChange != nil {
-					ml.onChange(m, m.Status)
-				}
-			} else if wasBootstrapping && !m.Bootstrapping && ml.onChange != nil {
-				ml.onChange(m, MemberBootstrapped)
-			}
+			ml.notifyMemberChange(m, ok, prevStatus, wasBootstrapping)
 		}
 	}
 }

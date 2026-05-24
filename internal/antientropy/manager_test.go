@@ -2,6 +2,7 @@ package antientropy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -30,17 +31,9 @@ func newSyncNode(t *testing.T, nodeID string) (*ring.Ring, *store.Store, *httpte
 			r.RemoveNode(m.ID)
 		}
 	})
-	transport, err := gossip.NewTransport("0")
-	if err != nil {
-		t.Fatalf("failed to create transport: %v", err)
-	}
-	g := gossip.NewGossiper(nodeID, "0", ml, transport)
 	s := store.New()
-	srv := httptest.NewServer(api.NewServer(r, ml, g, s, nodeID, 2, 1, 1, time.Second, nil))
-	t.Cleanup(func() {
-		srv.Close()
-		transport.Stop()
-	})
+	srv := httptest.NewServer(api.NewServer(r, ml, s, api.HandlerConfig{SelfID: nodeID, ReplicationFactor: 2, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, nil))
+	t.Cleanup(func() { srv.Close() })
 	return r, s, srv
 }
 
@@ -297,23 +290,28 @@ func TestUnion(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := union(tc.a, tc.b)
-			if len(got) != len(tc.want) {
-				t.Fatalf("union(%v, %v) = %v, want %v", tc.a, tc.b, got, tc.want)
-			}
-			seen := make(map[string]bool, len(got))
-			for _, k := range got {
-				if seen[k] {
-					t.Errorf("duplicate key %q in union result", k)
-				}
-				seen[k] = true
-			}
-			for _, k := range tc.want {
-				if !seen[k] {
-					t.Errorf("expected key %q missing from union result %v", k, got)
-				}
-			}
+			checkUnion(t, tc.a, tc.b, tc.want)
 		})
+	}
+}
+
+func checkUnion(t *testing.T, a, b, want []string) {
+	t.Helper()
+	got := union(a, b)
+	if len(got) != len(want) {
+		t.Fatalf("union(%v, %v) = %v, want %v", a, b, got, want)
+	}
+	seen := make(map[string]bool, len(got))
+	for _, k := range got {
+		if seen[k] {
+			t.Errorf("duplicate key %q in union result", k)
+		}
+		seen[k] = true
+	}
+	for _, k := range want {
+		if !seen[k] {
+			t.Errorf("expected key %q missing from union result %v", k, got)
+		}
 	}
 }
 
@@ -449,5 +447,131 @@ func TestPushSyncEntries_NonOK(t *testing.T) {
 	})
 	if err == nil {
 		t.Error("expected error when server returns non-204")
+	}
+}
+
+func TestSyncRound_LogsErrorOnSyncFailure(t *testing.T) {
+	badSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer badSrv.Close()
+	badAddr := strings.TrimPrefix(badSrv.URL, "http://")
+
+	r1, s1, _ := newSyncNode(t, "node1")
+	r1.AddNode("node1", "127.0.0.1:0")
+	r1.AddNode("node2", badAddr)
+
+	key := firstPrimaryKey(r1, "node1")
+	s1.Put(key, "v", store.VectorClockVersion{Clocks: map[string]uint64{"node1": 1}})
+
+	mgr := New(r1, s1, "node1", 2, time.Second)
+	mgr.syncRound() // error to node2 is only logged, must not panic
+}
+
+func TestSyncWithReplica_FetchStateError(t *testing.T) {
+	badSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer badSrv.Close()
+	addr := strings.TrimPrefix(badSrv.URL, "http://")
+
+	r := ring.NewRing(50)
+	s := store.New()
+	mgr := New(r, s, "node1", 1, time.Second)
+
+	err := mgr.syncWithReplica(addr, 0, merkle.New())
+	if err == nil {
+		t.Error("expected error when fetching sync state fails")
+	}
+}
+
+func TestSyncWithReplica_SyncBucketError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sync" {
+			// Return a divergent bucket hash so bucket sync is triggered.
+			type stateResp struct {
+				Root    uint32   `json:"root"`
+				Buckets []uint32 `json:"buckets"`
+			}
+			buckets := make([]uint32, merkle.BucketCount)
+			buckets[0] = 99999 // differs from local (empty = 0)
+			if err := json.NewEncoder(w).Encode(stateResp{Root: 99999, Buckets: buckets}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+		} else {
+			http.Error(w, "boom", http.StatusInternalServerError)
+		}
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	r := ring.NewRing(50)
+	s := store.New()
+	mgr := New(r, s, "node1", 1, time.Second)
+
+	err := mgr.syncWithReplica(addr, 0, merkle.New())
+	if err == nil {
+		t.Error("expected error when syncBucket fails")
+	}
+}
+
+func TestSyncBucket_FetchBucketKeysError(t *testing.T) {
+	badSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer badSrv.Close()
+	addr := strings.TrimPrefix(badSrv.URL, "http://")
+
+	r := ring.NewRing(50)
+	s := store.New()
+	mgr := New(r, s, "node1", 1, time.Second)
+
+	err := mgr.syncBucket(addr, 0, merkle.New(), 0, make(map[string][]syncSibling))
+	if err == nil {
+		t.Error("expected error when fetching bucket keys fails")
+	}
+}
+
+func TestSyncBucket_NoKeys(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewEncoder(w).Encode(struct{ Keys []string }{Keys: nil}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	r := ring.NewRing(50)
+	s := store.New()
+	mgr := New(r, s, "node1", 1, time.Second)
+
+	// Local and remote both have no keys: allKeys = [] → early return nil.
+	err := mgr.syncBucket(addr, 0, merkle.New(), 0, make(map[string][]syncSibling))
+	if err != nil {
+		t.Errorf("expected nil error for empty bucket, got %v", err)
+	}
+}
+
+func TestSyncBucket_FetchSyncKeysError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			if err := json.NewEncoder(w).Encode(struct{ Keys []string }{Keys: []string{"key1"}}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+		} else {
+			http.Error(w, "boom", http.StatusInternalServerError)
+		}
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	r := ring.NewRing(50)
+	s := store.New()
+	mgr := New(r, s, "node1", 1, time.Second)
+
+	// fetchBucketKeys returns ["key1"]; fetchSyncKeys (POST) fails.
+	err := mgr.syncBucket(addr, 0, merkle.New(), 0, make(map[string][]syncSibling))
+	if err == nil {
+		t.Error("expected error when fetching sync keys fails")
 	}
 }

@@ -24,7 +24,7 @@ func NewRing(replicas int) *Ring {
 		replicas:    replicas,
 		vnodeCounts: make(map[string]int),
 		keyCounts:   make(map[string]*atomic.Int64),
-		onUpdate:    func(nodeCount, vnodeCount int) {},
+		onUpdate:    func(nodeCount, vnodeCount int) { /* no-op until caller registers a callback */ },
 	}
 }
 
@@ -84,6 +84,86 @@ func (r *Ring) RemoveNode(id string) {
 	r.onUpdate(len(r.nodes), r.tree.Tree.Size())
 }
 
+// walkRing walks the ring clockwise from hash, collecting up to factor unique
+// nodes. Must be called with r.mu held.
+func (r *Ring) walkRing(hash uint32, factor int) []*Node {
+	seen := make(map[string]bool)
+	var result []*Node
+	it := r.tree.Tree.Iterator()
+
+	// Advance to the ceiling vnode (first hash >= target).
+	for it.Next() {
+		vnode := it.Value().(*VNode)
+		if vnode.Hash < hash {
+			continue
+		}
+		if !seen[vnode.Node.ID] {
+			seen[vnode.Node.ID] = true
+			result = append(result, vnode.Node)
+			if len(result) == factor {
+				return result
+			}
+		}
+		break
+	}
+
+	// Continue clockwise, wrapping around, until factor nodes are collected.
+	for len(result) < factor {
+		if !it.Next() {
+			it.First()
+			it.Next()
+		}
+		vnode := it.Value().(*VNode)
+		if seen[vnode.Node.ID] {
+			continue
+		}
+		seen[vnode.Node.ID] = true
+		result = append(result, vnode.Node)
+	}
+	return result
+}
+
+// walkRingHealthy walks the ring clockwise from hash, returning the first
+// node that passes the health filter. Must be called with r.mu held.
+func (r *Ring) walkRingHealthy(hash uint32) (*Node, bool) {
+	seen := make(map[string]bool)
+	it := r.tree.Tree.Iterator()
+
+	// Advance to the ceiling vnode (first hash >= target).
+	for it.Next() {
+		vnode := it.Value().(*VNode)
+		if vnode.Hash < hash {
+			continue
+		}
+		if !seen[vnode.Node.ID] {
+			seen[vnode.Node.ID] = true
+			if r.healthFilter(vnode.Node.ID) {
+				r.keyCounts[vnode.Node.ID].Add(1)
+				return vnode.Node, true
+			}
+		}
+		break
+	}
+
+	// Continue clockwise, wrapping around, until a healthy node is found.
+	for len(seen) < len(r.nodes) {
+		if !it.Next() {
+			it.First()
+			it.Next()
+		}
+		vnode := it.Value().(*VNode)
+		if seen[vnode.Node.ID] {
+			continue
+		}
+		seen[vnode.Node.ID] = true
+		if r.healthFilter(vnode.Node.ID) {
+			r.keyCounts[vnode.Node.ID].Add(1)
+			return vnode.Node, true
+		}
+	}
+	return nil, false
+}
+
 func (r *Ring) GetNode(key string) (*Node, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -103,45 +183,7 @@ func (r *Ring) GetNode(key string) (*Node, bool) {
 		return vnode.Node, true
 	}
 
-	// Walk the ring from the key's position, skipping nodes that fail the
-	// health filter. Mirrors the GetReplicationNodes iterator pattern.
-	seen := make(map[string]bool)
-	it := r.tree.Tree.Iterator()
-
-	// Find the ceiling vnode and check it first.
-	for it.Next() {
-		vnode := it.Value().(*VNode)
-		if vnode.Hash >= hash {
-			if !seen[vnode.Node.ID] {
-				seen[vnode.Node.ID] = true
-				if r.healthFilter(vnode.Node.ID) {
-					r.keyCounts[vnode.Node.ID].Add(1)
-					return vnode.Node, true
-				}
-			}
-			break
-		}
-	}
-
-	// Continue walking forward, wrapping around, until all distinct nodes
-	// have been checked.
-	for len(seen) < len(r.nodes) {
-		if !it.Next() {
-			it.First()
-			it.Next()
-		}
-		vnode := it.Value().(*VNode)
-		if seen[vnode.Node.ID] {
-			continue
-		}
-		seen[vnode.Node.ID] = true
-		if r.healthFilter(vnode.Node.ID) {
-			r.keyCounts[vnode.Node.ID].Add(1)
-			return vnode.Node, true
-		}
-	}
-
-	return nil, false
+	return r.walkRingHealthy(hash)
 }
 
 func (r *Ring) GetReplicationNodes(key string, factor int) []*Node {
@@ -151,46 +193,10 @@ func (r *Ring) GetReplicationNodes(key string, factor int) []*Node {
 	if r.tree.Tree.Size() == 0 {
 		return nil
 	}
-
 	if factor > len(r.nodes) {
-	    factor = len(r.nodes)
+		factor = len(r.nodes)
 	}
-
-	seen := make(map[string]bool)
-	var result []*Node
-
-	hash := computeHash(key)
-
-	it := r.tree.Tree.Iterator()
-
-	for it.Next() {
-		vnode := it.Value().(*VNode)
-		if vnode.Hash >= hash {
-			if !seen[vnode.Node.ID] {
-				seen[vnode.Node.ID] = true
-				result = append(result, vnode.Node)
-				if len(result) == factor {
-					return result
-				}
-			}
-			break
-		}
-	}
-
-	for len(result) < factor {
-		if !it.Next() {
-			it.First()
-			it.Next()
-		}
-		vnode := it.Value().(*VNode)
-		if seen[vnode.Node.ID] {
-			continue
-		}
-		seen[vnode.Node.ID] = true
-		result = append(result, vnode.Node)
-	}
-
-	return result
+	return r.walkRing(computeHash(key), factor)
 }
 
 func (r *Ring) NodeCount() int {
@@ -241,37 +247,7 @@ func (r *Ring) GetReplicationNodesForHash(hash uint32, factor int) []*Node {
 	if factor > len(r.nodes) {
 		factor = len(r.nodes)
 	}
-
-	seen := make(map[string]bool)
-	var result []*Node
-
-	it := r.tree.Tree.Iterator()
-	for it.Next() {
-		vnode := it.Value().(*VNode)
-		if vnode.Hash >= hash {
-			if !seen[vnode.Node.ID] {
-				seen[vnode.Node.ID] = true
-				result = append(result, vnode.Node)
-				if len(result) == factor {
-					return result
-				}
-			}
-			break
-		}
-	}
-	for len(result) < factor {
-		if !it.Next() {
-			it.First()
-			it.Next()
-		}
-		vnode := it.Value().(*VNode)
-		if seen[vnode.Node.ID] {
-			continue
-		}
-		seen[vnode.Node.ID] = true
-		result = append(result, vnode.Node)
-	}
-	return result
+	return r.walkRing(hash, factor)
 }
 
 // GetVnodeRange returns the VnodeRange whose End equals endHash.

@@ -46,14 +46,8 @@ func TestMetricsHTTPRequestsTotal(t *testing.T) {
 	// Arrange
 	resetMetrics()
 	ml := gossip.NewMemberList("self", "localhost", nil)
-	transport, err := gossip.NewTransport("0")
-	if err != nil {
-		t.Fatalf("failed to create transport: %v", err)
-	}
-	defer transport.Stop()
-	g := gossip.NewGossiper("self", "0", ml, transport)
 	s1 := store.New()
-	srv := NewServer(ring.NewRing(50), ml, g, s1, "self", 3, 1, 1, time.Second, nil)
+	srv := NewServer(ring.NewRing(50), ml, s1, HandlerConfig{SelfID: "self", ReplicationFactor: 3, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, nil)
 	req := httptest.NewRequest(http.MethodGet, "/nodes", nil)
 	w := httptest.NewRecorder()
 
@@ -75,14 +69,8 @@ func TestMetricsRequestDurationRecorded(t *testing.T) {
 	// Arrange
 	resetMetrics()
 	ml := gossip.NewMemberList("self", "localhost", nil)
-	transport, err := gossip.NewTransport("0")
-	if err != nil {
-		t.Fatalf("failed to create transport: %v", err)
-	}
-	defer transport.Stop()
-	g := gossip.NewGossiper("self", "0", ml, transport)
 	s2 := store.New()
-	srv := NewServer(ring.NewRing(50), ml, g, s2, "self", 3, 1, 1, time.Second, nil)
+	srv := NewServer(ring.NewRing(50), ml, s2, HandlerConfig{SelfID: "self", ReplicationFactor: 3, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, nil)
 	req := httptest.NewRequest(http.MethodGet, "/nodes", nil)
 	w := httptest.NewRecorder()
 

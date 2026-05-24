@@ -32,17 +32,9 @@ func newNamedTestServerQ(t *testing.T, selfID string, rf, wq, rq int) *httptest.
 			r.RemoveNode(m.ID)
 		}
 	})
-	transport, err := gossip.NewTransport("0")
-	if err != nil {
-		t.Fatalf("failed to create transport: %v", err)
-	}
-	g := gossip.NewGossiper(selfID, "0", ml, transport)
 	s := store.New()
-	srv := httptest.NewServer(NewServer(r, ml, g, s, selfID, rf, wq, rq, time.Second, nil))
-	t.Cleanup(func() {
-		srv.Close()
-		transport.Stop()
-	})
+	srv := httptest.NewServer(NewServer(r, ml, s, HandlerConfig{SelfID: selfID, ReplicationFactor: rf, WriteQuorum: wq, ReadQuorum: rq, ReplicaTimeout: time.Second}, nil))
+	t.Cleanup(func() { srv.Close() })
 	return srv
 }
 
@@ -57,17 +49,9 @@ func newTestServer(t *testing.T) *httptest.Server {
 			r.RemoveNode(m.ID)
 		}
 	})
-	transport, err := gossip.NewTransport("0")
-	if err != nil {
-		t.Fatalf("failed to create transport: %v", err)
-	}
-	g := gossip.NewGossiper("self", "0", ml, transport)
 	s := store.New()
-	srv := httptest.NewServer(NewServer(r, ml, g, s, "self", 3, 1, 1, time.Second, nil))
-	t.Cleanup(func() {
-		srv.Close()
-		transport.Stop()
-	})
+	srv := httptest.NewServer(NewServer(r, ml, s, HandlerConfig{SelfID: "self", ReplicationFactor: 3, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, nil))
+	t.Cleanup(func() { srv.Close() })
 	return srv
 }
 
@@ -84,12 +68,6 @@ func postNode(t *testing.T, url, body string) *http.Response {
 	return resp
 }
 
-func closeBody(t *testing.T, resp *http.Response) {
-	t.Helper()
-	if err := resp.Body.Close(); err != nil {
-		t.Errorf("failed to close body: %v", err)
-	}
-}
 
 func TestE2EAddAndGetNode(t *testing.T) {
 	srv := newTestServer(t)
@@ -99,7 +77,7 @@ func TestE2EAddAndGetNode(t *testing.T) {
 		fmt.Sprintf("%s/nodes", srv.URL),
 		fmt.Sprintf(`{"id": "node1", "address": "%s"}`, addr), 
 	)
-	defer closeBody(t, resp)
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated {
 		t.Errorf("expected 201, got %d", resp.StatusCode)
@@ -109,7 +87,7 @@ func TestE2EAddAndGetNode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get node: %v", err)
 	}
-	defer closeBody(t, resp2)
+	defer resp2.Body.Close()
 
 	if resp2.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp2.StatusCode)
@@ -132,7 +110,7 @@ func TestE2EAddAndRemoveNode(t *testing.T) {
 		fmt.Sprintf("%s/nodes", srv.URL),
 		fmt.Sprintf(`{"id": "node1", "address": "%s"}`, addr), 
 	)
-	defer closeBody(t, resp0)
+	defer resp0.Body.Close()
 
 	req, err := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s/nodes/node1", srv.URL), nil)
 	if err != nil {
@@ -142,7 +120,7 @@ func TestE2EAddAndRemoveNode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to remove node: %v", err)
 	}
-	defer closeBody(t, resp)
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusNoContent {
 		t.Errorf("expected 204, got %d", resp.StatusCode)
@@ -152,7 +130,7 @@ func TestE2EAddAndRemoveNode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get node: %v", err)
 	}
-	defer closeBody(t, resp2)
+	defer resp2.Body.Close()
 
 	if resp2.StatusCode != http.StatusServiceUnavailable {
 		t.Errorf("expected 503 after removal, got %d", resp2.StatusCode)
@@ -166,14 +144,14 @@ func TestE2EGetNodes(t *testing.T) {
 	for i := 1; i <= 3; i++ {
 		body := fmt.Sprintf(`{"id": "node%d", "address": "%s"}`, i, addr) 
 		r := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), body)
-		defer closeBody(t, r)
+		defer r.Body.Close()
 	}
 
 	resp, err := http.Get(fmt.Sprintf("%s/nodes", srv.URL))
 	if err != nil {
 		t.Fatalf("failed to get nodes: %v", err)
 	}
-	defer closeBody(t, resp)
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
@@ -195,7 +173,7 @@ func TestE2EKeyConsistency(t *testing.T) {
 	for i := 1; i <= 3; i++ {
 		body := fmt.Sprintf(`{"id": "node%d", "address": "%s"}`, i, addr)
 		r := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), body)
-		defer closeBody(t, r)
+		defer r.Body.Close()
 	}
 
 	getNode := func() string {
@@ -203,7 +181,7 @@ func TestE2EKeyConsistency(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to get node: %v", err)
 		}
-		defer closeBody(t, resp)
+		defer resp.Body.Close()
 
 		var node NodeResponse
 		if err := json.NewDecoder(resp.Body).Decode(&node); err != nil {
@@ -227,14 +205,14 @@ func TestE2EGetStats(t *testing.T) {
 	for i := 1; i <= 3; i++ {
 		body := fmt.Sprintf(`{"id": "node%d", "address": "%s"}`, i, addr)
 		r := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), body)
-		defer closeBody(t, r)
+		defer r.Body.Close()
 	}
 
 	resp, err := http.Get(fmt.Sprintf("%s/stats", srv.URL))
 	if err != nil {
 		t.Fatalf("failed to get stats: %v", err)
 	}
-	defer closeBody(t, resp)
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
@@ -262,7 +240,7 @@ func TestE2EGetReplicationNodes(t *testing.T) {
 	for i := 1; i <= 3; i++ {
 		body := fmt.Sprintf(`{"id": "node%d", "address": "%s"}`, i, addr) 
 		r := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), body)
-		defer closeBody(t, r)
+		defer r.Body.Close()
 	}
 
 	body := `{"key": "somekey", "factor": 3}`
@@ -270,7 +248,7 @@ func TestE2EGetReplicationNodes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get replication nodes: %v", err)
 	}
-	defer closeBody(t, resp)
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
@@ -299,35 +277,41 @@ func TestE2ERingConvergence(t *testing.T) {
 	// Register both nodes in both rings.
 	for _, srv := range []*httptest.Server{srv1, srv2} {
 		r1 := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), fmt.Sprintf(`{"id": "node1", "address": "%s"}`, addr1))
-		defer closeBody(t, r1)
+		defer r1.Body.Close()
 		r2 := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), fmt.Sprintf(`{"id": "node2", "address": "%s"}`, addr2))
-		defer closeBody(t, r2)
+		defer r2.Body.Close()
 	}
 
 	keys := []string{"user:123", "order:456", "session:789", "product:abc"}
 	for _, key := range keys {
-		resp1, err := http.Get(fmt.Sprintf("%s/keys/%s", srv1.URL, key))
-		if err != nil {
-			t.Fatalf("srv1 lookup failed: %v", err)
-		}
-		resp2, err := http.Get(fmt.Sprintf("%s/keys/%s", srv2.URL, key))
-		if err != nil {
-			t.Fatalf("srv2 lookup failed: %v", err)
-		}
+		checkKeyConvergence(t, srv1.URL, srv2.URL, key)
+	}
+}
 
-		var n1, n2 NodeResponse
-		if err := json.NewDecoder(resp1.Body).Decode(&n1); err != nil {
-			t.Fatalf("failed to decode srv1 response for key %q: %v", key, err)
-		}
-		if err := json.NewDecoder(resp2.Body).Decode(&n2); err != nil {
-			t.Fatalf("failed to decode srv2 response for key %q: %v", key, err)
-		}
-		closeBody(t, resp1)
-		closeBody(t, resp2)
+func checkKeyConvergence(t *testing.T, srv1URL, srv2URL, key string) {
+	t.Helper()
+	resp1, err := http.Get(fmt.Sprintf("%s/keys/%s", srv1URL, key))
+	if err != nil {
+		t.Fatalf("srv1 lookup failed: %v", err)
+	}
+	defer resp1.Body.Close()
 
-		if n1.ID != n2.ID {
-			t.Errorf("key %q: ring divergence - srv1=%s srv2=%s", key, n1.ID, n2.ID)
-		}
+	resp2, err := http.Get(fmt.Sprintf("%s/keys/%s", srv2URL, key))
+	if err != nil {
+		t.Fatalf("srv2 lookup failed: %v", err)
+	}
+	defer resp2.Body.Close()
+
+	var n1, n2 NodeResponse
+	if err := json.NewDecoder(resp1.Body).Decode(&n1); err != nil {
+		t.Fatalf("failed to decode srv1 response for key %q: %v", key, err)
+	}
+	if err := json.NewDecoder(resp2.Body).Decode(&n2); err != nil {
+		t.Fatalf("failed to decode srv2 response for key %q: %v", key, err)
+	}
+
+	if n1.ID != n2.ID {
+		t.Errorf("key %q: ring divergence - srv1=%s srv2=%s", key, n1.ID, n2.ID)
 	}
 }
 
@@ -339,7 +323,7 @@ func TestE2EGossipMembershipPropagates(t *testing.T) {
 
 	// Add a node to srv1.
 	r := postNode(t, fmt.Sprintf("%s/nodes", srv1.URL), `{"id": "nodeA", "address": "10.0.0.1:8080"}`)
-	defer closeBody(t, r)
+	defer r.Body.Close()
 
 	// Pull srv1's full member list via the gossip endpoint (empty push triggers a pull).
 	pullResp, err := http.Post(fmt.Sprintf("%s/gossip", srv1.URL), "application/json",
@@ -347,7 +331,7 @@ func TestE2EGossipMembershipPropagates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to pull members from srv1: %v", err)
 	}
-	defer closeBody(t, pullResp)
+	defer pullResp.Body.Close()
 
 	var members []*gossip.Member
 	if err := json.NewDecoder(pullResp.Body).Decode(&members); err != nil {
@@ -363,14 +347,14 @@ func TestE2EGossipMembershipPropagates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to push members to srv2: %v", err)
 	}
-	defer closeBody(t, pushResp)
+	defer pushResp.Body.Close()
 
 	// Verify nodeA is now in srv2's ring.
 	nodesResp, err := http.Get(fmt.Sprintf("%s/nodes", srv2.URL))
 	if err != nil {
 		t.Fatalf("failed to get nodes from srv2: %v", err)
 	}
-	defer closeBody(t, nodesResp)
+	defer nodesResp.Body.Close()
 
 	var nodes []NodeResponse
 	if err := json.NewDecoder(nodesResp.Body).Decode(&nodes); err != nil {
@@ -398,7 +382,7 @@ func TestE2EWriteAndRead(t *testing.T) {
 
 	// Register self so GET /keys/:key resolves to this node.
 	r := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), fmt.Sprintf(`{"id": "node1", "address": "%s"}`, addr))
-	defer closeBody(t, r)
+	defer r.Body.Close()
 
 	body := `{"value": "hello"}`
 	req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("%s/keys/mykey", srv.URL), bytes.NewBufferString(body))
@@ -410,7 +394,7 @@ func TestE2EWriteAndRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PUT failed: %v", err)
 	}
-	defer closeBody(t, putResp)
+	defer putResp.Body.Close()
 	if putResp.StatusCode != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d", putResp.StatusCode)
 	}
@@ -419,7 +403,7 @@ func TestE2EWriteAndRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET failed: %v", err)
 	}
-	defer closeBody(t, getResp)
+	defer getResp.Body.Close()
 	if getResp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", getResp.StatusCode)
 	}
@@ -444,9 +428,9 @@ func TestE2EReplicationFanOut(t *testing.T) {
 	// Register both nodes in both rings.
 	for _, srv := range []*httptest.Server{srv1, srv2} {
 		r1 := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), fmt.Sprintf(`{"id": "node1", "address": "%s"}`, addr1))
-		defer closeBody(t, r1)
+		defer r1.Body.Close()
 		r2 := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), fmt.Sprintf(`{"id": "node2", "address": "%s"}`, addr2))
-		defer closeBody(t, r2)
+		defer r2.Body.Close()
 	}
 
 	// Write to node1.
@@ -460,7 +444,7 @@ func TestE2EReplicationFanOut(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PUT failed: %v", err)
 	}
-	defer closeBody(t, putResp)
+	defer putResp.Body.Close()
 	if putResp.StatusCode != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d", putResp.StatusCode)
 	}
@@ -474,7 +458,7 @@ func TestE2EReplicationFanOut(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GET failed: %v", err)
 		}
-		defer closeBody(t, getResp)
+		defer getResp.Body.Close()
 		if getResp.StatusCode != http.StatusOK {
 			t.Fatalf("expected 200, got %d", getResp.StatusCode)
 		}
@@ -499,9 +483,9 @@ func TestE2EQuorumWriteSuccess(t *testing.T) {
 
 	for _, srv := range []*httptest.Server{srv1, srv2} {
 		r1 := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), fmt.Sprintf(`{"id": "node1", "address": "%s"}`, addr1))
-		defer closeBody(t, r1)
+		defer r1.Body.Close()
 		r2 := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), fmt.Sprintf(`{"id": "node2", "address": "%s"}`, addr2))
-		defer closeBody(t, r2)
+		defer r2.Body.Close()
 	}
 
 	body := `{"value": "quorum-value"}`
@@ -514,7 +498,7 @@ func TestE2EQuorumWriteSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PUT failed: %v", err)
 	}
-	defer closeBody(t, putResp)
+	defer putResp.Body.Close()
 	if putResp.StatusCode != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d", putResp.StatusCode)
 	}
@@ -525,7 +509,7 @@ func TestE2EQuorumWriteSuccess(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GET failed: %v", err)
 		}
-		defer closeBody(t, getResp)
+		defer getResp.Body.Close()
 		var node NodeResponse
 		if err := json.NewDecoder(getResp.Body).Decode(&node); err != nil {
 			t.Fatalf("failed to decode: %v", err)
@@ -543,10 +527,10 @@ func TestE2EQuorumWriteFailure(t *testing.T) {
 	addr1 := serverAddress(srv)
 
 	r1 := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), fmt.Sprintf(`{"id": "node1", "address": "%s"}`, addr1))
-	defer closeBody(t, r1)
+	defer r1.Body.Close()
 	// Register a second node that is unreachable.
 	r2 := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), `{"id": "node2", "address": "localhost:19999"}`)
-	defer closeBody(t, r2)
+	defer r2.Body.Close()
 
 	body := `{"value": "should-fail"}`
 	req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("%s/keys/fkey", srv.URL), bytes.NewBufferString(body))
@@ -558,7 +542,7 @@ func TestE2EQuorumWriteFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PUT failed: %v", err)
 	}
-	defer closeBody(t, putResp)
+	defer putResp.Body.Close()
 	if putResp.StatusCode != http.StatusServiceUnavailable {
 		t.Errorf("expected 503 when quorum unreachable, got %d", putResp.StatusCode)
 	}
@@ -574,9 +558,9 @@ func TestE2EConsistentRead(t *testing.T) {
 
 	for _, srv := range []*httptest.Server{srv1, srv2} {
 		r1 := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), fmt.Sprintf(`{"id": "node1", "address": "%s"}`, addr1))
-		defer closeBody(t, r1)
+		defer r1.Body.Close()
 		r2 := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), fmt.Sprintf(`{"id": "node2", "address": "%s"}`, addr2))
-		defer closeBody(t, r2)
+		defer r2.Body.Close()
 	}
 
 	// Seed node1 with an older version via a replica write (bypasses fan-out).
@@ -593,7 +577,7 @@ func TestE2EConsistentRead(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed write failed: %v", err)
 		}
-		defer closeBody(t, resp)
+		defer resp.Body.Close()
 	}
 
 	seedWrite(t, srv1.URL, "old", `{"node1": 1}`)
@@ -604,7 +588,7 @@ func TestE2EConsistentRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET failed: %v", err)
 	}
-	defer closeBody(t, getResp)
+	defer getResp.Body.Close()
 	if getResp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", getResp.StatusCode)
 	}
@@ -624,15 +608,15 @@ func TestE2EReadQuorumFailure(t *testing.T) {
 	addr1 := serverAddress(srv)
 
 	r1 := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), fmt.Sprintf(`{"id": "node1", "address": "%s"}`, addr1))
-	defer closeBody(t, r1)
+	defer r1.Body.Close()
 	r2 := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), `{"id": "node2", "address": "localhost:19999"}`)
-	defer closeBody(t, r2)
+	defer r2.Body.Close()
 
 	getResp, err := http.Get(fmt.Sprintf("%s/keys/rqkey", srv.URL))
 	if err != nil {
 		t.Fatalf("GET failed: %v", err)
 	}
-	defer closeBody(t, getResp)
+	defer getResp.Body.Close()
 	if getResp.StatusCode != http.StatusServiceUnavailable {
 		t.Errorf("expected 503 when read quorum unreachable, got %d", getResp.StatusCode)
 	}
@@ -652,18 +636,10 @@ func newHintTestNode(t *testing.T, selfID string, hs *hintstore.HintStore) (*htt
 			r.RemoveNode(m.ID)
 		}
 	})
-	transport, err := gossip.NewTransport("0")
-	if err != nil {
-		t.Fatalf("failed to create transport: %v", err)
-	}
-	g := gossip.NewGossiper(selfID, "0", ml, transport)
 	s := store.New()
-	h := NewHandler(r, ml, g, s, selfID, 3, 2, 2, time.Second, hs)
+	h := NewHandler(r, ml, s, HandlerConfig{SelfID: selfID, ReplicationFactor: 3, WriteQuorum: 2, ReadQuorum: 2, ReplicaTimeout: time.Second}, hs)
 	srv := httptest.NewServer(newMux(h))
-	t.Cleanup(func() {
-		srv.Close()
-		transport.Stop()
-	})
+	t.Cleanup(func() { srv.Close() })
 	return srv, h
 }
 
@@ -707,9 +683,9 @@ func TestHintedHandoff_PutHintStoredAndDelivered(t *testing.T) {
 	node1Handler.ring.AddNode("node1", addr1)
 	// Register node2 and node3 in node1's ring via the HTTP API.
 	r2 := postNode(t, node1Srv.URL+"/nodes", fmt.Sprintf(`{"id":"node2","address":%q}`, addr2))
-	defer closeBody(t, r2)
+	defer r2.Body.Close()
 	r3 := postNode(t, node1Srv.URL+"/nodes", fmt.Sprintf(`{"id":"node3","address":%q}`, addr3))
-	defer closeBody(t, r3)
+	defer r3.Body.Close()
 
 	// PUT a key; quorum (node1+node3=2) is met, node2 gets a hint.
 	req, err := http.NewRequest(http.MethodPut, node1Srv.URL+"/keys/hint-key",
@@ -722,7 +698,7 @@ func TestHintedHandoff_PutHintStoredAndDelivered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PUT failed: %v", err)
 	}
-	defer closeBody(t, resp)
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d", resp.StatusCode)
 	}
@@ -771,9 +747,9 @@ func TestHintedHandoff_DeleteHintDelivered(t *testing.T) {
 
 	node1Handler.ring.AddNode("node1", addr1)
 	r2 := postNode(t, node1Srv.URL+"/nodes", fmt.Sprintf(`{"id":"node2","address":%q}`, addr2))
-	defer closeBody(t, r2)
+	defer r2.Body.Close()
 	r3 := postNode(t, node1Srv.URL+"/nodes", fmt.Sprintf(`{"id":"node3","address":%q}`, addr3))
-	defer closeBody(t, r3)
+	defer r3.Body.Close()
 
 	// DELETE a key while node2 is down.
 	req, err := http.NewRequest(http.MethodDelete, node1Srv.URL+"/keys/delete-key",
@@ -786,7 +762,7 @@ func TestHintedHandoff_DeleteHintDelivered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DELETE failed: %v", err)
 	}
-	defer closeBody(t, resp)
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d", resp.StatusCode)
 	}
@@ -832,29 +808,14 @@ func TestE2EReadRepair(t *testing.T) {
 	// Register both nodes in both rings so quorum reads contact both.
 	for _, srv := range []*httptest.Server{node1Srv, node2Srv} {
 		r1 := postNode(t, srv.URL+"/nodes", fmt.Sprintf(`{"id":"node1","address":%q}`, addr1))
-		defer closeBody(t, r1)
+		defer r1.Body.Close()
 		r2 := postNode(t, srv.URL+"/nodes", fmt.Sprintf(`{"id":"node2","address":%q}`, addr2))
-		defer closeBody(t, r2)
+		defer r2.Body.Close()
 	}
 
-	seedWrite := func(srvURL, value, clocksJSON string) {
-		t.Helper()
-		body := fmt.Sprintf(`{"value":%q,"clocks":%s}`, value, clocksJSON)
-		req, err := http.NewRequest(http.MethodPut, srvURL+"/keys/rr-key", strings.NewReader(body))
-		if err != nil {
-			t.Fatalf("create request: %v", err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-Proxied-From", "test")
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatalf("seed write: %v", err)
-		}
-		closeBody(t, resp)
-	}
 	// node1 is stale (old clock); node2 has the dominant version.
-	seedWrite(node1Srv.URL, "old", `{"node1":1}`)
-	seedWrite(node2Srv.URL, "new", `{"node1":1,"node2":1}`)
+	seedDirectWrite(t, node1Srv.URL, "old", `{"node1":1}`)
+	seedDirectWrite(t, node2Srv.URL, "new", `{"node1":1,"node2":1}`)
 
 	// Quorum GET from node1 reads both replicas, returns the newer value, and
 	// fires an async goroutine to repair node1's local store.
@@ -862,7 +823,7 @@ func TestE2EReadRepair(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET failed: %v", err)
 	}
-	defer closeBody(t, getResp)
+	defer getResp.Body.Close()
 	if getResp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", getResp.StatusCode)
 	}
@@ -900,9 +861,9 @@ func TestE2EConflictSurfacing(t *testing.T) {
 
 	for _, srv := range []*httptest.Server{srv1, srv2} {
 		r1 := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), fmt.Sprintf(`{"id": "node1", "address": "%s"}`, addr1))
-		defer closeBody(t, r1)
+		defer r1.Body.Close()
 		r2 := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), fmt.Sprintf(`{"id": "node2", "address": "%s"}`, addr2))
-		defer closeBody(t, r2)
+		defer r2.Body.Close()
 	}
 
 	seedWrite := func(t *testing.T, srvURL, value, clocksJSON string) {
@@ -918,7 +879,7 @@ func TestE2EConflictSurfacing(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed write failed: %v", err)
 		}
-		defer closeBody(t, resp)
+		defer resp.Body.Close()
 	}
 
 	// Seed concurrent writes: neither clock happens-before the other.
@@ -930,7 +891,7 @@ func TestE2EConflictSurfacing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET failed: %v", err)
 	}
-	defer closeBody(t, getResp)
+	defer getResp.Body.Close()
 	if getResp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", getResp.StatusCode)
 	}
@@ -954,7 +915,7 @@ func TestE2EConflictSurfacing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET after resolution failed: %v", err)
 	}
-	defer closeBody(t, getResp2)
+	defer getResp2.Body.Close()
 	var resolved NodeResponse
 	if err := json.NewDecoder(getResp2.Body).Decode(&resolved); err != nil {
 		t.Fatalf("failed to decode: %v", err)
@@ -962,4 +923,20 @@ func TestE2EConflictSurfacing(t *testing.T) {
 	if resolved.Value != "resolved" {
 		t.Errorf("expected 'resolved' after conflict resolution, got %q (siblings=%v)", resolved.Value, resolved.Siblings)
 	}
+}
+
+func seedDirectWrite(t *testing.T, srvURL, value, clocksJSON string) {
+	t.Helper()
+	body := fmt.Sprintf(`{"value":%q,"clocks":%s}`, value, clocksJSON)
+	req, err := http.NewRequest(http.MethodPut, srvURL+"/keys/rr-key", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Proxied-From", "test")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("seed write: %v", err)
+	}
+	defer resp.Body.Close()
 }

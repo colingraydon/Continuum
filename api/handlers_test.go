@@ -28,21 +28,12 @@ func newTestMemberList(r *ring.Ring) *gossip.MemberList {
 	})
 }
 
-func newTestGossiper(t *testing.T, ml *gossip.MemberList) *gossip.Gossiper {
-	t.Helper()
-	transport, err := gossip.NewTransport("0")
-	if err != nil {
-		t.Fatalf("failed to create transport: %v", err)
-	}
-	t.Cleanup(func() { transport.Stop() })
-	return gossip.NewGossiper("self", "0", ml, transport)
-}
-
 func newTestHandler(t *testing.T) *Handler {
+	t.Helper()
 	r := ring.NewRing(10)
 	ml := newTestMemberList(r)
 	s := store.New()
-	return NewHandler(r, ml, newTestGossiper(t, ml), s, "self", 3, 1, 1, time.Second, nil)
+	return NewHandler(r, ml, s, HandlerConfig{SelfID: "self", ReplicationFactor: 3, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, nil)
 }
 
 func TestAddNode(t *testing.T) {
@@ -519,15 +510,9 @@ func newHandlerWithSlowReplica(t *testing.T, replicaTimeout, hangFor time.Durati
 			r.RemoveNode(m.ID)
 		}
 	})
-	transport, err := gossip.NewTransport("0")
-	if err != nil {
-		t.Fatalf("failed to create transport: %v", err)
-	}
-	t.Cleanup(func() { transport.Stop() })
-	g := gossip.NewGossiper("self", "0", ml, transport)
 	// writeQuorum=2, readQuorum=2: self counts as one, slow replica must ack for quorum.
 	s := store.New()
-	h := NewHandler(r, ml, g, s, "self", 3, 2, 2, replicaTimeout, nil)
+	h := NewHandler(r, ml, s, HandlerConfig{SelfID: "self", ReplicationFactor: 3, WriteQuorum: 2, ReadQuorum: 2, ReplicaTimeout: replicaTimeout}, nil)
 
 	replicaAddr := strings.TrimPrefix(slow.URL, "http://")
 	ml.Add("self", "localhost:8080")
@@ -1068,27 +1053,7 @@ func TestGetSyncBucketKeysExcludesWrongVnodeRange(t *testing.T) {
 	}
 
 	// Find a key that falls in other's range (not self's).
-	var outsideKey string
-	for i := 0; ; i++ {
-		k := fmt.Sprintf("out-%d", i)
-		kh := merkle.HashKey(k)
-		inOther := false
-		inSelf := false
-		for _, vr := range otherRanges {
-			if vr.Contains(kh) {
-				inOther = true
-			}
-		}
-		for _, vr := range selfRanges {
-			if vr.Contains(kh) {
-				inSelf = true
-			}
-		}
-		if inOther && !inSelf {
-			outsideKey = k
-			break
-		}
-	}
+	outsideKey := findKeyInOtherRange(otherRanges, selfRanges)
 	h.store.Put(outsideKey, "v", store.VectorClockVersion{Clocks: map[string]uint64{"self": 1}})
 
 	// Query self's first vnode range — the outside key must not appear.
@@ -1481,7 +1446,7 @@ func TestFlushHints_NodeNotInMemberList(t *testing.T) {
 	ml := newTestMemberList(r)
 	s := store.New()
 	hs := hintstore.New(100, time.Hour)
-	h := NewHandler(r, ml, newTestGossiper(t, ml), s, "self", 3, 1, 1, time.Second, hs)
+	h := NewHandler(r, ml, s, HandlerConfig{SelfID: "self", ReplicationFactor: 3, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, hs)
 
 	hs.Store("unknown-node", hintstore.Hint{
 		Key:    "k",
@@ -1502,7 +1467,7 @@ func TestFlushHints_NodeDeadInMemberList(t *testing.T) {
 	ml := newTestMemberList(r)
 	s := store.New()
 	hs := hintstore.New(100, time.Hour)
-	h := NewHandler(r, ml, newTestGossiper(t, ml), s, "self", 3, 1, 1, time.Second, hs)
+	h := NewHandler(r, ml, s, HandlerConfig{SelfID: "self", ReplicationFactor: 3, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, hs)
 
 	ml.Add("dead-node", "10.0.0.99")
 	ml.MarkDead("dead-node")
@@ -1525,20 +1490,14 @@ func TestDeliverHints_DeletedHint(t *testing.T) {
 	targetRing := ring.NewRing(10)
 	targetML := gossip.NewMemberList("target", "localhost", nil)
 	targetStore := store.New()
-	targetTransport, err := gossip.NewTransport("0")
-	if err != nil {
-		t.Fatalf("failed to create transport: %v", err)
-	}
-	defer targetTransport.Stop()
-	targetGossiper := gossip.NewGossiper("target", "0", targetML, targetTransport)
-	targetSrv := httptest.NewServer(NewServer(targetRing, targetML, targetGossiper, targetStore, "target", 1, 1, 1, time.Second, nil))
+	targetSrv := httptest.NewServer(NewServer(targetRing, targetML, targetStore, HandlerConfig{SelfID: "target", ReplicationFactor: 1, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, nil))
 	defer targetSrv.Close()
 
 	r := ring.NewRing(10)
 	ml := newTestMemberList(r)
 	s := store.New()
 	hs := hintstore.New(100, time.Hour)
-	h := NewHandler(r, ml, newTestGossiper(t, ml), s, "self", 3, 1, 1, time.Second, hs)
+	h := NewHandler(r, ml, s, HandlerConfig{SelfID: "self", ReplicationFactor: 3, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, hs)
 
 	targetAddr := targetSrv.Listener.Addr().String()
 	ml.Add("target-node", targetAddr)
@@ -1561,20 +1520,14 @@ func TestFlushHints_AliveNodeDeliversHints(t *testing.T) {
 	targetRing := ring.NewRing(10)
 	targetML := gossip.NewMemberList("target", "localhost", nil)
 	targetStore := store.New()
-	targetTransport, err := gossip.NewTransport("0")
-	if err != nil {
-		t.Fatalf("failed to create transport: %v", err)
-	}
-	defer targetTransport.Stop()
-	targetGossiper := gossip.NewGossiper("target", "0", targetML, targetTransport)
-	targetSrv := httptest.NewServer(NewServer(targetRing, targetML, targetGossiper, targetStore, "target", 1, 1, 1, time.Second, nil))
+	targetSrv := httptest.NewServer(NewServer(targetRing, targetML, targetStore, HandlerConfig{SelfID: "target", ReplicationFactor: 1, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, nil))
 	defer targetSrv.Close()
 
 	r := ring.NewRing(10)
 	ml := newTestMemberList(r)
 	s := store.New()
 	hs := hintstore.New(100, time.Hour)
-	h := NewHandler(r, ml, newTestGossiper(t, ml), s, "self", 3, 1, 1, time.Second, hs)
+	h := NewHandler(r, ml, s, HandlerConfig{SelfID: "self", ReplicationFactor: 3, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, hs)
 
 	targetAddr := targetSrv.Listener.Addr().String()
 	ml.Add("target-node", targetAddr)
@@ -1779,5 +1732,171 @@ func TestGetSyncKeys_MissingKeys(t *testing.T) {
 	}
 	if len(resp.Entries) != 0 {
 		t.Errorf("expected empty entries for missing keys, got %v", resp.Entries)
+	}
+}
+
+// findKeyInOtherRange returns the first key that falls in otherRanges but not
+// in selfRanges, by iterating candidate keys until one is found.
+func findKeyInOtherRange(otherRanges, selfRanges []ring.VnodeRange) string {
+	for i := 0; ; i++ {
+		k := fmt.Sprintf("out-%d", i)
+		kh := merkle.HashKey(k)
+		inOther, inSelf := false, false
+		for _, vr := range otherRanges {
+			if vr.Contains(kh) {
+				inOther = true
+			}
+		}
+		for _, vr := range selfRanges {
+			if vr.Contains(kh) {
+				inSelf = true
+			}
+		}
+		if inOther && !inSelf {
+			return k
+		}
+	}
+}
+// --- Coverage gap tests ---
+
+func TestPutKey_EmptyKey(t *testing.T) {
+	h := newTestHandler(t)
+	req := httptest.NewRequest(http.MethodPut, "/keys/", bytes.NewBufferString(`{"value":"v"}`))
+	w := httptest.NewRecorder()
+	h.PutKey(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for empty key, got %d", w.Code)
+	}
+}
+
+func TestPutKey_InvalidBody(t *testing.T) {
+	h := newTestHandler(t)
+	req := httptest.NewRequest(http.MethodPut, "/keys/mykey", bytes.NewBufferString("not-json"))
+	w := httptest.NewRecorder()
+	h.PutKey(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for invalid body, got %d", w.Code)
+	}
+}
+
+func TestDeleteKey_InvalidBody(t *testing.T) {
+	h := newTestHandler(t)
+	req := httptest.NewRequest(http.MethodDelete, "/keys/mykey", bytes.NewBufferString("not-json"))
+	w := httptest.NewRecorder()
+	h.DeleteKey(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for invalid body, got %d", w.Code)
+	}
+}
+
+func TestRepairReplicas_HTTPRepairTombstone(t *testing.T) {
+	h := newTestHandler(t)
+	var method string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method = r.Method
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	survivors := []SiblingResponse{{Deleted: true, Clocks: map[string]uint64{"n1": 2}}}
+	h.repairReplicas("mykey", survivors, map[string]string{"remote": addr})
+
+	if method != http.MethodDelete {
+		t.Errorf("expected DELETE for tombstone repair, got %q", method)
+	}
+}
+
+func TestRepairReplicas_HTTPRepairError(t *testing.T) {
+	h := newTestHandler(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	survivors := []SiblingResponse{{Value: "v", Clocks: map[string]uint64{"n1": 1}}}
+	h.repairReplicas("mykey", survivors, map[string]string{"remote": addr}) // error is only logged
+}
+
+func TestGetNode_AllNodesBootstrapping(t *testing.T) {
+	h := newTestHandler(t)
+	h.memberList.Add("nodeA", "10.0.0.1:8080")
+	h.memberList.Add("nodeB", "10.0.0.2:8080")
+	h.memberList.SetBootstrapping("nodeA", true)
+	h.memberList.SetBootstrapping("nodeB", true)
+
+	req := httptest.NewRequest(http.MethodGet, "/keys/anykey", nil)
+	w := httptest.NewRecorder()
+	h.GetNode(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 when all read nodes are bootstrapping, got %d", w.Code)
+	}
+}
+
+func TestDeliverHints_DirectNilHintStore(t *testing.T) {
+	h := newTestHandler(t) // hintStore is nil
+	h.DeliverHints("node1", "10.0.0.1:8080") // must not panic
+}
+
+func TestDeliverHints_DirectEmptyHints(t *testing.T) {
+	r := ring.NewRing(10)
+	ml := newTestMemberList(r)
+	s := store.New()
+	hs := hintstore.New(100, time.Hour)
+	h := NewHandler(r, ml, s, HandlerConfig{SelfID: "self", ReplicationFactor: 1, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, hs)
+	// No hints buffered for this node; Drain returns empty.
+	h.DeliverHints("no-hints-node", "10.0.0.1:8080") // must not panic
+}
+
+func TestDeliverHints_DirectDeliveryError(t *testing.T) {
+	r := ring.NewRing(10)
+	ml := newTestMemberList(r)
+	s := store.New()
+	hs := hintstore.New(100, time.Hour)
+	h := NewHandler(r, ml, s, HandlerConfig{SelfID: "self", ReplicationFactor: 1, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, hs)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	hs.Store("fail-node", hintstore.Hint{
+		Key:    "k",
+		Value:  "v",
+		Clocks: map[string]uint64{"self": 1},
+		At:     time.Now(),
+	})
+	h.DeliverHints("fail-node", addr) // error is only logged, must not panic
+}
+
+func TestBufferHints_RemainingGoroutine(t *testing.T) {
+	r := ring.NewRing(10)
+	ml := newTestMemberList(r)
+	s := store.New()
+	hs := hintstore.New(100, time.Hour)
+	h := NewHandler(r, ml, s, HandlerConfig{SelfID: "self", ReplicationFactor: 1, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, hs)
+
+	ch := make(chan replicaResult, 1)
+	ch <- replicaResult{nodeID: "late-node", err: fmt.Errorf("timeout")}
+
+	h.bufferHints(
+		hintstore.Hint{Key: "k", Value: "v", Clocks: map[string]uint64{"self": 1}},
+		nil, 1, ch,
+	)
+
+	// Goroutine drains ch and stores the hint asynchronously.
+	deadline := time.Now().Add(100 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if len(hs.PendingNodes()) > 0 {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	if nodes := hs.PendingNodes(); len(nodes) != 1 || nodes[0] != "late-node" {
+		t.Errorf("expected buffered hint for late-node, got %v", nodes)
 	}
 }

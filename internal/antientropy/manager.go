@@ -164,6 +164,64 @@ func (m *Manager) syncRound() {
 	}
 }
 
+// snapshotBucketEntries captures the current siblings for each key in localKeys
+// so we push the pre-merge state — there is no point sending back data the
+// replica just gave us.
+func (m *Manager) snapshotBucketEntries(localKeys []string) map[string][]syncSibling {
+	snap := make(map[string][]syncSibling)
+	for _, key := range localKeys {
+		if entry, ok := m.s.Get(key); ok {
+			sibs := make([]syncSibling, len(entry.Siblings))
+			for j, sib := range entry.Siblings {
+				sibs[j] = syncSibling{Value: sib.Value, Deleted: sib.Deleted, Clocks: sib.Version.Clocks}
+			}
+			snap[key] = sibs
+		}
+	}
+	return snap
+}
+
+// applyBucketEntries merges a set of key→siblings from a replica into the
+// primary's local store using the standard vector clock path.
+func (m *Manager) applyBucketEntries(entries map[string][]syncSibling) {
+	for key, sibs := range entries {
+		for _, sib := range sibs {
+			v := store.VectorClockVersion{Clocks: sib.Clocks}
+			if sib.Deleted {
+				m.s.Delete(key, v)
+			} else {
+				m.s.Put(key, sib.Value, v)
+			}
+		}
+	}
+}
+
+// syncBucket reconciles a single divergent bucket between the primary and a
+// replica: it snapshots primary entries for the push batch, pulls remote
+// entries and applies them locally, and returns any fetch error.
+func (m *Manager) syncBucket(addr string, vnodeHash uint32, local *merkle.Tree, bucket int, toPush map[string][]syncSibling) error {
+	localKeys := local.BucketKeys(bucket)
+	remoteKeys, err := m.fetchBucketKeys(addr, vnodeHash, bucket)
+	if err != nil {
+		return fmt.Errorf("bucket %d keys: %w", bucket, err)
+	}
+	allKeys := union(localKeys, remoteKeys)
+	if len(allKeys) == 0 {
+		return nil
+	}
+
+	for k, v := range m.snapshotBucketEntries(localKeys) {
+		toPush[k] = v
+	}
+
+	entries, err := m.fetchSyncKeys(addr, allKeys)
+	if err != nil {
+		return fmt.Errorf("bucket %d: %w", bucket, err)
+	}
+	m.applyBucketEntries(entries)
+	return nil
+}
+
 // syncWithReplica bidirectionally syncs the primary's vnode against the replica
 // at addr. For each divergent bucket it:
 //   - pulls entries the replica has that are newer than or absent from the primary
@@ -185,44 +243,8 @@ func (m *Manager) syncWithReplica(addr string, vnodeHash uint32, local *merkle.T
 		if replicaBucketHash == local.BucketHash(i) {
 			continue
 		}
-
-		// Discover the full set of keys on both sides for this bucket.
-		localKeys := local.BucketKeys(i)
-		remoteKeys, err := m.fetchBucketKeys(addr, vnodeHash, i)
-		if err != nil {
-			return fmt.Errorf("bucket %d keys: %w", i, err)
-		}
-		allKeys := union(localKeys, remoteKeys)
-		if len(allKeys) == 0 {
-			continue
-		}
-
-		// Snapshot primary's entries before the pull so we push the pre-merge
-		// state — there is no point sending back data the replica just gave us.
-		for _, key := range localKeys {
-			if entry, ok := m.s.Get(key); ok {
-				sibs := make([]syncSibling, len(entry.Siblings))
-				for j, sib := range entry.Siblings {
-					sibs[j] = syncSibling{Value: sib.Value, Deleted: sib.Deleted, Clocks: sib.Version.Clocks}
-				}
-				toPush[key] = sibs
-			}
-		}
-
-		// Pull: apply the replica's entries to the primary.
-		entries, err := m.fetchSyncKeys(addr, allKeys)
-		if err != nil {
-			return fmt.Errorf("bucket %d: %w", i, err)
-		}
-		for key, sibs := range entries {
-			for _, sib := range sibs {
-				v := store.VectorClockVersion{Clocks: sib.Clocks}
-				if sib.Deleted {
-					m.s.Delete(key, v)
-				} else {
-					m.s.Put(key, sib.Value, v)
-				}
-			}
+		if err := m.syncBucket(addr, vnodeHash, local, i, toPush); err != nil {
+			return err
 		}
 	}
 
