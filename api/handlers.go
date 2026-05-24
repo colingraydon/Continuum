@@ -18,6 +18,19 @@ import (
 	"github.com/colingraydon/continuum/internal/store"
 )
 
+const (
+	contentTypeHeader    = "Content-Type"
+	contentTypeJSON      = "application/json"
+	keysPrefix           = "/keys/"
+	headerXProxiedFrom   = "X-Proxied-From"
+	schemeHTTP           = "http://"
+	errKeyRequired       = "key is required"
+	errInvalidBody       = "invalid request body"
+	errFailedWrite       = "failed to write response"
+	errNodeBootstrapping = "node is bootstrapping"
+	errNoNodes           = "no nodes available"
+)
+
 type Handler struct {
 	ring              *ring.Ring
 	aggregator        *stats.Aggregator
@@ -339,7 +352,7 @@ func (h *Handler) repairReplicas(key string, survivors []SiblingResponse, stale 
 func (h *Handler) AddNode(w http.ResponseWriter, req *http.Request) {
 	var body AddNodeRequest
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		http.Error(w, errInvalidBody, http.StatusBadRequest)
 		return
 	}
 	if body.ID == "" || body.Address == "" {
@@ -350,7 +363,7 @@ func (h *Handler) AddNode(w http.ResponseWriter, req *http.Request) {
 	w.WriteHeader(http.StatusCreated)
 	node := NodeResponse{ID: body.ID, Address: body.Address, Status: "alive"}
 	if err := json.NewEncoder(w).Encode(node); err != nil {
-		http.Error(w, "failed to write response", http.StatusInternalServerError)
+		http.Error(w, errFailedWrite, http.StatusInternalServerError)
 	}
 }
 
@@ -374,36 +387,36 @@ func (h *Handler) GetNodes(w http.ResponseWriter, req *http.Request) {
 			Status:  h.nodeStatus(n.ID),
 		})
 	}
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(contentTypeHeader, contentTypeJSON)
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		http.Error(w, "failed to write response", http.StatusInternalServerError)
+		http.Error(w, errFailedWrite, http.StatusInternalServerError)
 	}
 }
 
 func (h *Handler) GetNode(w http.ResponseWriter, req *http.Request) {
-	key := strings.TrimPrefix(req.URL.Path, "/keys/")
+	key := strings.TrimPrefix(req.URL.Path, keysPrefix)
 	if key == "" {
-		http.Error(w, "key is required", http.StatusBadRequest)
+		http.Error(w, errKeyRequired, http.StatusBadRequest)
 		return
 	}
 
 	// Replica sub-read: return local entry (including any siblings) so the
 	// coordinator can merge sibling sets across R replicas.
-	if req.Header.Get("X-Proxied-From") != "" {
+	if req.Header.Get(headerXProxiedFrom) != "" {
 		resp := NodeResponse{ID: h.selfID, Status: h.nodeStatus(h.selfID)}
 		if entry, ok := h.store.Get(key); ok {
 			resp = entryToResponse(h.selfID, h.nodeStatus(h.selfID), entry)
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(contentTypeHeader, contentTypeJSON)
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
-			http.Error(w, "failed to write response", http.StatusInternalServerError)
+			http.Error(w, errFailedWrite, http.StatusInternalServerError)
 		}
 		return
 	}
 
 	// Reject coordinator reads while this node is still bootstrapping.
 	if m, ok := h.memberList.Get(h.selfID); ok && m.Bootstrapping {
-		http.Error(w, "node is bootstrapping", http.StatusServiceUnavailable)
+		http.Error(w, errNodeBootstrapping, http.StatusServiceUnavailable)
 		return
 	}
 
@@ -411,7 +424,7 @@ func (h *Handler) GetNode(w http.ResponseWriter, req *http.Request) {
 	// return the canonical result - either a single value or a siblings list.
 	nodes := h.ring.GetReplicationNodes(key, h.replicationFactor)
 	if len(nodes) == 0 {
-		http.Error(w, "no nodes available", http.StatusServiceUnavailable)
+		http.Error(w, errNoNodes, http.StatusServiceUnavailable)
 		return
 	}
 	RecordKeyLookup()
@@ -424,7 +437,7 @@ func (h *Handler) GetNode(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 	if len(readNodes) == 0 {
-		http.Error(w, "no nodes available", http.StatusServiceUnavailable)
+		http.Error(w, errNoNodes, http.StatusServiceUnavailable)
 		return
 	}
 
@@ -502,21 +515,21 @@ func (h *Handler) GetNode(w http.ResponseWriter, req *http.Request) {
 	default:
 		resp.Siblings = survivors
 	}
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(contentTypeHeader, contentTypeJSON)
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		http.Error(w, "failed to write response", http.StatusInternalServerError)
+		http.Error(w, errFailedWrite, http.StatusInternalServerError)
 	}
 }
 
 func (h *Handler) PutKey(w http.ResponseWriter, req *http.Request) {
-	key := strings.TrimPrefix(req.URL.Path, "/keys/")
+	key := strings.TrimPrefix(req.URL.Path, keysPrefix)
 	if key == "" {
-		http.Error(w, "key is required", http.StatusBadRequest)
+		http.Error(w, errKeyRequired, http.StatusBadRequest)
 		return
 	}
 	var body PutKeyRequest
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		http.Error(w, errInvalidBody, http.StatusBadRequest)
 		return
 	}
 	if body.Value == "" {
@@ -530,7 +543,7 @@ func (h *Handler) PutKey(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// Replica write: store as-is without fan-out or quorum tracking.
-	if req.Header.Get("X-Proxied-From") != "" {
+	if req.Header.Get(headerXProxiedFrom) != "" {
 		h.store.Put(key, body.Value, incoming)
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -538,7 +551,7 @@ func (h *Handler) PutKey(w http.ResponseWriter, req *http.Request) {
 
 	// Reject coordinator writes while this node is still bootstrapping.
 	if m, ok := h.memberList.Get(h.selfID); ok && m.Bootstrapping {
-		http.Error(w, "node is bootstrapping", http.StatusServiceUnavailable)
+		http.Error(w, errNodeBootstrapping, http.StatusServiceUnavailable)
 		return
 	}
 
@@ -603,14 +616,14 @@ type DeleteKeyRequest struct {
 }
 
 func (h *Handler) DeleteKey(w http.ResponseWriter, req *http.Request) {
-	key := strings.TrimPrefix(req.URL.Path, "/keys/")
+	key := strings.TrimPrefix(req.URL.Path, keysPrefix)
 	if key == "" {
-		http.Error(w, "key is required", http.StatusBadRequest)
+		http.Error(w, errKeyRequired, http.StatusBadRequest)
 		return
 	}
 	var body DeleteKeyRequest
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		http.Error(w, errInvalidBody, http.StatusBadRequest)
 		return
 	}
 
@@ -620,7 +633,7 @@ func (h *Handler) DeleteKey(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// Replica delete: store tombstone as-is without fan-out.
-	if req.Header.Get("X-Proxied-From") != "" {
+	if req.Header.Get(headerXProxiedFrom) != "" {
 		h.store.Delete(key, incoming)
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -628,7 +641,7 @@ func (h *Handler) DeleteKey(w http.ResponseWriter, req *http.Request) {
 
 	// Reject coordinator deletes while this node is still bootstrapping.
 	if m, ok := h.memberList.Get(h.selfID); ok && m.Bootstrapping {
-		http.Error(w, "node is bootstrapping", http.StatusServiceUnavailable)
+		http.Error(w, errNodeBootstrapping, http.StatusServiceUnavailable)
 		return
 	}
 
@@ -707,12 +720,12 @@ func (h *Handler) replicateToSync(address, key, value string, clocks map[string]
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPut, "http://"+address+"/keys/"+key, bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPut, schemeHTTP+address+keysPrefix+key, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Proxied-From", h.selfID)
+	req.Header.Set(contentTypeHeader, contentTypeJSON)
+	req.Header.Set(headerXProxiedFrom, h.selfID)
 	resp, err := h.replicaClient.Do(req)
 	if err != nil {
 		return err
@@ -731,12 +744,12 @@ func (h *Handler) replicateDeleteToSync(address, key string, clocks map[string]u
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodDelete, "http://"+address+"/keys/"+key, bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodDelete, schemeHTTP+address+keysPrefix+key, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Proxied-From", h.selfID)
+	req.Header.Set(contentTypeHeader, contentTypeJSON)
+	req.Header.Set(headerXProxiedFrom, h.selfID)
 	resp, err := h.replicaClient.Do(req)
 	if err != nil {
 		return err
@@ -751,11 +764,11 @@ func (h *Handler) replicateDeleteToSync(address, key string, clocks map[string]u
 // readFromReplica fetches the local entry for key from a replica node. The
 // response includes the vector clock so the coordinator can merge versions.
 func (h *Handler) readFromReplica(address, key string) (NodeResponse, error) {
-	req, err := http.NewRequest(http.MethodGet, "http://"+address+"/keys/"+key, nil)
+	req, err := http.NewRequest(http.MethodGet, schemeHTTP+address+keysPrefix+key, nil)
 	if err != nil {
 		return NodeResponse{}, err
 	}
-	req.Header.Set("X-Proxied-From", h.selfID)
+	req.Header.Set(headerXProxiedFrom, h.selfID)
 	resp, err := h.replicaClient.Do(req)
 	if err != nil {
 		return NodeResponse{}, err
@@ -772,20 +785,20 @@ func (h *Handler) GetStats(w http.ResponseWriter, req *http.Request) {
 	s := h.aggregator.GetStats()
 	RecordVariance(s.Variance)
 	RecordHealthStats(s.HealthyNodes, s.SuspectNodes, s.DeadNodes)
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(contentTypeHeader, contentTypeJSON)
 	if err := json.NewEncoder(w).Encode(s); err != nil {
-		http.Error(w, "failed to write response", http.StatusInternalServerError)
+		http.Error(w, errFailedWrite, http.StatusInternalServerError)
 	}
 }
 
 func (h *Handler) GetReplicationNodes(w http.ResponseWriter, req *http.Request) {
 	var body ReplicateRequest
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		http.Error(w, errInvalidBody, http.StatusBadRequest)
 		return
 	}
 	if body.Key == "" {
-		http.Error(w, "key is required", http.StatusBadRequest)
+		http.Error(w, errKeyRequired, http.StatusBadRequest)
 		return
 	}
 	if body.Factor < 1 {
@@ -794,7 +807,7 @@ func (h *Handler) GetReplicationNodes(w http.ResponseWriter, req *http.Request) 
 	}
 	nodes := h.ring.GetReplicationNodes(body.Key, body.Factor)
 	if len(nodes) == 0 {
-		http.Error(w, "no nodes available", http.StatusServiceUnavailable)
+		http.Error(w, errNoNodes, http.StatusServiceUnavailable)
 		return
 	}
 	resp := ReplicateResponse{
@@ -804,9 +817,9 @@ func (h *Handler) GetReplicationNodes(w http.ResponseWriter, req *http.Request) 
 	for _, n := range nodes {
 		resp.Nodes = append(resp.Nodes, NodeResponse{ID: n.ID, Address: n.Address, Status: h.nodeStatus(n.ID)})
 	}
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(contentTypeHeader, contentTypeJSON)
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		http.Error(w, "failed to write response", http.StatusInternalServerError)
+		http.Error(w, errFailedWrite, http.StatusInternalServerError)
 	}
 }
 
@@ -820,22 +833,22 @@ func (h *Handler) Health(w http.ResponseWriter, req *http.Request) {
 		"dead_nodes":    s.DeadNodes,
 		"uptime":        time.Since(h.startTime).String(),
 	}
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(contentTypeHeader, contentTypeJSON)
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		http.Error(w, "failed to write response", http.StatusInternalServerError)
+		http.Error(w, errFailedWrite, http.StatusInternalServerError)
 	}
 }
 
 func (h *Handler) Gossip(w http.ResponseWriter, req *http.Request) {
 	var body GossipRequest
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		http.Error(w, errInvalidBody, http.StatusBadRequest)
 		return
 	}
 	h.memberList.Merge(body.Members)
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(contentTypeHeader, contentTypeJSON)
 	if err := json.NewEncoder(w).Encode(h.memberList.GetAll()); err != nil {
-		http.Error(w, "failed to write response", http.StatusInternalServerError)
+		http.Error(w, errFailedWrite, http.StatusInternalServerError)
 	}
 }
 
@@ -905,9 +918,9 @@ func (h *Handler) GetSyncBucketKeys(w http.ResponseWriter, req *http.Request) {
 	if keys == nil {
 		keys = []string{}
 	}
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(contentTypeHeader, contentTypeJSON)
 	if err := json.NewEncoder(w).Encode(SyncBucketKeysResponse{Keys: keys}); err != nil {
-		http.Error(w, "failed to write response", http.StatusInternalServerError)
+		http.Error(w, errFailedWrite, http.StatusInternalServerError)
 	}
 }
 
@@ -917,7 +930,7 @@ func (h *Handler) GetSyncBucketKeys(w http.ResponseWriter, req *http.Request) {
 func (h *Handler) PushSyncEntries(w http.ResponseWriter, req *http.Request) {
 	var body SyncKeysResponse
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		http.Error(w, errInvalidBody, http.StatusBadRequest)
 		return
 	}
 	for key, sibs := range body.Entries {
@@ -972,12 +985,12 @@ func (h *Handler) GetSyncState(w http.ResponseWriter, req *http.Request) {
 		bucketHashes[i] = merkle.ComputeBucketHash(entries)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(contentTypeHeader, contentTypeJSON)
 	if err := json.NewEncoder(w).Encode(SyncStateResponse{
 		Root:    merkle.ComputeRootHash(bucketHashes),
 		Buckets: bucketHashes,
 	}); err != nil {
-		http.Error(w, "failed to write response", http.StatusInternalServerError)
+		http.Error(w, errFailedWrite, http.StatusInternalServerError)
 	}
 }
 
@@ -987,7 +1000,7 @@ func (h *Handler) GetSyncState(w http.ResponseWriter, req *http.Request) {
 func (h *Handler) GetSyncKeys(w http.ResponseWriter, req *http.Request) {
 	var body SyncKeysRequest
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		http.Error(w, errInvalidBody, http.StatusBadRequest)
 		return
 	}
 	entries := make(map[string][]SyncSibling, len(body.Keys))
@@ -1002,8 +1015,8 @@ func (h *Handler) GetSyncKeys(w http.ResponseWriter, req *http.Request) {
 		}
 		entries[key] = sibs
 	}
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(contentTypeHeader, contentTypeJSON)
 	if err := json.NewEncoder(w).Encode(SyncKeysResponse{Entries: entries}); err != nil {
-		http.Error(w, "failed to write response", http.StatusInternalServerError)
+		http.Error(w, errFailedWrite, http.StatusInternalServerError)
 	}
 }
