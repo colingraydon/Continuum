@@ -288,7 +288,7 @@ func TestBootstrappingNodeRejectedAsCoordinator(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PUT failed: %v", err)
 	}
-	closeBody(t, resp)
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Errorf("expected 503 for coordinator PUT during bootstrap, got %d", resp.StatusCode)
 	}
@@ -298,7 +298,7 @@ func TestBootstrappingNodeRejectedAsCoordinator(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET failed: %v", err)
 	}
-	closeBody(t, getResp)
+	defer getResp.Body.Close()
 	if getResp.StatusCode != http.StatusServiceUnavailable {
 		t.Errorf("expected 503 for coordinator GET during bootstrap, got %d", getResp.StatusCode)
 	}
@@ -312,7 +312,7 @@ func TestBootstrappingNodeRejectedAsCoordinator(t *testing.T) {
 	if err != nil {
 		t.Fatalf("replica PUT failed: %v", err)
 	}
-	closeBody(t, resp2)
+	defer resp2.Body.Close()
 	if resp2.StatusCode != http.StatusNoContent {
 		t.Errorf("expected 204 for replica PUT during bootstrap, got %d", resp2.StatusCode)
 	}
@@ -351,9 +351,7 @@ func TestBootstrappingNodeExcludedFromReads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET failed: %v", err)
 	}
-
-	closeBody(t, getResp)
-	
+	defer getResp.Body.Close()
 	if getResp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", getResp.StatusCode)
 	}
