@@ -37,3 +37,5 @@ go.work.sum
 coverage.out
 
 .vscode/
+
+sonarqube_issues.csv

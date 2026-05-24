@@ -24,7 +24,7 @@ func NewRing(replicas int) *Ring {
 		replicas:    replicas,
 		vnodeCounts: make(map[string]int),
 		keyCounts:   make(map[string]*atomic.Int64),
-		onUpdate:    func(nodeCount, vnodeCount int) {},
+		onUpdate:    func(nodeCount, vnodeCount int) { /* no-op until caller registers a callback */ },
 	}
 }
 

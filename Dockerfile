@@ -5,7 +5,7 @@ RUN go mod download
 COPY . .
 RUN go build -o continuum ./cmd/continuum
 
-FROM alpine:latest
+FROM alpine:3.21
 WORKDIR /app
 COPY --from=builder /app/continuum .
 EXPOSE 8080
