@@ -284,31 +284,34 @@ func TestE2ERingConvergence(t *testing.T) {
 
 	keys := []string{"user:123", "order:456", "session:789", "product:abc"}
 	for _, key := range keys {
-		func() {
-			resp1, err := http.Get(fmt.Sprintf("%s/keys/%s", srv1.URL, key))
-			if err != nil {
-				t.Fatalf("srv1 lookup failed: %v", err)
-			}
-			defer resp1.Body.Close()
+		checkKeyConvergence(t, srv1.URL, srv2.URL, key)
+	}
+}
 
-			resp2, err := http.Get(fmt.Sprintf("%s/keys/%s", srv2.URL, key))
-			if err != nil {
-				t.Fatalf("srv2 lookup failed: %v", err)
-			}
-			defer resp2.Body.Close()
+func checkKeyConvergence(t *testing.T, srv1URL, srv2URL, key string) {
+	t.Helper()
+	resp1, err := http.Get(fmt.Sprintf("%s/keys/%s", srv1URL, key))
+	if err != nil {
+		t.Fatalf("srv1 lookup failed: %v", err)
+	}
+	defer resp1.Body.Close()
 
-			var n1, n2 NodeResponse
-			if err := json.NewDecoder(resp1.Body).Decode(&n1); err != nil {
-				t.Fatalf("failed to decode srv1 response for key %q: %v", key, err)
-			}
-			if err := json.NewDecoder(resp2.Body).Decode(&n2); err != nil {
-				t.Fatalf("failed to decode srv2 response for key %q: %v", key, err)
-			}
+	resp2, err := http.Get(fmt.Sprintf("%s/keys/%s", srv2URL, key))
+	if err != nil {
+		t.Fatalf("srv2 lookup failed: %v", err)
+	}
+	defer resp2.Body.Close()
 
-			if n1.ID != n2.ID {
-				t.Errorf("key %q: ring divergence - srv1=%s srv2=%s", key, n1.ID, n2.ID)
-			}
-		}()
+	var n1, n2 NodeResponse
+	if err := json.NewDecoder(resp1.Body).Decode(&n1); err != nil {
+		t.Fatalf("failed to decode srv1 response for key %q: %v", key, err)
+	}
+	if err := json.NewDecoder(resp2.Body).Decode(&n2); err != nil {
+		t.Fatalf("failed to decode srv2 response for key %q: %v", key, err)
+	}
+
+	if n1.ID != n2.ID {
+		t.Errorf("key %q: ring divergence - srv1=%s srv2=%s", key, n1.ID, n2.ID)
 	}
 }
 
