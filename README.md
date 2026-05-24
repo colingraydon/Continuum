@@ -17,30 +17,37 @@ Continuum maps keys to nodes via a consistent hash ring, propagates cluster memb
 ## Architecture
 
 ```mermaid
-flowchart TD
+flowchart LR
     Client([Client])
 
     subgraph api [api]
         HTTP[HTTP Handlers]
     end
 
-    subgraph internals [internal]
-        Ring[Ring]
-        Store[KV Store]
-        Gossip[Gossip]
-        AE[Anti-Entropy]
-        HH[Hint Store]
+    subgraph internals [ ]
+        direction LR
+        subgraph core [internal - core]
+            direction TB
+            Gossip[Gossip]
+            Ring[Ring]
+            Store[KV Store]
+        end
+        subgraph bg [internal - background]
+            direction TB
+            HH[Hint Store]
+            AE[Anti-Entropy]
+        end
     end
 
-    Client -- HTTP --> HTTP
-    HTTP -- route key --> Ring
-    HTTP -- read / write --> Store
-    HTTP -- membership --> Gossip
-    Gossip -- alive / dead --> Ring
-    Gossip -- recovery event --> HH
-    Store -- onUpdate / onEvict --> AE
-    HH -- replay writes --> HTTP
-    AE -- sync calls --> HTTP
+    Client --> HTTP
+    HTTP --> Gossip
+    HTTP --> Ring
+    HTTP --> Store
+    Gossip --> Ring
+    Gossip --> HH
+    Store --> AE
+    AE -.->|sync| HTTP
+    HH -.->|replay| HTTP
 ```
 
 | Layer | Package | Role |
