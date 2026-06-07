@@ -45,15 +45,15 @@ Every 5 minutes, `GCTombstones` runs on the store. An entry is eligible for GC i
 
 - It has exactly one sibling
 - That sibling is a tombstone (`Deleted=true`)
-- The tombstone is older than 1 hour
+- The tombstone is older than `GCTTL` (24 hours)
 
 Eligible entries are purged from the store and removed from the primary's Merkle trees via the `onEvict` callback.
 
-The 1-hour TTL provides roughly 120 anti-entropy sync cycles of headroom (30-second interval * 120 = 1 hour) for tombstones to propagate to all live replicas before GC runs. Any node that was partitioned for less than 1 hour will receive the tombstone via anti-entropy before GC removes it from the primary.
+The 24-hour TTL provides roughly 2,880 anti-entropy sync cycles of headroom (30-second interval × 2,880 ≈ 24 hours) for tombstones to propagate to all live replicas before GC runs.
 
 > **Failure Mode - Tombstone Resurrection**
 >
-> If a node is partitioned for longer than 1 hour and the primary GCs a tombstone during that window, the partitioned node reconnects with a stale live value. The primary no longer has the tombstone, so the live value will not be overwritten by anti-entropy - the key is resurrected. For this in-memory store, this risk is theoretical: a node partitioned for more than an hour will have been marked dead, restarted, and lost all state before reconnecting. For a persistent store, the TTL would need to be substantially longer or replaced with per-replica confirmation tracking.
+> If a node is partitioned for longer than `GCTTL` and the primary GCs a tombstone during that window, a naive reconnect would resurrect the deleted key from the stale live value the partitioned node still holds. With persistence enabled (`DATA_DIR`), the recovery driver enforces this invariant in code: a node whose last clean shutdown is older than `GCTTL` discards its local data and re-bootstraps from peers, so it can never reintroduce a value that other replicas have already GC'd. With persistence disabled, the same property holds for the trivial reason that an in-memory node loses all state on restart. See [docs/persistence.md](persistence.md) for the recovery flow.
 
 ## Design Decisions
 
@@ -77,13 +77,13 @@ On-the-fly computation keeps the replica code path simple - a replica just scans
 
 ### TTL-Based Tombstone GC over Per-Replica Confirmation Tracking
 
-**Choice:** Purge tombstones after 1 hour, relying on anti-entropy coverage.
+**Choice:** Purge tombstones after `GCTTL` (24 hours), relying on anti-entropy coverage plus the recovery driver's downtime gate.
 
 Per-replica confirmation tracking would have the primary record which replicas have acknowledged a tombstone and purge it only when all live replicas have confirmed receipt. This is strictly safer - no resurrection risk. But it requires the primary to persist ack state, handle replica churn (nodes joining mid-tracking), and define what "all replicas" means dynamically.
 
-Bidirectional sync makes the TTL approach viable. Because the primary pushes tombstones to replicas on every sync round (not just pulling from them), a tombstone written on any node propagates outward within a few sync cycles regardless of whether the replica ever initiates contact. 120 sync cycles of headroom before GC is more than enough for any live replica to receive the tombstone.
+Bidirectional sync makes the TTL approach viable. Because the primary pushes tombstones to replicas on every sync round (not just pulling from them), a tombstone written on any node propagates outward within a few sync cycles regardless of whether the replica ever initiates contact. 2,880 sync cycles of headroom before GC is more than enough for any live replica to receive the tombstone.
 
-**Tradeoff:** Resurrection risk exists for nodes partitioned longer than 1 hour. Acceptable for this in-memory store where long partitions mean node restart and state loss. Not acceptable for a persistent store - the TTL would need to match the maximum expected partition duration or be replaced with confirmation tracking.
+**Tradeoff:** A node partitioned (or shut down) for longer than `GCTTL` would risk resurrecting GC'd tombstones if it rejoined with stale live values. With persistence enabled, the recovery driver enforces a max-downtime invariant: such a node refuses to load its local data and re-bootstraps from peers instead. The trade is that any writes it accepted that hadn't reached quorum are lost - the same risk Cassandra accepts with `gc_grace_seconds`.
 
 ### Sync Interval of 30 Seconds
 

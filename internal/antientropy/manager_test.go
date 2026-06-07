@@ -210,7 +210,7 @@ func TestAntiEntropyGCPurgesTombstone(t *testing.T) {
 	mgr := New(r1, s1, "node1", 1, time.Second)
 
 	// A negative TTL makes every tombstone immediately eligible for GC.
-	purged := s1.GCTombstones(-1)
+	purged, _ := s1.GCTombstones(-1)
 	if len(purged) != 1 || purged[0] != key {
 		t.Fatalf("expected [%s] purged, got %v", key, purged)
 	}

@@ -19,12 +19,14 @@ import (
 const (
 	syncInterval = 30 * time.Second
 	gcInterval   = 5 * time.Minute
-	// gcTTL is the minimum age a tombstone must reach before it is eligible for
-	// garbage collection. It must exceed the maximum time anti-entropy takes to
-	// propagate a tombstone to all replicas across any realistic partition window.
-	// With bidirectional sync running every 30 seconds, one hour gives ~120x
-	// headroom. See README for the full safety discussion.
-	gcTTL = time.Hour
+	// GCTTL is the minimum age a tombstone must reach before it is eligible for
+	// garbage collection AND the maximum downtime a single node can tolerate
+	// while persisting state. The recovery driver in cmd/continuum uses the
+	// same constant as the downtime gate: a node whose last clean shutdown was
+	// longer than GCTTL ago discards local data and re-bootstraps, ensuring
+	// it can never resurrect a tombstone that other replicas have already
+	// purged. See docs/persistence.md for the full safety argument.
+	GCTTL = 24 * time.Hour
 )
 
 // Manager maintains one Merkle tree per primary vnode and drives anti-entropy
@@ -109,10 +111,14 @@ func (m *Manager) syncLoop(ctx context.Context) {
 	}
 }
 
-// runGC removes tombstones older than gcTTL and evicts them from the primary's
+// runGC removes tombstones older than GCTTL and evicts them from the primary's
 // Merkle trees so future syncs reflect the purged state.
 func (m *Manager) runGC() {
-	purged := m.s.GCTombstones(gcTTL)
+	purged, err := m.s.GCTombstones(GCTTL)
+	if err != nil {
+		log.Printf("antientropy: GC failed: %v", err)
+		return
+	}
 	for _, key := range purged {
 		m.RemoveFromTrees(key)
 	}
@@ -182,15 +188,21 @@ func (m *Manager) snapshotBucketEntries(localKeys []string) map[string][]syncSib
 }
 
 // applyBucketEntries merges a set of key→siblings from a replica into the
-// primary's local store using the standard vector clock path.
+// primary's local store using the standard vector clock path. Per-key write
+// failures are logged and skipped so a single bad write doesn't abort the
+// whole sync round.
 func (m *Manager) applyBucketEntries(entries map[string][]syncSibling) {
 	for key, sibs := range entries {
 		for _, sib := range sibs {
 			v := store.VectorClockVersion{Clocks: sib.Clocks}
+			var err error
 			if sib.Deleted {
-				m.s.Delete(key, v)
+				err = m.s.Delete(key, v)
 			} else {
-				m.s.Put(key, sib.Value, v)
+				err = m.s.Put(key, sib.Value, v)
+			}
+			if err != nil {
+				log.Printf("antientropy: apply %s: %v", key, err)
 			}
 		}
 	}

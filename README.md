@@ -10,7 +10,7 @@
 
 A distributed key-value store implementing the core data layer patterns from Cassandra and Dynamo - written in Go.
 
-Continuum maps keys to nodes via a consistent hash ring, propagates cluster membership through a gossip protocol, fans writes to N replicas with quorum acknowledgment, surfaces concurrent writes as vector clock siblings rather than discarding them, and repairs divergent replicas through a combination of inline read repair, event-driven hinted handoff, and background Merkle tree anti-entropy.
+Continuum maps keys to nodes via a consistent hash ring, propagates cluster membership through a gossip protocol, fans writes to N replicas with quorum acknowledgment, surfaces concurrent writes as vector clock siblings rather than discarding them, and repairs divergent replicas through a combination of inline read repair, event-driven hinted handoff, and background Merkle tree anti-entropy. With `DATA_DIR` set, every write goes through a CRC-checked write-ahead log and snapshots are taken on graceful shutdown, so state survives restart.
 
 ---
 
@@ -54,7 +54,8 @@ flowchart LR
 | ----- | ------- | ---- |
 | Hash Ring | `internal/ring` | Routes keys to nodes via consistent hashing with a Red-Black Tree and virtual nodes |
 | Gossip | `internal/gossip` | Cluster membership and failure detection over UDP without a central coordinator |
-| KV Store | `internal/store` | In-memory storage with vector clock versioning and tombstone deletes |
+| KV Store | `internal/store` | Vector clock versioning, tombstone deletes, optional WAL+snapshot durability hook |
+| WAL + Snapshot | `internal/wal`, `internal/store/snapshot.go` | Crash-durable append-only log with CRC framing; atomic snapshot file replayed on restart |
 | Anti-Entropy | `internal/antientropy` | Background Merkle-tree comparison and bidirectional repair of divergent replicas |
 | Hint Store | `internal/hintstore` | Durability buffer that replays missed writes when a down replica recovers |
 | HTTP API | `api` | Transport, read repair, data migration, Prometheus instrumentation |
@@ -115,6 +116,7 @@ make coverage  # HTML coverage report
 | [Replication](docs/replication.md) | Vector clocks, quorum, sibling surfacing, fan-out implementation |
 | [Anti-Entropy](docs/antientropy.md) | Merkle trees, bidirectional sync, tombstone GC safety argument |
 | [Hinted Handoff](docs/hinted-handoff.md) | Durability gap, hint lifecycle, event-driven delivery, graceful flush |
+| [Persistence](docs/persistence.md) | WAL framing, snapshot format, recovery flow, downtime gate |
 | [Read Repair](docs/read-repair.md) | Async repair, always-repair-on-conflict, X-Proxied-From path reuse |
 | [Data Migration](docs/data-migration.md) | Pull on join, push on leave, bootstrapping state machine |
 | [API Reference](docs/api.md) | All endpoints with request/response examples and internal headers |
@@ -125,6 +127,7 @@ make coverage  # HTML coverage report
 
 ## What's Next
 
-- **Persistence** - write-ahead log and snapshot-on-shutdown so state survives restarts; a prerequisite for making the tombstone GC safety argument hold across node restarts
+- **Hint store persistence** - hints currently live in memory only; a coordinator crash before delivery loses them, and anti-entropy is the fallback
+- **Group commit** - per-write fsync caps single-node throughput around 1k writes/sec; batched fsync is the next lever
 - **Benchmark coverage** - store, anti-entropy, gossip, and end-to-end latency benchmarks
-- **Architecture diagram** - detailed system diagram in [docs/architecture.md](docs/architecture.md)
+- **Sharded store** - split the single store mutex into 256 shards to unlock parallel replay and parallel snapshot iteration

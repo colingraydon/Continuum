@@ -342,10 +342,14 @@ func responseHasAllSurvivors(r NodeResponse, survivors []SiblingResponse) bool {
 func (h *Handler) repairSurvivor(key, nodeID, addr string, s SiblingResponse) {
 	v := store.VectorClockVersion{Clocks: s.Clocks}
 	if nodeID == h.selfID {
+		var err error
 		if s.Deleted {
-			h.store.Delete(key, v)
+			err = h.store.Delete(key, v)
 		} else {
-			h.store.Put(key, s.Value, v)
+			err = h.store.Put(key, s.Value, v)
+		}
+		if err != nil {
+			log.Printf("read repair: local store %s for key %s: %v", nodeID, key, err)
 		}
 		return
 	}
@@ -613,7 +617,10 @@ func (h *Handler) PutKey(w http.ResponseWriter, req *http.Request) {
 
 	// Replica write: store as-is without fan-out or quorum tracking.
 	if req.Header.Get(headerXProxiedFrom) != "" {
-		h.store.Put(key, body.Value, incoming)
+		if err := h.store.Put(key, body.Value, incoming); err != nil {
+			http.Error(w, "store write failed", http.StatusServiceUnavailable)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -625,7 +632,10 @@ func (h *Handler) PutKey(w http.ResponseWriter, req *http.Request) {
 
 	// Primary write: increment self's counter and store locally.
 	version := incoming.Increment(h.selfID)
-	h.store.Put(key, body.Value, version)
+	if err := h.store.Put(key, body.Value, version); err != nil {
+		http.Error(w, "store write failed", http.StatusServiceUnavailable)
+		return
+	}
 
 	// Quorum write: fan out to all replica nodes and wait for W acks.
 	nodes := h.ring.GetReplicationNodes(key, h.replicationFactor)
@@ -692,7 +702,10 @@ func (h *Handler) DeleteKey(w http.ResponseWriter, req *http.Request) {
 
 	// Replica delete: store tombstone as-is without fan-out.
 	if req.Header.Get(headerXProxiedFrom) != "" {
-		h.store.Delete(key, incoming)
+		if err := h.store.Delete(key, incoming); err != nil {
+			http.Error(w, "store delete failed", http.StatusServiceUnavailable)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -710,7 +723,10 @@ func (h *Handler) DeleteKey(w http.ResponseWriter, req *http.Request) {
 
 	// Primary delete: increment self's counter and store tombstone locally.
 	version := incoming.Increment(h.selfID)
-	h.store.Delete(key, version)
+	if err := h.store.Delete(key, version); err != nil {
+		http.Error(w, "store delete failed", http.StatusServiceUnavailable)
+		return
+	}
 
 	nodes := h.ring.GetReplicationNodes(key, h.replicationFactor)
 	quorum := min(h.writeQuorum, len(nodes))
@@ -960,10 +976,14 @@ func (h *Handler) PushSyncEntries(w http.ResponseWriter, req *http.Request) {
 	for key, sibs := range body.Entries {
 		for _, sib := range sibs {
 			v := store.VectorClockVersion{Clocks: sib.Clocks}
+			var err error
 			if sib.Deleted {
-				h.store.Delete(key, v)
+				err = h.store.Delete(key, v)
 			} else {
-				h.store.Put(key, sib.Value, v)
+				err = h.store.Put(key, sib.Value, v)
+			}
+			if err != nil {
+				log.Printf("sync push apply %s: %v", key, err)
 			}
 		}
 	}
