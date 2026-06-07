@@ -91,13 +91,15 @@ Three background loops run on every node:
 
 **Anti-entropy sync** - every 30 seconds, one vnode is selected at random and its Merkle tree is compared against each replica. Divergent buckets are reconciled bidirectionally.
 
-**Tombstone GC** - every 5 minutes, uncontested tombstones older than 1 hour are purged from the store and from the primary's Merkle trees.
+**Tombstone GC** - every 5 minutes, uncontested tombstones older than 24 hours are purged from the store and from the primary's Merkle trees.
 
 A fourth loop runs per node: **hint expiry** checks every 5 minutes for hints older than 1 hour and discards them, deferring to anti-entropy for any keys that were not replayed in time.
 
 ## Dependency Rules
 
-- `internal/ring`, `internal/store`, `internal/gossip`, `internal/hintstore`, `internal/merkle` have no imports from other internal packages
+- `internal/ring`, `internal/gossip`, `internal/hintstore`, `internal/merkle` have no imports from other internal packages
+- `internal/wal` has no imports from other internal packages
+- `internal/store` imports `internal/wal`
 - `internal/antientropy` imports `ring`, `store`, and `merkle`
 - `internal/stats` imports `ring` and `gossip`
 - `api` imports all internal packages

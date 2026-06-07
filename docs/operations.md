@@ -107,11 +107,13 @@ Continuum shuts down gracefully on `SIGINT` or `SIGTERM`:
 1. Pushes all locally-held keys to alive successor nodes
 2. Marks self as dead in the member list and broadcasts to all alive peers (not just the usual fanout of 3)
 3. Flushes pending hints to any currently-alive nodes
-4. Stops accepting new HTTP connections
-5. Drains in-flight requests with a 30-second timeout
+4. Stops accepting new HTTP connections and drains in-flight requests with a 30-second timeout
+5. **Finalizes persistence** (if `DATA_DIR` is set): takes a snapshot, appends a `CHECKPOINT` record to the WAL, truncates WAL segments covered by the snapshot, and writes `meta.json` with `last_clean_shutdown = now`
 6. Stops the gossip transport
 
 The push in step 1 and the flush in step 3 are best-effort - if a successor is unreachable, those keys and hints are not retried. Anti-entropy covers the gap.
+
+Step 5 is what makes the downtime gate work: a node that crashes (rather than shutting down cleanly) will have no `last_clean_shutdown` in meta and will discard its local data on the next start rather than risk resurrecting tombstones that peers have already purged.
 
 ## CI Pipeline
 
