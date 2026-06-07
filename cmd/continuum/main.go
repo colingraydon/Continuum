@@ -18,7 +18,6 @@ import (
 	"github.com/colingraydon/continuum/internal/gossip"
 	"github.com/colingraydon/continuum/internal/hintstore"
 	"github.com/colingraydon/continuum/internal/ring"
-	"github.com/colingraydon/continuum/internal/store"
 )
 
 type config struct {
@@ -32,6 +31,7 @@ type config struct {
 	seedNodes         []string
 	replicaTimeout    time.Duration
 	selfWeight        float64
+	dataDir           string
 }
 
 func getEnvInt(key string, dflt int) int {
@@ -107,6 +107,7 @@ func loadConfig() config {
 		seedNodes:         seedNodes,
 		replicaTimeout:    getEnvDurationMs("REPLICA_TIMEOUT_MS", 500*time.Millisecond),
 		selfWeight:        getEnvFloat64("SELF_WEIGHT", 1.0),
+		dataDir:           getEnvString("DATA_DIR", ""),
 	}
 }
 
@@ -148,6 +149,14 @@ func runHintExpiry(ctx context.Context, hs *hintstore.HintStore) {
 
 func main() {
 	cfg := loadConfig()
+
+	// Recover persisted state before anything else touches the store. The
+	// downtime gate may discard local data and force a fresh bootstrap; the
+	// seed-node bootstrap path below handles that case naturally.
+	s, persist, err := recoverStore(cfg.dataDir, cfg.selfID, antientropy.GCTTL)
+	if err != nil {
+		log.Fatalf("persist: recover failed: %v", err)
+	}
 
 	r := ring.NewRing(cfg.replicas)
 	r.SetUpdateCallback(func(nodeCount, vnodeCount int) {
@@ -194,7 +203,6 @@ func main() {
 		log.Fatalf("invalid SELF_ADDRESS %q: %v", cfg.selfAddress, err)
 	}
 
-	s := store.New()
 	ae := antientropy.New(r, s, cfg.selfID, cfg.replicationFactor, cfg.replicaTimeout)
 	s.SetOnUpdate(ae.Update)
 	s.SetOnEvict(ae.RemoveFromTrees)
@@ -245,6 +253,11 @@ func main() {
 	defer drainCancel()
 	if err := srv.Shutdown(drainCtx); err != nil {
 		log.Printf("shutdown: drain error: %v", err)
+	}
+
+	log.Printf("shutdown: finalizing persistence")
+	if err := persist.finalize(); err != nil {
+		log.Printf("shutdown: finalize error: %v", err)
 	}
 
 	g.Stop()

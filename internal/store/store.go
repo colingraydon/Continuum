@@ -1,9 +1,13 @@
 package store
 
 import (
+	"errors"
+	"fmt"
+	"io"
 	"sync"
 	"time"
 
+	"github.com/colingraydon/continuum/internal/wal"
 	"github.com/spaolacci/murmur3"
 )
 
@@ -78,12 +82,20 @@ type Entry struct {
 	Siblings []Sibling
 }
 
+// WAL is the contract the store needs from a write-ahead log. *wal.Writer
+// satisfies it; tests inject fakes to exercise error paths.
+type WAL interface {
+	Append(payload []byte) (uint64, error)
+	Sync() error
+}
+
 type Store struct {
 	mu            sync.RWMutex
 	data          map[string]Entry
 	onUpdate      func(key string, hash uint32)
 	onEvict       func(key string)
 	tombstoneAges map[string]time.Time // key → when tombstone was first accepted on this node
+	wal           WAL                  // nil = memory-only mode
 }
 
 func New() *Store {
@@ -91,6 +103,21 @@ func New() *Store {
 		data:          make(map[string]Entry),
 		tombstoneAges: make(map[string]time.Time),
 	}
+}
+
+// SetWAL installs a write-ahead log. After SetWAL, every mutating operation
+// appends to the log and fsyncs before applying to memory. If Append or
+// Sync returns an error the in-memory state is not modified and the error
+// is returned to the caller. Safe to call before any writes. Passing nil
+// disables WAL durability.
+func (s *Store) SetWAL(w WAL) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if w == nil {
+		s.wal = nil
+		return
+	}
+	s.wal = w
 }
 
 // SetOnUpdate registers a callback invoked after every write that changes the
@@ -114,8 +141,24 @@ func (s *Store) SetOnEvict(fn func(key string)) {
 // local bookkeeping operation for keys that have migrated to another node; it
 // must not be used for logical deletes (use Delete for that). The onEvict
 // callback fires so the anti-entropy manager can drop the key from its trees.
-func (s *Store) Evict(key string) {
+// When a WAL is installed, the eviction is logged and fsynced before applying.
+func (s *Store) Evict(key string) error {
 	s.mu.Lock()
+	if s.wal != nil {
+		payload, err := encodeEvict(key)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		if _, err := s.wal.Append(payload); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		if err := s.wal.Sync(); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+	}
 	onEvict := s.onEvict
 	delete(s.data, key)
 	delete(s.tombstoneAges, key)
@@ -123,6 +166,7 @@ func (s *Store) Evict(key string) {
 	if onEvict != nil {
 		onEvict(key)
 	}
+	return nil
 }
 
 // tombstoneSentinel is XOR'd into entryHash for deleted siblings so that a
@@ -173,10 +217,24 @@ func (s *Store) applySibling(key string, incoming Sibling) bool {
 // Put stores key=value at version v. If v is dominated by any existing sibling
 // the write is dropped. If v dominates existing siblings they are replaced. If v
 // is concurrent with existing siblings it is appended, producing a conflict.
-// Equal clocks are treated as an idempotent write and ignored.
-func (s *Store) Put(key, value string, v VectorClockVersion) {
+// Equal clocks are treated as an idempotent write and ignored. When a WAL is
+// installed, the write is logged and fsynced before being applied to memory;
+// any WAL error returns without modifying state.
+func (s *Store) Put(key, value string, v VectorClockVersion) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.wal != nil {
+		payload, err := encodePut(key, value, v)
+		if err != nil {
+			return err
+		}
+		if _, err := s.wal.Append(payload); err != nil {
+			return err
+		}
+		if err := s.wal.Sync(); err != nil {
+			return err
+		}
+	}
 	if s.applySibling(key, Sibling{
 		Value:   value,
 		Version: v,
@@ -189,49 +247,89 @@ func (s *Store) Put(key, value string, v VectorClockVersion) {
 			s.onUpdate(key, entryHash(s.data[key]))
 		}
 	}
+	return nil
 }
 
 // Delete writes a tombstone for key at version v. The tombstone participates in
 // conflict resolution identically to a value write: it wins if v dominates
 // existing siblings, loses if dominated, and becomes a sibling on concurrent
-// writes.
-func (s *Store) Delete(key string, v VectorClockVersion) {
+// writes. When a WAL is installed, the tombstone (with its original wall time)
+// is logged and fsynced before being applied to memory.
+func (s *Store) Delete(key string, v VectorClockVersion) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	tombAt := time.Now()
+	if s.wal != nil {
+		payload, err := encodeDelete(key, tombAt, v)
+		if err != nil {
+			return err
+		}
+		if _, err := s.wal.Append(payload); err != nil {
+			return err
+		}
+		if err := s.wal.Sync(); err != nil {
+			return err
+		}
+	}
 	if s.applySibling(key, Sibling{Deleted: true, Version: v}) {
 		// Always record the current time so that a new deletion event (different
 		// clock) resets the TTL window. Equal-clock re-applications never reach
 		// this branch because applySibling returns false for idempotent writes.
-		s.tombstoneAges[key] = time.Now()
+		s.tombstoneAges[key] = tombAt
 		if s.onUpdate != nil {
 			s.onUpdate(key, entryHash(s.data[key]))
 		}
 	}
+	return nil
 }
 
 // GCTombstones removes uncontested tombstones — entries with exactly one
 // sibling that is deleted — older than maxAge. It returns the purged keys so
 // callers can remove them from auxiliary structures such as Merkle trees.
+// When a WAL is installed, a single GC record listing every purged key is
+// appended and fsynced before the in-memory deletes happen. This guarantees
+// that WAL replay does not resurrect already-GC'd tombstones.
 //
 // Safety: only call after bidirectional anti-entropy has had time to propagate
 // tombstones to all replicas. maxAge must be longer than the maximum expected
 // propagation window (see gcTTL in the anti-entropy manager).
-func (s *Store) GCTombstones(maxAge time.Duration) []string {
+func (s *Store) GCTombstones(maxAge time.Duration) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	cutoff := time.Now().Add(-maxAge)
+	purged := collectExpiredTombstones(s.data, s.tombstoneAges, time.Now().Add(-maxAge))
+	if len(purged) == 0 {
+		return nil, nil
+	}
+	if s.wal != nil {
+		payload, err := encodeGC(purged)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := s.wal.Append(payload); err != nil {
+			return nil, err
+		}
+		if err := s.wal.Sync(); err != nil {
+			return nil, err
+		}
+	}
+	for _, key := range purged {
+		delete(s.data, key)
+		delete(s.tombstoneAges, key)
+	}
+	return purged, nil
+}
+
+func collectExpiredTombstones(data map[string]Entry, ages map[string]time.Time, cutoff time.Time) []string {
 	var purged []string
-	for key, entry := range s.data {
+	for key, entry := range data {
 		if len(entry.Siblings) != 1 || !entry.Siblings[0].Deleted {
 			continue
 		}
-		age, ok := s.tombstoneAges[key]
+		age, ok := ages[key]
 		if !ok || age.After(cutoff) {
 			continue
 		}
-		delete(s.data, key)
-		delete(s.tombstoneAges, key)
 		purged = append(purged, key)
 	}
 	return purged
@@ -242,6 +340,128 @@ func (s *Store) Get(key string) (Entry, bool) {
 	defer s.mu.RUnlock()
 	e, ok := s.data[key]
 	return e, ok
+}
+
+// WriteCheckpoint appends a CHECKPOINT record naming snapshotSeq and fsyncs.
+// Used after a snapshot is durable to mark which WAL prefix is covered.
+// No-op if no WAL is installed.
+func (s *Store) WriteCheckpoint(snapshotSeq uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.wal == nil {
+		return nil
+	}
+	if _, err := s.wal.Append(encodeCheckpoint(snapshotSeq)); err != nil {
+		return err
+	}
+	return s.wal.Sync()
+}
+
+// Replay applies every record from r whose sequence is greater than
+// skipBelow. Suppresses the onUpdate callback; callers are expected to
+// rebuild any derived state (e.g. Merkle trees) after Replay returns.
+// Returns the highest sequence number observed (whether skipped or applied).
+func (s *Store) Replay(r *wal.Reader, skipBelow uint64) (uint64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var lastSeq uint64
+	for {
+		rec, err := r.Next()
+		if errors.Is(err, io.EOF) {
+			return lastSeq, nil
+		}
+		if err != nil {
+			return 0, err
+		}
+		lastSeq = rec.Seq
+		if rec.Seq <= skipBelow {
+			continue
+		}
+		if err := s.applyWALRecord(rec.Payload); err != nil {
+			return 0, fmt.Errorf("apply seq %d: %w", rec.Seq, err)
+		}
+	}
+}
+
+// applyWALRecord decodes and applies a single WAL payload. Caller must hold
+// s.mu. Suppresses onUpdate.
+func (s *Store) applyWALRecord(payload []byte) error {
+	if len(payload) < 1 {
+		return errors.New("store: empty wal record")
+	}
+	body := payload[1:]
+	switch payload[0] {
+	case recPut:
+		return s.applyPutRecord(body)
+	case recDelete:
+		return s.applyDeleteRecord(body)
+	case recEvict:
+		return s.applyEvictRecord(body)
+	case recGC:
+		return s.applyGCRecord(body)
+	case recCheckpoint:
+		return s.applyCheckpointRecord(body)
+	default:
+		return fmt.Errorf("%w: 0x%02x", errUnknownRecordType, payload[0])
+	}
+}
+
+func (s *Store) applyPutRecord(body []byte) error {
+	key, value, v, err := decodePut(body)
+	if err != nil {
+		return err
+	}
+	sib := Sibling{Value: value, Version: v, Hash: murmur3.Sum32([]byte(value))}
+	if s.applySibling(key, sib) {
+		delete(s.tombstoneAges, key)
+	}
+	return nil
+}
+
+func (s *Store) applyDeleteRecord(body []byte) error {
+	key, tombAt, v, err := decodeDelete(body)
+	if err != nil {
+		return err
+	}
+	if s.applySibling(key, Sibling{Deleted: true, Version: v}) {
+		s.tombstoneAges[key] = tombAt
+	}
+	return nil
+}
+
+func (s *Store) applyEvictRecord(body []byte) error {
+	key, err := decodeEvict(body)
+	if err != nil {
+		return err
+	}
+	delete(s.data, key)
+	delete(s.tombstoneAges, key)
+	return nil
+}
+
+func (s *Store) applyGCRecord(body []byte) error {
+	keys, err := decodeGC(body)
+	if err != nil {
+		return err
+	}
+	for _, key := range keys {
+		delete(s.data, key)
+		delete(s.tombstoneAges, key)
+	}
+	return nil
+}
+
+func (s *Store) applyCheckpointRecord(body []byte) error {
+	_, err := decodeCheckpoint(body)
+	return err
+}
+
+// SetTombstoneAge overrides the recorded age for a tombstone. Intended for
+// tests that need to simulate aged-out tombstones without sleeping.
+func (s *Store) SetTombstoneAge(key string, t time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tombstoneAges[key] = t
 }
 
 // KeyHashes returns a snapshot of every key and its current entry hash.

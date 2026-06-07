@@ -16,6 +16,7 @@
 | `REPLICA_TIMEOUT_MS` | `500` | Timeout in milliseconds for inter-node replication and read calls |
 | `SEED_NODES` | (none) | Comma-separated HTTP addresses to bootstrap from on first join |
 | `SELF_WEIGHT` | `1.0` | Capacity weight for vnode allocation; `2.0` gives twice the vnodes |
+| `DATA_DIR` | (none) | Directory for WAL + snapshot persistence. Empty disables persistence (memory-only) |
 
 **Notes on specific variables:**
 
@@ -26,6 +27,8 @@
 `SEED_NODES` is only used at startup. It does not need to list every node in the cluster - one live seed is sufficient to join. If omitted, the node starts as a standalone single-node cluster.
 
 `SELF_WEIGHT` follows the formula `round(REPLICAS * SELF_WEIGHT)` with a minimum of 1 vnode. A weight of `0.5` on a 150-replica configuration gives 75 vnodes and roughly half the key space.
+
+`DATA_DIR` enables crash-durable persistence: every `PUT`/`DELETE`/`EVICT`/`GC` is appended to a write-ahead log and fsynced before the in-memory store is updated, and a snapshot is taken on graceful shutdown. On restart the node replays its snapshot+WAL before joining gossip. A node whose last clean shutdown is older than `GCTTL` (24 h) discards its local data and re-bootstraps from peers, so the cluster cannot resurrect tombstones that other replicas have already purged. See [docs/persistence.md](persistence.md) for the format and recovery flow.
 
 ## Running Locally
 
