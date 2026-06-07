@@ -82,13 +82,20 @@ type Entry struct {
 	Siblings []Sibling
 }
 
+// WAL is the contract the store needs from a write-ahead log. *wal.Writer
+// satisfies it; tests inject fakes to exercise error paths.
+type WAL interface {
+	Append(payload []byte) (uint64, error)
+	Sync() error
+}
+
 type Store struct {
 	mu            sync.RWMutex
 	data          map[string]Entry
 	onUpdate      func(key string, hash uint32)
 	onEvict       func(key string)
 	tombstoneAges map[string]time.Time // key → when tombstone was first accepted on this node
-	wal           *wal.Writer          // nil = memory-only mode
+	wal           WAL                  // nil = memory-only mode
 }
 
 func New() *Store {
@@ -98,14 +105,18 @@ func New() *Store {
 	}
 }
 
-// SetWAL installs a write-ahead log writer. After SetWAL, every mutating
-// operation appends to the log and fsyncs before applying to memory. If
-// Append or Sync returns an error the in-memory state is not modified and
-// the error is returned to the caller. Safe to call before any writes.
-// Passing nil disables WAL durability.
-func (s *Store) SetWAL(w *wal.Writer) {
+// SetWAL installs a write-ahead log. After SetWAL, every mutating operation
+// appends to the log and fsyncs before applying to memory. If Append or
+// Sync returns an error the in-memory state is not modified and the error
+// is returned to the caller. Safe to call before any writes. Passing nil
+// disables WAL durability.
+func (s *Store) SetWAL(w WAL) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if w == nil {
+		s.wal = nil
+		return
+	}
 	s.wal = w
 }
 
