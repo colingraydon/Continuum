@@ -6,4 +6,3 @@ linters:
       - path: "_test\\.go"
         linters:
           - errcheck
-        text: "Body.Close"

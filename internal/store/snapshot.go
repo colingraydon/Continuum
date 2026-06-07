@@ -204,50 +204,56 @@ func writeEntry(w io.Writer, key string, entry Entry, ages map[string]time.Time)
 		return err
 	}
 	for _, sib := range entry.Siblings {
-		if err := writeLenString32(w, sib.Value); err != nil {
+		if err := writeSibling(w, key, sib); err != nil {
 			return err
-		}
-		var d byte
-		if sib.Deleted {
-			d = 1
-		}
-		if _, err := w.Write([]byte{d}); err != nil {
-			return err
-		}
-		if len(sib.Version.Clocks) > 0xFFFF {
-			return fmt.Errorf("snapshot: too many clock entries for %q: %d", key, len(sib.Version.Clocks))
-		}
-		if err := writeUint16(w, uint16(len(sib.Version.Clocks))); err != nil {
-			return err
-		}
-		// Sort for deterministic encoding (helps tests and reproducibility).
-		ids := make([]string, 0, len(sib.Version.Clocks))
-		for id := range sib.Version.Clocks {
-			ids = append(ids, id)
-		}
-		sort.Strings(ids)
-		for _, id := range ids {
-			if err := writeLenString16(w, id); err != nil {
-				return err
-			}
-			if err := writeUint64(w, sib.Version.Clocks[id]); err != nil {
-				return err
-			}
 		}
 	}
-	if t, ok := ages[key]; ok {
-		if _, err := w.Write([]byte{1}); err != nil {
+	return writeTombstoneAge(w, key, ages)
+}
+
+func writeSibling(w io.Writer, key string, sib Sibling) error {
+	if err := writeLenString32(w, sib.Value); err != nil {
+		return err
+	}
+	d := byte(0)
+	if sib.Deleted {
+		d = 1
+	}
+	if _, err := w.Write([]byte{d}); err != nil {
+		return err
+	}
+	if len(sib.Version.Clocks) > 0xFFFF {
+		return fmt.Errorf("snapshot: too many clock entries for %q: %d", key, len(sib.Version.Clocks))
+	}
+	if err := writeUint16(w, uint16(len(sib.Version.Clocks))); err != nil {
+		return err
+	}
+	ids := make([]string, 0, len(sib.Version.Clocks))
+	for id := range sib.Version.Clocks {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids) // deterministic encoding
+	for _, id := range ids {
+		if err := writeLenString16(w, id); err != nil {
 			return err
 		}
-		if err := writeUint64(w, uint64(t.UnixNano())); err != nil {
-			return err
-		}
-	} else {
-		if _, err := w.Write([]byte{0}); err != nil {
+		if err := writeUint64(w, sib.Version.Clocks[id]); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func writeTombstoneAge(w io.Writer, key string, ages map[string]time.Time) error {
+	t, ok := ages[key]
+	if !ok {
+		_, err := w.Write([]byte{0})
+		return err
+	}
+	if _, err := w.Write([]byte{1}); err != nil {
+		return err
+	}
+	return writeUint64(w, uint64(t.UnixNano()))
 }
 
 func readEntry(r io.Reader) (string, Entry, time.Time, bool, error) {
@@ -261,52 +267,68 @@ func readEntry(r io.Reader) (string, Entry, time.Time, bool, error) {
 	}
 	sibs := make([]Sibling, sibCount)
 	for i := range sibs {
-		value, err := readLenString32(r)
+		sib, err := readSibling(r, i)
 		if err != nil {
-			return "", Entry{}, time.Time{}, false, fmt.Errorf("sib %d value: %w", i, err)
+			return "", Entry{}, time.Time{}, false, err
 		}
-		var del [1]byte
-		if _, err := io.ReadFull(r, del[:]); err != nil {
-			return "", Entry{}, time.Time{}, false, fmt.Errorf("sib %d deleted: %w", i, err)
-		}
-		clkCount, err := readUint16(r)
-		if err != nil {
-			return "", Entry{}, time.Time{}, false, fmt.Errorf("sib %d clk count: %w", i, err)
-		}
-		clocks := make(map[string]uint64, clkCount)
-		for j := uint16(0); j < clkCount; j++ {
-			id, err := readLenString16(r)
-			if err != nil {
-				return "", Entry{}, time.Time{}, false, fmt.Errorf("sib %d clk id: %w", i, err)
-			}
-			counter, err := readUint64(r)
-			if err != nil {
-				return "", Entry{}, time.Time{}, false, fmt.Errorf("sib %d counter: %w", i, err)
-			}
-			clocks[id] = counter
-		}
-		sibs[i] = Sibling{
-			Value:   value,
-			Deleted: del[0] == 1,
-			Version: VectorClockVersion{Clocks: clocks},
-		}
-		if !sibs[i].Deleted {
-			sibs[i].Hash = murmur3.Sum32([]byte(value))
-		}
+		sibs[i] = sib
 	}
+	t, hasTomb, err := readTombstoneAge(r)
+	if err != nil {
+		return "", Entry{}, time.Time{}, false, err
+	}
+	return key, Entry{Siblings: sibs}, t, hasTomb, nil
+}
+
+func readSibling(r io.Reader, i int) (Sibling, error) {
+	value, err := readLenString32(r)
+	if err != nil {
+		return Sibling{}, fmt.Errorf("sib %d value: %w", i, err)
+	}
+	var del [1]byte
+	if _, err := io.ReadFull(r, del[:]); err != nil {
+		return Sibling{}, fmt.Errorf("sib %d deleted: %w", i, err)
+	}
+	clkCount, err := readUint16(r)
+	if err != nil {
+		return Sibling{}, fmt.Errorf("sib %d clk count: %w", i, err)
+	}
+	clocks := make(map[string]uint64, clkCount)
+	for j := uint16(0); j < clkCount; j++ {
+		id, err := readLenString16(r)
+		if err != nil {
+			return Sibling{}, fmt.Errorf("sib %d clk id: %w", i, err)
+		}
+		counter, err := readUint64(r)
+		if err != nil {
+			return Sibling{}, fmt.Errorf("sib %d counter: %w", i, err)
+		}
+		clocks[id] = counter
+	}
+	sib := Sibling{
+		Value:   value,
+		Deleted: del[0] == 1,
+		Version: VectorClockVersion{Clocks: clocks},
+	}
+	if !sib.Deleted {
+		sib.Hash = murmur3.Sum32([]byte(value))
+	}
+	return sib, nil
+}
+
+func readTombstoneAge(r io.Reader) (time.Time, bool, error) {
 	var hasTomb [1]byte
 	if _, err := io.ReadFull(r, hasTomb[:]); err != nil {
-		return "", Entry{}, time.Time{}, false, fmt.Errorf("has tombstone: %w", err)
+		return time.Time{}, false, fmt.Errorf("has tombstone: %w", err)
 	}
-	var t time.Time
-	if hasTomb[0] == 1 {
-		ts, err := readUint64(r)
-		if err != nil {
-			return "", Entry{}, time.Time{}, false, fmt.Errorf("tombstone ts: %w", err)
-		}
-		t = time.Unix(0, int64(ts))
+	if hasTomb[0] != 1 {
+		return time.Time{}, false, nil
 	}
-	return key, Entry{Siblings: sibs}, t, hasTomb[0] == 1, nil
+	ts, err := readUint64(r)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("tombstone ts: %w", err)
+	}
+	return time.Unix(0, int64(ts)), true, nil
 }
 
 // --- encoding helpers ---

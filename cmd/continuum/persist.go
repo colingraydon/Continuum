@@ -57,18 +57,8 @@ func recoverStore(dataDir, nodeID string, gcTTL time.Duration) (*store.Store, *p
 		return store.New(), nil, nil
 	}
 
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		return nil, nil, fmt.Errorf("persist: mkdir %s: %w", dataDir, err)
-	}
-	snapDir := filepath.Join(dataDir, snapDirName)
-	walDir := filepath.Join(dataDir, walDirName)
-	if err := os.MkdirAll(snapDir, 0o755); err != nil {
-		return nil, nil, err
-	}
-	if err := os.MkdirAll(walDir, 0o755); err != nil {
-		return nil, nil, err
-	}
-	if err := cleanupSnapTmp(snapDir); err != nil {
+	snapDir, walDir, err := setupDataDirs(dataDir)
+	if err != nil {
 		return nil, nil, err
 	}
 
@@ -83,56 +73,86 @@ func recoverStore(dataDir, nodeID string, gcTTL time.Duration) (*store.Store, *p
 	s := store.New()
 	p := &persistence{dataDir: dataDir, nodeID: nodeID, s: s}
 
-	// Downtime gate.
-	if !hasMeta || m.LastCleanShutdown.IsZero() || time.Since(m.LastCleanShutdown) > gcTTL {
-		if hasMeta {
-			log.Printf("persist: last clean shutdown was %v ago > GCTTL %v; discarding local data and re-bootstrapping",
-				time.Since(m.LastCleanShutdown).Round(time.Second), gcTTL)
-		} else {
-			log.Printf("persist: no prior meta; starting fresh")
-		}
+	if downtimeGateFired(m, hasMeta, gcTTL) {
+		logDowntimeGate(m, hasMeta, gcTTL)
 		if err := clearStorageFiles(snapDir, walDir); err != nil {
 			return nil, nil, err
 		}
-		w, err := wal.Open(walDir)
-		if err != nil {
-			return nil, nil, err
-		}
-		p.w = w
-		s.SetWAL(w)
-		return s, p, nil
+		return openWALAndReturn(s, p, walDir)
 	}
 
-	// Load latest snapshot, if any.
-	var skipBelow uint64
+	skipBelow, err := loadSnapshotIfPresent(s, snapDir, nodeID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := replayWALSegments(s, walDir, skipBelow); err != nil {
+		return nil, nil, err
+	}
+	return openWALAndReturn(s, p, walDir)
+}
+
+func setupDataDirs(dataDir string) (snapDir, walDir string, err error) {
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		return "", "", fmt.Errorf("persist: mkdir %s: %w", dataDir, err)
+	}
+	snapDir = filepath.Join(dataDir, snapDirName)
+	walDir = filepath.Join(dataDir, walDirName)
+	if err := os.MkdirAll(snapDir, 0o755); err != nil {
+		return "", "", err
+	}
+	if err := os.MkdirAll(walDir, 0o755); err != nil {
+		return "", "", err
+	}
+	if err := cleanupSnapTmp(snapDir); err != nil {
+		return "", "", err
+	}
+	return snapDir, walDir, nil
+}
+
+func downtimeGateFired(m persistMeta, hasMeta bool, gcTTL time.Duration) bool {
+	return !hasMeta || m.LastCleanShutdown.IsZero() || time.Since(m.LastCleanShutdown) > gcTTL
+}
+
+func logDowntimeGate(m persistMeta, hasMeta bool, gcTTL time.Duration) {
+	if hasMeta {
+		log.Printf("persist: last clean shutdown was %v ago > GCTTL %v; discarding local data and re-bootstrapping",
+			time.Since(m.LastCleanShutdown).Round(time.Second), gcTTL)
+	} else {
+		log.Printf("persist: no prior meta; starting fresh")
+	}
+}
+
+func loadSnapshotIfPresent(s *store.Store, snapDir, nodeID string) (uint64, error) {
 	snapPath, err := findLatestSnapshot(snapDir)
 	if err != nil {
-		return nil, nil, err
+		return 0, err
 	}
-	if snapPath != "" {
-		f, err := os.Open(snapPath)
-		if err != nil {
-			return nil, nil, fmt.Errorf("persist: open snapshot: %w", err)
-		}
-		hdr, err := s.LoadSnapshot(f, nodeID)
-		_ = f.Close()
-		if err != nil {
-			return nil, nil, fmt.Errorf("persist: load snapshot: %w", err)
-		}
-		skipBelow = hdr.SequenceAt
-		log.Printf("persist: loaded snapshot epoch=%d sequence_at=%d entries=%d",
-			hdr.Epoch, hdr.SequenceAt, hdr.EntryCount)
+	if snapPath == "" {
+		return 0, nil
 	}
+	f, err := os.Open(snapPath)
+	if err != nil {
+		return 0, fmt.Errorf("persist: open snapshot: %w", err)
+	}
+	hdr, err := s.LoadSnapshot(f, nodeID)
+	_ = f.Close()
+	if err != nil {
+		return 0, fmt.Errorf("persist: load snapshot: %w", err)
+	}
+	log.Printf("persist: loaded snapshot epoch=%d sequence_at=%d entries=%d",
+		hdr.Epoch, hdr.SequenceAt, hdr.EntryCount)
+	return hdr.SequenceAt, nil
+}
 
-	// Replay WAL records past the snapshot.
+func replayWALSegments(s *store.Store, walDir string, skipBelow uint64) error {
 	r, err := wal.NewReader(walDir)
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
 	lastSeq, err := s.Replay(r, skipBelow)
 	_ = r.Close()
 	if err != nil {
-		return nil, nil, fmt.Errorf("persist: replay: %w", err)
+		return fmt.Errorf("persist: replay: %w", err)
 	}
 	if r.TornTail() {
 		log.Printf("persist: torn tail detected at WAL end; will be truncated on next open")
@@ -140,8 +160,10 @@ func recoverStore(dataDir, nodeID string, gcTTL time.Duration) (*store.Store, *p
 	if lastSeq > skipBelow {
 		log.Printf("persist: replayed WAL through seq %d (skipped <= %d)", lastSeq, skipBelow)
 	}
+	return nil
+}
 
-	// Open WAL writer for live traffic.
+func openWALAndReturn(s *store.Store, p *persistence, walDir string) (*store.Store, *persistence, error) {
 	w, err := wal.Open(walDir)
 	if err != nil {
 		return nil, nil, err

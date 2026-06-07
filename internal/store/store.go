@@ -297,18 +297,7 @@ func (s *Store) GCTombstones(maxAge time.Duration) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	cutoff := time.Now().Add(-maxAge)
-	var purged []string
-	for key, entry := range s.data {
-		if len(entry.Siblings) != 1 || !entry.Siblings[0].Deleted {
-			continue
-		}
-		age, ok := s.tombstoneAges[key]
-		if !ok || age.After(cutoff) {
-			continue
-		}
-		purged = append(purged, key)
-	}
+	purged := collectExpiredTombstones(s.data, s.tombstoneAges, time.Now().Add(-maxAge))
 	if len(purged) == 0 {
 		return nil, nil
 	}
@@ -329,6 +318,21 @@ func (s *Store) GCTombstones(maxAge time.Duration) ([]string, error) {
 		delete(s.tombstoneAges, key)
 	}
 	return purged, nil
+}
+
+func collectExpiredTombstones(data map[string]Entry, ages map[string]time.Time, cutoff time.Time) []string {
+	var purged []string
+	for key, entry := range data {
+		if len(entry.Siblings) != 1 || !entry.Siblings[0].Deleted {
+			continue
+		}
+		age, ok := ages[key]
+		if !ok || age.After(cutoff) {
+			continue
+		}
+		purged = append(purged, key)
+	}
+	return purged
 }
 
 func (s *Store) Get(key string) (Entry, bool) {
@@ -392,47 +396,76 @@ func (s *Store) applyWALRecord(payload []byte) error {
 	body := payload[1:]
 	switch payload[0] {
 	case recPut:
-		key, value, v, err := decodePut(body)
-		if err != nil {
-			return err
-		}
-		sib := Sibling{Value: value, Version: v, Hash: murmur3.Sum32([]byte(value))}
-		if s.applySibling(key, sib) {
-			delete(s.tombstoneAges, key)
-		}
+		return s.applyPutRecord(body)
 	case recDelete:
-		key, tombAt, v, err := decodeDelete(body)
-		if err != nil {
-			return err
-		}
-		if s.applySibling(key, Sibling{Deleted: true, Version: v}) {
-			s.tombstoneAges[key] = tombAt
-		}
+		return s.applyDeleteRecord(body)
 	case recEvict:
-		key, err := decodeEvict(body)
-		if err != nil {
-			return err
-		}
-		delete(s.data, key)
-		delete(s.tombstoneAges, key)
+		return s.applyEvictRecord(body)
 	case recGC:
-		keys, err := decodeGC(body)
-		if err != nil {
-			return err
-		}
-		for _, key := range keys {
-			delete(s.data, key)
-			delete(s.tombstoneAges, key)
-		}
+		return s.applyGCRecord(body)
 	case recCheckpoint:
-		// No-op for state; the snapshot's sequence_at drives skip logic.
-		if _, err := decodeCheckpoint(body); err != nil {
-			return err
-		}
+		return s.applyCheckpointRecord(body)
 	default:
 		return fmt.Errorf("%w: 0x%02x", errUnknownRecordType, payload[0])
 	}
+}
+
+func (s *Store) applyPutRecord(body []byte) error {
+	key, value, v, err := decodePut(body)
+	if err != nil {
+		return err
+	}
+	sib := Sibling{Value: value, Version: v, Hash: murmur3.Sum32([]byte(value))}
+	if s.applySibling(key, sib) {
+		delete(s.tombstoneAges, key)
+	}
 	return nil
+}
+
+func (s *Store) applyDeleteRecord(body []byte) error {
+	key, tombAt, v, err := decodeDelete(body)
+	if err != nil {
+		return err
+	}
+	if s.applySibling(key, Sibling{Deleted: true, Version: v}) {
+		s.tombstoneAges[key] = tombAt
+	}
+	return nil
+}
+
+func (s *Store) applyEvictRecord(body []byte) error {
+	key, err := decodeEvict(body)
+	if err != nil {
+		return err
+	}
+	delete(s.data, key)
+	delete(s.tombstoneAges, key)
+	return nil
+}
+
+func (s *Store) applyGCRecord(body []byte) error {
+	keys, err := decodeGC(body)
+	if err != nil {
+		return err
+	}
+	for _, key := range keys {
+		delete(s.data, key)
+		delete(s.tombstoneAges, key)
+	}
+	return nil
+}
+
+func (s *Store) applyCheckpointRecord(body []byte) error {
+	_, err := decodeCheckpoint(body)
+	return err
+}
+
+// SetTombstoneAge overrides the recorded age for a tombstone. Intended for
+// tests that need to simulate aged-out tombstones without sleeping.
+func (s *Store) SetTombstoneAge(key string, t time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tombstoneAges[key] = t
 }
 
 // KeyHashes returns a snapshot of every key and its current entry hash.

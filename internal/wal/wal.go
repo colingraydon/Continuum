@@ -250,34 +250,40 @@ func NewReader(dir string) (*Reader, error) {
 func (r *Reader) Next() (Record, error) {
 	for {
 		if r.f == nil {
-			r.idx++
-			if r.idx >= len(r.segments) {
-				return Record{}, io.EOF
+			if err := r.openNextSegment(); err != nil {
+				return Record{}, err
 			}
-			f, err := os.Open(r.segments[r.idx])
-			if err != nil {
-				return Record{}, fmt.Errorf("wal: open %s: %w", r.segments[r.idx], err)
-			}
-			r.f = f
 		}
 		rec, err := readFrame(r.f)
 		if err == nil {
 			return rec, nil
 		}
-		isLast := r.idx == len(r.segments)-1
-		if (errors.Is(err, errTornTail) || errors.Is(err, errCRC)) && isLast {
+		if errors.Is(err, io.EOF) {
+			_ = r.f.Close()
+			r.f = nil
+			continue
+		}
+		if (errors.Is(err, errTornTail) || errors.Is(err, errCRC)) && r.idx == len(r.segments)-1 {
 			r.tornTail = true
 			_ = r.f.Close()
 			r.f = nil
 			return Record{}, io.EOF
 		}
-		if err == io.EOF {
-			_ = r.f.Close()
-			r.f = nil
-			continue
-		}
 		return Record{}, err
 	}
+}
+
+func (r *Reader) openNextSegment() error {
+	r.idx++
+	if r.idx >= len(r.segments) {
+		return io.EOF
+	}
+	f, err := os.Open(r.segments[r.idx])
+	if err != nil {
+		return fmt.Errorf("wal: open %s: %w", r.segments[r.idx], err)
+	}
+	r.f = f
+	return nil
 }
 
 // TornTail reports whether iteration ended because the last segment had a

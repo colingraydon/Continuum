@@ -390,6 +390,25 @@ func TestRunGC_NothingToGC(t *testing.T) {
 	mgr.runGC()
 }
 
+type aeFailWAL struct{ err error }
+
+func (f aeFailWAL) Append([]byte) (uint64, error) { return 0, f.err }
+func (f aeFailWAL) Sync() error                   { return nil }
+
+func TestRunGC_WALErrorIsLogged(t *testing.T) {
+	r, s, _ := newSyncNode(t, "node1")
+	r.AddNode("node1", "127.0.0.1:0")
+
+	key := firstPrimaryKey(r, "node1")
+	s.Delete(key, store.VectorClockVersion{Clocks: map[string]uint64{"node1": 1}})
+	// Force the tombstone age into the past so GCTombstones would normally purge it.
+	s.SetTombstoneAge(key, time.Now().Add(-2*GCTTL))
+
+	s.SetWAL(aeFailWAL{err: fmt.Errorf("disk error")})
+	mgr := New(r, s, "node1", 1, time.Second)
+	mgr.runGC() // must not panic; error is logged
+}
+
 // TestAETreeUpdatedViaOnUpdateCallback verifies that a store write arriving AFTER
 // the anti-entropy manager is initialized is reflected in the Merkle trees via the
 // OnUpdate callback (not the initial rebuild). This tests the wiring that main.go
