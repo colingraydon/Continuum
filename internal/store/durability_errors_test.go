@@ -2,9 +2,13 @@ package store
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/colingraydon/continuum/internal/wal"
 )
 
 // failingWAL is a configurable fake satisfying the WAL interface. Tests
@@ -206,5 +210,51 @@ func TestStore_Replay_DecodeError(t *testing.T) {
 	}
 	if err := s.applyWALRecord([]byte{recCheckpoint, 1, 2}); err == nil {
 		t.Fatalf("expected decode error")
+	}
+}
+
+func TestStore_Replay_ApplyError(t *testing.T) {
+	walDir := filepath.Join(t.TempDir(), "wal")
+	if err := os.MkdirAll(walDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	w, err := wal.Open(walDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Append([]byte{0xFF}); err != nil { // unknown record type
+		t.Fatal(err)
+	}
+	if err := w.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := wal.NewReader(walDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New()
+	if _, err := s.Replay(r, 0); err == nil {
+		t.Fatal("expected Replay to return error for unknown record type")
+	}
+	r.Close()
+}
+
+func TestStore_SetTombstoneAge(t *testing.T) {
+	s := New()
+	if err := s.Delete("k", newTestVC(map[string]uint64{"a": 1})); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-2 * time.Hour)
+	s.SetTombstoneAge("k", past)
+	purged, err := s.GCTombstones(time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(purged) != 1 || purged[0] != "k" {
+		t.Fatalf("expected key purged after SetTombstoneAge, got %v", purged)
 	}
 }

@@ -351,11 +351,7 @@ func (s *Store) WriteCheckpoint(snapshotSeq uint64) error {
 	if s.wal == nil {
 		return nil
 	}
-	payload, err := encodeCheckpoint(snapshotSeq)
-	if err != nil {
-		return err
-	}
-	if _, err := s.wal.Append(payload); err != nil {
+	if _, err := s.wal.Append(encodeCheckpoint(snapshotSeq)); err != nil {
 		return err
 	}
 	return s.wal.Sync()

@@ -61,3 +61,62 @@ func TestEncodeGC_KeyTooLong(t *testing.T) {
 		t.Fatalf("expected error")
 	}
 }
+
+// Decode error paths: truncated payloads exercise readClocks and the decode
+// functions called by applyWALRecord during Replay.
+
+func TestReadClocks_CountTruncated(t *testing.T) {
+	// readUint16 needs 2 bytes; provide only 1.
+	r := strings.NewReader("\x00")
+	if _, err := readClocks(r); err == nil {
+		t.Fatal("expected error for truncated clock count")
+	}
+}
+
+func TestReadClocks_IDTruncated(t *testing.T) {
+	// count=1, then only 1 byte for the 2-byte id_len field.
+	r := strings.NewReader("\x00\x01\x00")
+	if _, err := readClocks(r); err == nil {
+		t.Fatal("expected error for truncated clock id length")
+	}
+}
+
+func TestReadClocks_CounterTruncated(t *testing.T) {
+	// count=1, id_len=1, id='a', then only 3 bytes of the 8-byte counter.
+	r := strings.NewReader("\x00\x01\x00\x01a\x00\x00\x00")
+	if _, err := readClocks(r); err == nil {
+		t.Fatal("expected error for truncated clock counter")
+	}
+}
+
+func TestDecodePut_ValueTruncated(t *testing.T) {
+	// key_len=1, key='k', value_len=100 but no value bytes.
+	body := []byte{0x00, 0x01, 'k', 0x00, 0x00, 0x00, 0x64}
+	if _, _, _, err := decodePut(body); err == nil {
+		t.Fatal("expected error for truncated value")
+	}
+}
+
+func TestDecodePut_ClocksTruncated(t *testing.T) {
+	// key='k', value='v', then only 1 byte for the 2-byte clock count.
+	body := []byte{0x00, 0x01, 'k', 0x00, 0x00, 0x00, 0x01, 'v', 0x00}
+	if _, _, _, err := decodePut(body); err == nil {
+		t.Fatal("expected error for truncated clocks in put")
+	}
+}
+
+func TestDecodeDelete_TimestampTruncated(t *testing.T) {
+	// key='k', then only 4 of the 8 timestamp bytes.
+	body := []byte{0x00, 0x01, 'k', 0x00, 0x00, 0x00, 0x00}
+	if _, _, _, err := decodeDelete(body); err == nil {
+		t.Fatal("expected error for truncated timestamp")
+	}
+}
+
+func TestDecodeDelete_ClocksTruncated(t *testing.T) {
+	// key='k', 8-byte timestamp, then only 1 byte for the 2-byte clock count.
+	body := []byte{0x00, 0x01, 'k', 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	if _, _, _, err := decodeDelete(body); err == nil {
+		t.Fatal("expected error for truncated clocks in delete")
+	}
+}

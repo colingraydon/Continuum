@@ -107,10 +107,7 @@ func TestEncodeGC_Empty(t *testing.T) {
 }
 
 func TestEncodeCheckpoint_RoundTrip(t *testing.T) {
-	enc, err := encodeCheckpoint(99)
-	if err != nil {
-		t.Fatalf("encodeCheckpoint: %v", err)
-	}
+	enc := encodeCheckpoint(99)
 	if enc[0] != recCheckpoint {
 		t.Fatalf("type byte = 0x%02x", enc[0])
 	}

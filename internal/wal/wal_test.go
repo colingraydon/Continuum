@@ -633,6 +633,41 @@ func TestScanSegment_OpenFails(t *testing.T) {
 	}
 }
 
+func TestOpen_EmptyLastSegment(t *testing.T) {
+	dir := t.TempDir()
+	// Seed one valid record so the first segment has a known lastSeq.
+	w, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := w.Append([]byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	nextSeq := w.NextSeq() // 2 after one append
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Add a second, empty segment — simulates a crash after rotation but before any write.
+	emptyPath := filepath.Join(dir, segmentName(nextSeq))
+	if err := os.WriteFile(emptyPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Open must succeed and derive nextSeq from the empty segment's filename.
+	w2, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open with empty last segment: %v", err)
+	}
+	defer w2.Close()
+	if got := w2.NextSeq(); got != nextSeq {
+		t.Fatalf("NextSeq: got %d, want %d", got, nextSeq)
+	}
+}
+
 func TestRotation_StartSegmentFails(t *testing.T) {
 	dir := t.TempDir()
 	w, _ := Open(dir)

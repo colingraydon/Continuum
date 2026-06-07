@@ -42,16 +42,12 @@ func writeClocks(buf *bytes.Buffer, clocks map[string]uint64) error {
 	if len(clocks) > 0xFFFF {
 		return fmt.Errorf("record: too many clock entries: %d", len(clocks))
 	}
-	if err := writeUint16(buf, uint16(len(clocks))); err != nil {
-		return err
-	}
+	_ = writeUint16(buf, uint16(len(clocks))) // bytes.Buffer.Write never fails
 	for _, id := range sortedClockIDs(clocks) {
 		if err := writeLenString16(buf, id); err != nil {
 			return err
 		}
-		if err := writeUint64(buf, clocks[id]); err != nil {
-			return err
-		}
+		_ = writeUint64(buf, clocks[id]) // bytes.Buffer.Write never fails
 	}
 	return nil
 }
@@ -82,9 +78,7 @@ func encodePut(key, value string, v VectorClockVersion) ([]byte, error) {
 	if err := writeLenString16(&buf, key); err != nil {
 		return nil, err
 	}
-	if err := writeLenString32(&buf, value); err != nil {
-		return nil, err
-	}
+	_ = writeLenString32(&buf, value) // bytes.Buffer.Write never fails
 	if err := writeClocks(&buf, v.Clocks); err != nil {
 		return nil, err
 	}
@@ -114,9 +108,7 @@ func encodeDelete(key string, tombAt time.Time, v VectorClockVersion) ([]byte, e
 	if err := writeLenString16(&buf, key); err != nil {
 		return nil, err
 	}
-	if err := writeUint64(&buf, uint64(tombAt.UnixNano())); err != nil {
-		return nil, err
-	}
+	_ = writeUint64(&buf, uint64(tombAt.UnixNano())) // bytes.Buffer.Write never fails
 	if err := writeClocks(&buf, v.Clocks); err != nil {
 		return nil, err
 	}
@@ -196,13 +188,11 @@ func decodeGC(body []byte) ([]string, error) {
 	return keys, nil
 }
 
-func encodeCheckpoint(snapshotSeq uint64) ([]byte, error) {
+func encodeCheckpoint(snapshotSeq uint64) []byte {
 	var buf bytes.Buffer
 	buf.WriteByte(recCheckpoint)
-	if err := writeUint64(&buf, snapshotSeq); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
+	_ = writeUint64(&buf, snapshotSeq) // bytes.Buffer.Write never fails
+	return buf.Bytes()
 }
 
 func decodeCheckpoint(body []byte) (uint64, error) {
