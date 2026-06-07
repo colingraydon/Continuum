@@ -175,12 +175,9 @@ func (w *Writer) TruncateThrough(snapshotSeq uint64) error {
 	if len(segs) <= 1 {
 		return nil
 	}
-	openPath := ""
-	if w.f != nil {
-		openPath = w.f.Name()
-	}
 	// Sequence numbers are contiguous across segments by construction, so
-	// segment i ends at seq(segment i+1) - 1.
+	// segment i ends at seq(segment i+1) - 1. The loop stops before the
+	// last segment, which is always the currently-open one.
 	for i := 0; i < len(segs)-1; i++ {
 		nextStart, err := segmentStartSeq(segs[i+1])
 		if err != nil {
@@ -188,9 +185,6 @@ func (w *Writer) TruncateThrough(snapshotSeq uint64) error {
 		}
 		if nextStart-1 > snapshotSeq {
 			break
-		}
-		if segs[i] == openPath {
-			continue
 		}
 		if err := os.Remove(segs[i]); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("wal: remove %s: %w", segs[i], err)
