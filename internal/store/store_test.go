@@ -434,7 +434,7 @@ func TestGCTombstonesRemovesEligibleTombstone(t *testing.T) {
 	s.Delete("k", clock(map[string]uint64{"node1": 1}))
 
 	// Negative TTL makes every tombstone immediately eligible.
-	purged := s.GCTombstones(-1)
+	purged, _ := s.GCTombstones(-1)
 
 	if len(purged) != 1 || purged[0] != "k" {
 		t.Fatalf("expected [k] purged, got %v", purged)
@@ -448,7 +448,7 @@ func TestGCTombstonesPreservesLiveEntry(t *testing.T) {
 	s := New()
 	s.Put("k", "v", clock(map[string]uint64{"node1": 1}))
 
-	purged := s.GCTombstones(-1)
+	purged, _ := s.GCTombstones(-1)
 
 	if len(purged) != 0 {
 		t.Errorf("live entry must not be GC'd, got %v", purged)
@@ -460,7 +460,7 @@ func TestGCTombstonesPreservesFreshTombstone(t *testing.T) {
 	s.Delete("k", clock(map[string]uint64{"node1": 1}))
 
 	// TTL of 1 hour: tombstone is only milliseconds old, well within the window.
-	purged := s.GCTombstones(time.Hour)
+	purged, _ := s.GCTombstones(time.Hour)
 
 	if len(purged) != 0 {
 		t.Errorf("fresh tombstone must not be GC'd, got %v", purged)
@@ -481,7 +481,7 @@ func TestGCTombstonesPreservesContestedEntry(t *testing.T) {
 		t.Fatalf("expected 2 siblings (contested), got %d", len(e.Siblings))
 	}
 
-	purged := s.GCTombstones(-1)
+	purged, _ := s.GCTombstones(-1)
 
 	if len(purged) != 0 {
 		t.Errorf("contested entry must not be GC'd, got %v", purged)
@@ -490,7 +490,7 @@ func TestGCTombstonesPreservesContestedEntry(t *testing.T) {
 
 func TestGCTombstonesEmptyStore(t *testing.T) {
 	s := New()
-	purged := s.GCTombstones(-1)
+	purged, _ := s.GCTombstones(-1)
 	if len(purged) != 0 {
 		t.Errorf("expected no purges on empty store, got %v", purged)
 	}
@@ -502,7 +502,7 @@ func TestGCTombstonesMultipleKeys(t *testing.T) {
 	s.Delete("b", clock(map[string]uint64{"node1": 1}))
 	s.Put("c", "v", clock(map[string]uint64{"node1": 1}))
 
-	purged := s.GCTombstones(-1)
+	purged, _ := s.GCTombstones(-1)
 
 	if len(purged) != 2 {
 		t.Fatalf("expected 2 purged, got %d: %v", len(purged), purged)
@@ -529,7 +529,7 @@ func TestTombstoneAgeResetAfterWriteDeleteCycle(t *testing.T) {
 	s.Delete("k", clock(map[string]uint64{"node1": 3}))
 
 	// GC with a positive TTL: tombstone is milliseconds old, must NOT be purged.
-	purged := s.GCTombstones(time.Hour)
+	purged, _ := s.GCTombstones(time.Hour)
 	if len(purged) != 0 {
 		t.Error("second tombstone should not be prematurely GC'd due to stale first timestamp")
 	}
@@ -545,7 +545,7 @@ func TestTombstoneAgeNotResetByEqualClockReapplication(t *testing.T) {
 
 	// Both deletes were no-ops after the first; the age should be old enough
 	// that a negative-TTL GC removes the tombstone (not blocked by a reset age).
-	purged := s.GCTombstones(-1)
+	purged, _ := s.GCTombstones(-1)
 	if len(purged) != 1 {
 		t.Errorf("expected tombstone GC'd, got %v", purged)
 	}
@@ -561,7 +561,7 @@ func TestTombstoneAgeUpdatedByNewerDeletion(t *testing.T) {
 	s.Delete("k", clock(map[string]uint64{"node1": 2}))
 
 	// Fresh tombstone must not be GC'd within a positive TTL.
-	purged := s.GCTombstones(time.Hour)
+	purged, _ := s.GCTombstones(time.Hour)
 	if len(purged) != 0 {
 		t.Error("tombstone from newer deletion should not be prematurely GC'd")
 	}

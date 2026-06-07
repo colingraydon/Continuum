@@ -38,10 +38,14 @@ func (h *Handler) applyEntries(entries map[string][]SyncSibling) {
 	for key, sibs := range entries {
 		for _, sib := range sibs {
 			v := store.VectorClockVersion{Clocks: sib.Clocks}
+			var err error
 			if sib.Deleted {
-				h.store.Delete(key, v)
+				err = h.store.Delete(key, v)
 			} else {
-				h.store.Put(key, sib.Value, v)
+				err = h.store.Put(key, sib.Value, v)
+			}
+			if err != nil {
+				log.Printf("migration: apply %s: %v", key, err)
 			}
 		}
 	}
@@ -128,7 +132,10 @@ func (h *Handler) CleanupStaleKeys() {
 			}
 		}
 		if !owned {
-			h.store.Evict(key)
+			if err := h.store.Evict(key); err != nil {
+				log.Printf("migration: evict %s: %v", key, err)
+				continue
+			}
 			evicted++
 		}
 	}
