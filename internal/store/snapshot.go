@@ -9,7 +9,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/spaolacci/murmur3"
+	"github.com/twmb/murmur3"
 )
 
 // Snapshot file layout:

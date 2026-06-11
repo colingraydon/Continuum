@@ -6,7 +6,7 @@ require github.com/emirpasic/gods v1.18.1
 
 require (
 	github.com/prometheus/client_golang v1.23.2
-	github.com/spaolacci/murmur3 v1.1.0
+	github.com/twmb/murmur3 v1.1.8
 )
 
 require (

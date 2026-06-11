@@ -86,7 +86,7 @@ return nil
 ## Recovery flow
 
 1. Read `meta.json`. Refuse to start if `node_id != SELF_ID` (prevents accidental data-dir reuse across nodes).
-2. **Downtime gate**: if `now - last_clean_shutdown > gcTTL` OR meta missing / shutdown unclean → skip steps 3–6. Clear data files, return an empty store, let the existing `Bootstrap()` flow refill primary ranges from current replicas. See "Tombstone GC safety" below.
+2. **Downtime gate**: if `now - last_clean_shutdown > gcTTL` OR meta is missing → skip steps 3–6. Clear data files, return an empty store, let the existing `Bootstrap()` flow refill primary ranges from current replicas. A crash does not update `last_clean_shutdown`, so a crashed node recovers normally as long as its last clean shutdown is within `gcTTL`. See "Tombstone GC safety" below.
 3. Clean up any `*.snap.tmp` left from a crashed snapshot.
 4. Load the highest valid `snap/NNNNNNNN.snap`. Verify header CRC + identity. Set `applied_seq = sequence_at`.
 5. Walk `wal/` segments in sequence order. For each record:
@@ -98,7 +98,7 @@ return nil
    - `GC` → remove keys + `tombstoneAges` directly.
    - `CHECKPOINT` → advance `applied_seq` (skip-ahead optimization).
 6. After replay: `ae.rebuild()` populates Merkle trees from final `store.KeyHashes()`.
-7. Open the next WAL segment for writes. Update meta with `latest_seq`. Only now signal `main` that startup may proceed — gossip stays in bootstrapping until recovery is done.
+7. Open the next WAL segment for writes. Only now signal `main` that startup may proceed — gossip stays in bootstrapping until recovery is done. (`meta.json` is rewritten only at the next clean shutdown.)
 
 ## Shutdown flow
 
@@ -119,7 +119,7 @@ Persistence breaks the implicit assumption behind the current 1-hour `gcTTL`: th
 Rather than rely on an operator invariant (Cassandra's `gc_grace_seconds` approach), the recovery flow enforces it in code:
 
 - On graceful shutdown, write `last_clean_shutdown` into `meta.json`.
-- On startup, compare against `gcTTL`. If exceeded (or meta is missing / shutdown was unclean and exceeds the threshold), refuse to load local data. The node clears its data files, re-enters bootstrapping, and pulls fresh primary ranges from current replicas via the existing `Bootstrap()` path.
+- On startup, compare against `gcTTL`. If exceeded (or meta is missing), refuse to load local data. The node clears its data files, re-enters bootstrapping, and pulls fresh primary ranges from current replicas via the existing `Bootstrap()` path.
 - Bump `gcTTL` from 1 h → 24 h. Covers realistic outages without letting tombstones accumulate indefinitely.
 
 Trade-off: a node down longer than `gcTTL` loses any writes it accepted that hadn't reached quorum. Same risk Cassandra has when `nodetool repair` is forgotten — we just fail closed automatically instead of resurrecting.

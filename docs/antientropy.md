@@ -12,7 +12,7 @@ The primary node for each vnode range owns an in-memory Merkle tree for that ran
 
 ### Merkle Trees
 
-Each Merkle tree covers one vnode range and is partitioned into 16 hash buckets. Keys within the vnode range are assigned to buckets by `keyHash % 16`. Each bucket stores the XOR of all its keys' value hashes. The tree's root hash is the XOR of all bucket hashes.
+Each Merkle tree covers one vnode range and is partitioned into 16 hash buckets. Keys within the vnode range are assigned to buckets by `keyHash % 16`. Each bucket's hash is a murmur3 digest of its sorted (key, value-hash) pairs. The tree's root hash is a murmur3 digest of the 16 bucket hashes in order.
 
 Comparing two Merkle trees requires sending 16 bucket hashes (64 bytes) plus the root hash. If the root hashes match, the replicas are in sync and no further work is done. If the root hashes differ, the per-bucket comparison identifies exactly which buckets diverged, bounding the sync work to only the affected keys.
 

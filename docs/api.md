@@ -194,14 +194,7 @@ Applies a batch of entries to the local store. The replica merges each entry thr
 
 ### Hinted Handoff
 
-**Deliver buffered hints**
-```
-POST /deliver-hints
-Content-Type: application/json
-
-{"node_id": "node3", "address": "node3:8080"}
-```
-Triggered internally when gossip detects a node has recovered. Drains hints for the specified node and replays them as replica sub-writes.
+Hint delivery has no HTTP endpoint. It is triggered internally by the gossip `onChange` callback when a node transitions to alive: the coordinator drains its buffered hints for that node and replays them as replica sub-writes (`PUT`/`DELETE /keys/:key` with `X-Proxied-From` set).
 
 ## Prometheus Metrics
 

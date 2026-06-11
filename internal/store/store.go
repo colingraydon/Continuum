@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/colingraydon/continuum/internal/wal"
-	"github.com/spaolacci/murmur3"
+	"github.com/twmb/murmur3"
 )
 
 // VectorClockVersion tracks per-node logical counters. A clock A happens-before

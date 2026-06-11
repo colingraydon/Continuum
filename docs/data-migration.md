@@ -15,7 +15,7 @@ When a new node starts with `SEED_NODES` set, it marks itself as bootstrapping a
 1. Gossip exchange with seed nodes propagates the bootstrapping flag to the cluster
 2. Existing nodes see the new node as bootstrapping and exclude it from coordinator-role read replica sets
 3. The new node starts accepting replica sub-requests (`X-Proxied-From`) so it can receive writes during migration
-4. The new node calls `handler.Bootstrap()`, which identifies its primary vnode ranges from the ring and issues `POST /sync/keys` requests to each existing replica to pull all entries in those ranges
+4. The new node calls `handler.Bootstrap()`, which identifies its primary vnode ranges from the ring and, for each range and bucket, issues `GET /sync/bucket-keys` followed by `POST /sync/keys` to each existing replica to pull all entries in those ranges
 5. Pulled entries are merged into the local store through the standard vector clock path
 6. On completion, `ml.SetBootstrapping(selfID, false)` is called, propagating the state change via gossip
 

@@ -113,7 +113,7 @@ Continuum shuts down gracefully on `SIGINT` or `SIGTERM`:
 
 The push in step 1 and the flush in step 3 are best-effort - if a successor is unreachable, those keys and hints are not retried. Anti-entropy covers the gap.
 
-Step 5 is what makes the downtime gate work: a node that crashes (rather than shutting down cleanly) will have no `last_clean_shutdown` in meta and will discard its local data on the next start rather than risk resurrecting tombstones that peers have already purged.
+Step 5 is what makes the downtime gate work: the gate compares `last_clean_shutdown` against `GCTTL` on the next start. A node that crashes still recovers by replaying its snapshot and WAL, as long as its last clean shutdown is within `GCTTL`. If the last clean shutdown is older than `GCTTL` (or `meta.json` is missing entirely), the node discards its local data and re-bootstraps rather than risk resurrecting tombstones that peers have already purged.
 
 ## CI Pipeline
 
