@@ -627,7 +627,7 @@ func TestDeleteKeyReplicaPassthrough(t *testing.T) {
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d", w.Code)
 	}
-	e, ok := h.store.Get("k")
+	e, ok, _ := h.store.Get("k")
 	if !ok || !e.Siblings[0].Deleted {
 		t.Error("expected tombstone in local store after replica delete")
 	}
@@ -647,7 +647,7 @@ func TestDeleteKeyClockBootstrapping(t *testing.T) {
 	h.PutKey(httptest.NewRecorder(), putReq)
 
 	// Confirm the value is stored at {self:1}.
-	entry, ok := h.store.Get("k")
+	entry, ok, _ := h.store.Get("k")
 	if !ok || entry.Siblings[0].Version.Clocks["self"] != 1 {
 		t.Fatalf("expected value at clock {self:1}, got %+v", entry)
 	}
@@ -661,7 +661,7 @@ func TestDeleteKeyClockBootstrapping(t *testing.T) {
 	}
 
 	// Tombstone must have been written (not silently dropped).
-	entry, ok = h.store.Get("k")
+	entry, ok, _ = h.store.Get("k")
 	if !ok {
 		t.Fatal("expected entry to exist after delete")
 	}
@@ -1099,7 +1099,7 @@ func TestPushSyncEntriesAppliesValue(t *testing.T) {
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d", w.Code)
 	}
-	e, ok := h.store.Get("fruit")
+	e, ok, _ := h.store.Get("fruit")
 	if !ok {
 		t.Fatal("pushed entry not found in store")
 	}
@@ -1119,7 +1119,7 @@ func TestPushSyncEntriesAppliesTombstone(t *testing.T) {
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d", w.Code)
 	}
-	e, ok := h.store.Get("k")
+	e, ok, _ := h.store.Get("k")
 	if !ok || !e.Siblings[0].Deleted {
 		t.Error("expected tombstone in store after push")
 	}
@@ -1140,7 +1140,7 @@ func TestPushSyncEntriesMultipleKeys(t *testing.T) {
 		t.Fatalf("expected 204, got %d", w.Code)
 	}
 	for _, key := range []string{"k1", "k2"} {
-		if _, ok := h.store.Get(key); !ok {
+		if _, ok, _ := h.store.Get(key); !ok {
 			t.Errorf("expected %q in store after push", key)
 		}
 	}
@@ -1160,7 +1160,7 @@ func TestPushSyncEntriesDominatedEntryDropped(t *testing.T) {
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d", w.Code)
 	}
-	e, _ := h.store.Get("k")
+	e, _, _ := h.store.Get("k")
 	if len(e.Siblings) != 1 || e.Siblings[0].Value != "new" {
 		t.Errorf("dominated push should not overwrite newer local value: %+v", e.Siblings)
 	}
@@ -1361,7 +1361,7 @@ func TestRepairReplicas_SelfRepair(t *testing.T) {
 
 	h.repairReplicas("k", survivors, stale)
 
-	entry, ok := h.store.Get("k")
+	entry, ok, _ := h.store.Get("k")
 	if !ok {
 		t.Fatal("key should exist after self-repair")
 	}
@@ -1380,7 +1380,7 @@ func TestRepairReplicas_SelfRepairTombstone(t *testing.T) {
 
 	h.repairReplicas("k", survivors, stale)
 
-	entry, ok := h.store.Get("k")
+	entry, ok, _ := h.store.Get("k")
 	if !ok {
 		t.Fatal("key should exist (as tombstone) after self-repair")
 	}
@@ -1757,6 +1757,7 @@ func findKeyInOtherRange(otherRanges, selfRanges []ring.VnodeRange) string {
 		}
 	}
 }
+
 // --- Coverage gap tests ---
 
 func TestPutKey_EmptyKey(t *testing.T) {
@@ -1836,7 +1837,7 @@ func TestGetNode_AllNodesBootstrapping(t *testing.T) {
 }
 
 func TestDeliverHints_DirectNilHintStore(t *testing.T) {
-	h := newTestHandler(t) // hintStore is nil
+	h := newTestHandler(t)                   // hintStore is nil
 	h.DeliverHints("node1", "10.0.0.1:8080") // must not panic
 }
 

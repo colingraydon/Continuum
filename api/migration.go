@@ -75,7 +75,11 @@ func (h *Handler) pullVnodeRange(srcAddr string, vnodeHash uint32) error {
 // collectKeyForPush adds the given key's siblings to toPush, keyed by the
 // address of each alive non-self replica that owns the key.
 func (h *Handler) collectKeyForPush(key string, toPush map[string]map[string][]SyncSibling) {
-	entry, ok := h.store.Get(key)
+	entry, ok, err := h.store.Get(key)
+	if err != nil {
+		log.Printf("migration: read %s: %v", key, err)
+		return
+	}
 	if !ok {
 		return
 	}
@@ -104,7 +108,12 @@ func (h *Handler) collectKeyForPush(key string, toPush map[string]map[string][]S
 // HTTP drain so data survives a planned node departure.
 func (h *Handler) PushKeysToSuccessors() {
 	toPush := make(map[string]map[string][]SyncSibling) // addr → key → siblings
-	for key := range h.store.KeyHashes() {
+	hashes, err := h.store.KeyHashes()
+	if err != nil {
+		log.Printf("migration: push scan failed: %v", err)
+		return
+	}
+	for key := range hashes {
 		h.collectKeyForPush(key, toPush)
 	}
 
@@ -122,7 +131,12 @@ func (h *Handler) PushKeysToSuccessors() {
 // (ring has changed, some keys may have moved to the new node).
 func (h *Handler) CleanupStaleKeys() {
 	evicted := 0
-	for key := range h.store.KeyHashes() {
+	hashes, err := h.store.KeyHashes()
+	if err != nil {
+		log.Printf("migration: cleanup scan failed: %v", err)
+		return
+	}
+	for key := range hashes {
 		nodes := h.ring.GetReplicationNodes(key, h.replicationFactor)
 		owned := false
 		for _, n := range nodes {

@@ -1,6 +1,6 @@
 # Persistence
 
-> **Status: implemented (v1).** WAL + snapshot persistence on the store, gated by the `DATA_DIR` environment variable. Hint store persistence and group commit are still future work.
+> **Status: implemented (v2, LSM).** WAL + SSTable persistence on the store, gated by the `DATA_DIR` environment variable. v1's shutdown-only snapshot has been replaced by memtable flushes to immutable SSTables ([docs/sstable.md](sstable.md)); legacy snapshot dirs migrate automatically. Hint store persistence and group commit are still future work.
 
 ## Why
 
@@ -20,13 +20,16 @@ Today every layer holds state in memory only. A graceful single-node restart sur
 
 ```
 DATA_DIR/
-  meta.json                  node_id, last_clean_shutdown, snapshot_epoch, latest_seq
-  snap/NNNNNNNN.snap         snapshot at sequence NNNNNNNN
-  snap/NNNNNNNN.snap.tmp     in-flight; cleaned up at startup
+  meta.json                  node_id, last_clean_shutdown, latest_seq
+  tables/NNNNNNNN.sst        immutable SSTable covering WAL sequences ≤ NNNNNNNN
+  tables/NNNNNNNN.sst.tmp    in-flight flush; cleaned up at startup
   wal/NNNNNNNN.wal           segment starting at sequence NNNNNNNN
+
+  snap/NNNNNNNN.snap         legacy v1 snapshot; migrated to an SSTable on
+                             first startup, then removed
 ```
 
-Segmented WAL: rotate at 64 MB. After a snapshot lands, segments fully covered by it get deleted.
+Segmented WAL: rotate at 64 MB. When the memtable exceeds `MEMTABLE_MAX_BYTES` (default 16 MiB) it is flushed to a new SSTable; segments fully covered by the flush get deleted. Tables are named by the WAL sequence they cover, so the set of live tables is derivable from a directory listing — no manifest file until compaction (which must atomically swap N tables for one) requires it. Because the table rename is atomic and sibling-set merging is idempotent, a crash anywhere in the flush sequence is safe: either the WAL still covers the data, or the table and WAL briefly overlap and replay re-merges harmlessly.
 
 ## WAL record format
 
@@ -54,61 +57,80 @@ Notes:
 - `tombstone_at_ns` is the original wall time when the Delete was first accepted. Never `time.Now()` at replay — that would reset TTL and break GC safety.
 - Concurrent siblings: each sibling is its own logical record. Replay re-runs `applySibling` and they re-converge.
 
-## Snapshot format
+## SSTable contents
+
+Tables store `(key, value)` byte pairs in the format described in
+[docs/sstable.md](sstable.md). The value encoding is owned by the store:
 
 ```
-header:  node_id | snapshot_epoch | sequence_at | entry_count | crc32(header)
-body:    (key | siblings[] | tombstone_at?)×entry_count
+ENTRY (0x00): sib_count(2) | siblings | has_tomb(1) | tomb_at_ns(8)?
+EVICT (0x01): nothing — the key was migrated away; shadows older tables
 ```
 
-The body encoding can use `gob` or a simple length-prefixed layout — snapshots are rare and don't need to be fast. The `sequence_at` field is the WAL sequence captured at snapshot time; everything ≤ it can be discarded.
+`tomb_at` rides along so compaction can apply tombstone GC later. The legacy
+v1 snapshot format (same sibling layout, single file, written at shutdown)
+remains readable for one-time migration only.
 
 ## Write path
 
 ```
 acquire s.mu
-seq := next()
-rec := encode(PUT, seq, key, value, clocks)
-err := wal.Append(rec)
-err := wal.Sync()           // or hand to group-commit goroutine and wait
+merged := mergeSibling(key, incoming)   // folds in frozen/table state; one
+                                        // bloom-guarded table probe
+if dropped (dominated/idempotent) { release; return nil }  // no WAL append
+err := wal.Append(rec); err = wal.Sync()
 if err != nil { return err } // memory not modified; WAL is the truth
-applySibling(...)
-onUpdate(...)
+commit merged entry to memtable; onUpdate(merged hash)
 release s.mu
+maybe flush (threshold crossed → freeze memtable, write table outside lock)
 return nil
 ```
 
 **Key invariants:**
 - Ack to caller only after `Sync()` returns. Reads never see writes that aren't on disk.
 - If `Append` or `Sync` fails, memory is **not** modified. The WAL is the source of truth; memory catches up on replay. A partial fsync that left a record on disk but didn't ack is fine — replay will apply it.
-- `Put`, `Delete`, `Evict` now return `error`. Callers (handler, anti-entropy apply path) propagate or log.
+- Dominated and idempotent writes are dropped **before** the WAL append, so the log only contains writes that changed state.
+- **Read-merge-write invariant**: a write merges any older-generation (frozen/table) state for its key into the memtable. A generation that holds a key therefore holds its complete merged sibling set, and reads stop at the first generation hit — no read-time multi-table merging.
+- `Put`, `Delete`, `Evict` return `error`; `Get` and `KeyHashes` do too, since reads can now touch disk. Callers (handler, anti-entropy apply path) propagate or log.
 
 ## Recovery flow
 
 1. Read `meta.json`. Refuse to start if `node_id != SELF_ID` (prevents accidental data-dir reuse across nodes).
 2. **Downtime gate**: if `now - last_clean_shutdown > gcTTL` OR meta is missing → skip steps 3–6. Clear data files, return an empty store, let the existing `Bootstrap()` flow refill primary ranges from current replicas. A crash does not update `last_clean_shutdown`, so a crashed node recovers normally as long as its last clean shutdown is within `gcTTL`. See "Tombstone GC safety" below.
-3. Clean up any `*.snap.tmp` left from a crashed snapshot.
-4. Load the highest valid `snap/NNNNNNNN.snap`. Verify header CRC + identity. Set `applied_seq = sequence_at`.
+3. Clean up any `*.sst.tmp` (and legacy `*.snap.tmp`) left from a crashed flush.
+4. Open every `tables/*.sst`, newest first. Set `applied_seq` to the highest table name. **Legacy migration**: if there are no tables but a v1 snapshot exists, load it as memtable contents and use its `sequence_at` instead; after step 6 it is flushed out as the first SSTable and the snap files are removed.
 5. Walk `wal/` segments in sequence order. For each record:
    - CRC mismatch or short read in the newest segment's tail → truncate to last good offset.
    - CRC mismatch mid-stream (older segment) → corruption, bail.
-   - `seq ≤ applied_seq` → already covered by snapshot, skip.
-   - `PUT`/`DELETE` → call store apply path with `onUpdate` suppressed.
-   - `EVICT` → remove key + tombstone age, suppress callbacks.
+   - `seq ≤ applied_seq` → already covered by a table, skip.
+   - `PUT`/`DELETE` → store apply path with `onUpdate` suppressed; merges against table-resident state (tables are attached first, so the read-merge-write invariant holds after replay).
+   - `EVICT` → eviction path: leaves an evict marker if the key is still visible in a table.
    - `GC` → remove keys + `tombstoneAges` directly.
-   - `CHECKPOINT` → advance `applied_seq` (skip-ahead optimization).
-6. After replay: `ae.rebuild()` populates Merkle trees from final `store.KeyHashes()`.
-7. Open the next WAL segment for writes. Only now signal `main` that startup may proceed — gossip stays in bootstrapping until recovery is done. (`meta.json` is rewritten only at the next clean shutdown.)
+   - `CHECKPOINT` → legacy v1 record, decoded and ignored.
+6. Open the next WAL segment for writes; install the flush policy. After recovery: `ae.rebuild()` populates Merkle trees from `store.KeyHashes()` (a merged scan across memtable + tables). Only now does startup proceed — gossip stays in bootstrapping until recovery is done. (`meta.json` is rewritten only at the next clean shutdown.)
+
+## Flush flow
+
+Triggered by the write that pushes the memtable past `MEMTABLE_MAX_BYTES`
+(and forced at shutdown):
+
+1. Under `s.mu`: move the active memtable (entries + evict markers + tombstone ages) to the *frozen* slot and install a fresh one. Reads consult memtable → frozen → tables, so nothing disappears.
+2. Outside the lock: sort the frozen keys, stream them through the SSTable writer to `tables/NNNNNNNN.sst.tmp` (named by the highest WAL seq the memtable covers), fsync, rename, fsync the directory.
+3. Under `s.mu`: attach the new table reader at the front, clear the frozen slot.
+4. `TruncateThrough(seq)` deletes WAL segments the table now covers.
+
+A failed flush leaves the frozen memtable in place; the next write retries.
+Only one flush runs at a time. The triggering writer pays the flush latency
+inline — a deliberate simplification over a background flush thread; the
+group-commit PR is the natural place to move it off the write path.
 
 ## Shutdown flow
 
-Appended to the existing shutdown sequence in `main.go`, after `FlushHints` and before `g.Stop()`:
+After `FlushHints` and HTTP drain, `finalize()`:
 
-1. Under `s.mu`, copy `data` + `tombstoneAges` + `seq` into a snapshot struct. Release lock.
-2. Write `snap/NNNNNNNN.snap.tmp`, fsync, rename to `.snap`, fsync the directory.
-3. Append a `CHECKPOINT` record to the current WAL.
-4. Delete WAL segments whose end_seq ≤ NNNNNNNN.
-5. Write meta with `last_clean_shutdown = now`, fsync.
+1. `Flush()` the memtable to a final SSTable (truncates covered WAL segments).
+2. Close table readers and the WAL.
+3. Write meta with `last_clean_shutdown = now`, fsync.
 
 ## Tombstone GC safety
 
@@ -136,23 +158,26 @@ Trade-off: a node down longer than `gcTTL` loses any writes it accepted that had
 - CRC mismatch mid-stream → corruption, bail. Don't attempt to skip; record framing depends on length fields.
 - Disk full → `Append` returns error → `Put` returns error → handler returns 503. No fan-out to replicas because the local write failed.
 
-**Snapshot:**
-- Crash mid-snapshot → `.snap.tmp` left behind; cleaned up at startup.
-- Snapshot retention rule: keep the last successful snapshot **and** the WAL segments needed to recover from it until the next snapshot has been fsynced and meta updated. Forgetting either fsync leaves a broken recovery target.
-- Identity check: two nodes pointed at the same `DATA_DIR` would silently clobber each other. Header carries `node_id`; mismatch → refuse to start.
+**Flush / tables:**
+- Crash mid-flush → `.sst.tmp` left behind; cleaned up at startup. The WAL still covers everything in the frozen memtable, so no data is lost.
+- Crash after rename but before WAL truncation → the table and WAL overlap; replay re-merges the covered records idempotently.
+- WAL retention rule: segments are only deleted **after** the covering table is fsynced and renamed. The currently-open segment is never deleted.
+- Identity check: two nodes pointed at the same `DATA_DIR` would silently clobber each other. `meta.json` carries `node_id`; mismatch → refuse to start.
+- A tombstone GC pass skips tombstones whose key is still visible in a table — purging only the memtable copy would resurrect the older table value on read. Table-resident tombstones are reclaimed at compaction.
 
 **Replay:**
 - `Delete` records must replay with their original `tombstone_at_ns`, not `time.Now()`.
 - `GC` records emitted into the WAL prevent a replay-after-GC from resurrecting purged keys.
+- Tables must be attached **before** replay so replayed records merge against table state, preserving the read-merge-write invariant.
 - `onUpdate` (Merkle hook) is suppressed during replay; `ae.rebuild()` runs once at the end.
 
 **Startup ordering:**
 - WAL replay must complete before gossip allows peers to see this node as alive. Otherwise other coordinators fan reads/writes here while the store is half-loaded. The node stays in bootstrapping until `recover()` returns.
 
 **Ring topology shifted while down:**
-- Already handled by `Bootstrap()` and `CleanupStaleKeys()`. With persistence, very long downtime triggers the bootstrap-fresh path; shorter downtime trusts the snapshot and lets anti-entropy + stale-key cleanup converge.
+- Already handled by `Bootstrap()` and `CleanupStaleKeys()`. With persistence, very long downtime triggers the bootstrap-fresh path; shorter downtime trusts the local tables and lets anti-entropy + stale-key cleanup converge. `CleanupStaleKeys` uses the eviction path, so keys already flushed to tables get shadowed by evict markers until compaction drops them.
 
-## v1 PR scope
+## v1 PR scope (historical — superseded by the LSM phases in docs/sstable.md)
 
 ### In
 
@@ -177,7 +202,7 @@ Trade-off: a node down longer than `gcTTL` loses any writes it accepted that had
 - **Group commit.** Per-write fsync in v1. Add a `wal_fsync_seconds` histogram so the next PR has a baseline.
 - **Hint store persistence.** AE backstops it for quorum-acked writes; document the gap.
 - **Sharded store.** Single mutex; works for the current benchmark. Sharding is a separate PR — touches every store call site.
-- **Periodic / threshold-based snapshots.** Shutdown-only in v1. WAL grows unbounded until the next restart. Add a 10 min / 64 MB trigger in a follow-up.
+- **Periodic / threshold-based snapshots.** Shutdown-only in v1. ~~WAL grows unbounded until the next restart.~~ **Done in v2**: memtable flushes to SSTables on a size threshold.
 - **Bounded write queue / backpressure.** Doesn't exist today; not regressing.
 - **Parallel replay.** Unlocked by the sharded-store PR.
 

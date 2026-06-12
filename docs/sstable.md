@@ -1,24 +1,26 @@
 # SSTable
 
-> **Status: implemented, not yet wired in.** `internal/sstable` is phase 1 of
-> the LSM storage engine. The store does not read or write tables yet; that
-> lands with memtable flush (phase 2). See [Roadmap](#roadmap).
+> **Status: wired in (phases 1–3).** `internal/sstable` is the on-disk table
+> format; the store flushes its memtable to tables on a size threshold and
+> serves merged reads across memtable + tables (see
+> [docs/persistence.md](persistence.md) for the flush/recovery flows).
+> Compaction (phase 4) is next. See [Roadmap](#roadmap).
 
 ## Why
 
-The store today is an in-memory map made durable by a WAL and a
-shutdown-only snapshot. That caps the dataset at RAM, makes restart cost
-proportional to total WAL history since the last snapshot, and leaves no path
-to range scans. The LSM (log-structured merge) architecture — the one
-Cassandra, RocksDB, and LevelDB use — fixes all three with the same move:
-never update data in place, only append.
+The v1 store was an in-memory map made durable by a WAL and a shutdown-only
+snapshot. That caps the dataset at RAM, makes restart cost proportional to
+total WAL history since the last snapshot, and leaves no path to range
+scans. The LSM (log-structured merge) architecture — the one Cassandra,
+RocksDB, and LevelDB use — fixes all three with the same move: never update
+data in place, only append.
 
 The three LSM components map onto Continuum like this:
 
-| Component | LSM role | Continuum today |
-| --------- | -------- | --------------- |
-| Memtable | In-memory table absorbing all writes | `store.data` — exists, but grows unbounded |
-| WAL | Crash durability for the memtable | `internal/wal` — exists, semantics unchanged |
+| Component | LSM role | Continuum |
+| --------- | -------- | --------- |
+| Memtable | In-memory table absorbing all writes | `store.data`, bounded by `MEMTABLE_MAX_BYTES` |
+| WAL | Crash durability for the memtable | `internal/wal`, truncated on flush |
 | SSTable | Immutable sorted on-disk table, written when the memtable fills | **this package** |
 
 When the memtable reaches a size threshold it is written out as one SSTable
@@ -91,13 +93,20 @@ this package.
 
 **Sibling merge is the LSM merge operator.** Textbook LSMs resolve
 multiple versions of a key by sequence number — newest wins. Continuum
-can't: a key's value is a set of vector-clocked siblings. Instead, when a
-key appears in several tables (or memtable + tables), the entries are
-merged with the same `applySibling` logic used everywhere else: union the
+can't: a key's value is a set of vector-clocked siblings. Entries are
+merged with the same sibling-union logic used everywhere else: union the
 sibling sets, drop dominated ones. Because that operation is commutative,
 associative, and idempotent, tables can be merged in any order, any number
 of times, without losing a causally-newest write — which is exactly the
 property compaction needs.
+
+**Merging happens at write time, not read time.** A write folds any
+older-generation state for its key into the memtable first (one
+bloom-guarded table probe). The resulting invariant — a generation that
+holds a key holds its complete merged sibling set — means reads stop at the
+first generation hit, newest-first: memtable, frozen memtable, tables. No
+read assembles siblings from multiple tables, and compaction reduces to
+"keep the newest version of each key".
 
 **Tombstone GC moves into compaction.** A tombstone in an old immutable
 table can't be deleted in place. Phase 4 handles it the way Cassandra does:
@@ -120,12 +129,16 @@ guess.
 
 ## Roadmap
 
-1. **SSTable format** *(this package — done)* — writer, reader, iterator,
-   bloom filter, corruption handling.
-2. **Memtable flush** — bound the memtable, flush to an SSTable on
-   threshold, manifest file tracking live tables, WAL truncation keyed to
-   flush instead of shutdown snapshot.
-3. **Merged read path** — `Get` consults memtable + tables via
-   bloom/index; `KeyHashes` and Merkle rebuild scan tables.
+1. **SSTable format** *(done)* — writer, reader, iterator, bloom filter,
+   corruption handling.
+2. **Memtable flush** *(done)* — memtable bounded by `MEMTABLE_MAX_BYTES`,
+   freeze-and-flush to seq-named tables (no manifest needed until
+   compaction), WAL truncation keyed to flush instead of shutdown snapshot,
+   legacy snapshot migration.
+3. **Merged read path** *(done — landed with phase 2, since clearing the
+   memtable without table-aware reads would lose data)* — `Get` walks
+   generations newest-first; `KeyHashes` and Merkle rebuild scan tables;
+   evict markers shadow migrated-away keys.
 4. **Compaction** — size-tiered (Cassandra's default), folding in
-   tombstone GC and evict-marker purge.
+   tombstone GC and evict-marker purge; introduces a manifest for the
+   atomic N-tables-to-one swap.

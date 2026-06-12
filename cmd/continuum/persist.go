@@ -17,17 +17,22 @@ import (
 
 // On-disk layout under DATA_DIR:
 //
-//   meta.json              identity + last_clean_shutdown + snapshot_epoch
-//   snap/NNNNNNNN.snap     latest durable snapshot
-//   snap/NNNNNNNN.snap.tmp in-flight snapshot (cleaned at startup)
-//   wal/NNNNNNNN.wal       segmented write-ahead log
+//   meta.json               identity + last_clean_shutdown + latest_seq
+//   tables/NNNNNNNN.sst     immutable SSTables, named by the WAL sequence
+//                           they cover (highest = replay skip threshold)
+//   tables/NNNNNNNN.sst.tmp in-flight flush (cleaned at startup)
+//   wal/NNNNNNNN.wal        segmented write-ahead log
 //
-// recover() runs on startup. finalize() runs on graceful shutdown.
+//   snap/NNNNNNNN.snap      legacy (pre-LSM) snapshot; migrated to an
+//                           SSTable on first startup, then removed
+//
+// recoverStore() runs on startup. finalize() runs on graceful shutdown.
 
 const (
 	metaFile      = "meta.json"
 	snapDirName   = "snap"
 	walDirName    = "wal"
+	tablesDirName = "tables"
 	snapSuffix    = ".snap"
 	snapTmpSuffix = ".snap.tmp"
 )
@@ -35,7 +40,6 @@ const (
 type persistMeta struct {
 	NodeID            string    `json:"node_id"`
 	LastCleanShutdown time.Time `json:"last_clean_shutdown"`
-	SnapshotEpoch     uint64    `json:"snapshot_epoch"`
 	LatestSeq         uint64    `json:"latest_seq"`
 }
 
@@ -48,19 +52,22 @@ type persistence struct {
 	w       *wal.Writer
 }
 
-// recoverStore opens dataDir, applies the downtime gate, loads the latest
-// snapshot, replays the WAL, and returns the populated store plus a
-// persistence handle for shutdown. If dataDir is empty, persistence is
-// disabled and a fresh in-memory store is returned with nil persistence.
-func recoverStore(dataDir, nodeID string, gcTTL time.Duration) (*store.Store, *persistence, error) {
+// recoverStore opens dataDir, applies the downtime gate, attaches SSTables
+// (migrating a legacy snapshot if one is present), replays the WAL tail, and
+// returns the populated store plus a persistence handle for shutdown.
+// memtableMaxBytes sets the flush threshold. If dataDir is empty,
+// persistence is disabled and a fresh in-memory store is returned with nil
+// persistence.
+func recoverStore(dataDir, nodeID string, gcTTL time.Duration, memtableMaxBytes int64) (*store.Store, *persistence, error) {
 	if dataDir == "" {
 		return store.New(), nil, nil
 	}
 
-	snapDir, walDir, err := setupDataDirs(dataDir)
+	walDir, tablesDir, err := setupDataDirs(dataDir)
 	if err != nil {
 		return nil, nil, err
 	}
+	snapDir := filepath.Join(dataDir, snapDirName)
 
 	m, hasMeta, err := readPersistMeta(filepath.Join(dataDir, metaFile))
 	if err != nil {
@@ -75,38 +82,66 @@ func recoverStore(dataDir, nodeID string, gcTTL time.Duration) (*store.Store, *p
 
 	if downtimeGateFired(m, hasMeta, gcTTL) {
 		logDowntimeGate(m, hasMeta, gcTTL)
-		if err := clearStorageFiles(snapDir, walDir); err != nil {
+		if err := clearStorageFiles(snapDir, walDir, tablesDir); err != nil {
 			return nil, nil, err
 		}
-		return openWALAndReturn(s, p, walDir)
+		return openWALAndReturn(s, p, walDir, tablesDir, memtableMaxBytes)
 	}
 
-	skipBelow, err := loadSnapshotIfPresent(s, snapDir, nodeID)
+	skipBelow, err := s.OpenTables(tablesDir)
 	if err != nil {
 		return nil, nil, err
 	}
+
+	// Legacy migration: a pre-LSM data dir has a snapshot and no tables.
+	// Load it as memtable contents; after the WAL is open it gets flushed
+	// out as the first SSTable and the snapshot files are removed.
+	migrate := false
+	if s.TableCount() == 0 {
+		snapSeq, loaded, err := loadSnapshotIfPresent(s, snapDir, nodeID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if loaded {
+			skipBelow = snapSeq
+			migrate = true
+		}
+	}
+
 	if err := replayWALSegments(s, walDir, skipBelow); err != nil {
 		return nil, nil, err
 	}
-	return openWALAndReturn(s, p, walDir)
+	if _, _, err := openWALAndReturn(s, p, walDir, tablesDir, memtableMaxBytes); err != nil {
+		return nil, nil, err
+	}
+	if migrate {
+		if err := s.Flush(); err != nil {
+			return nil, nil, fmt.Errorf("persist: migrate snapshot to sstable: %w", err)
+		}
+		if err := clearDirFiles(snapDir); err != nil {
+			return nil, nil, err
+		}
+		log.Printf("persist: migrated legacy snapshot to sstable")
+	}
+	return s, p, nil
 }
 
-func setupDataDirs(dataDir string) (snapDir, walDir string, err error) {
+func setupDataDirs(dataDir string) (walDir, tablesDir string, err error) {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return "", "", fmt.Errorf("persist: mkdir %s: %w", dataDir, err)
 	}
-	snapDir = filepath.Join(dataDir, snapDirName)
 	walDir = filepath.Join(dataDir, walDirName)
-	if err := os.MkdirAll(snapDir, 0o755); err != nil {
-		return "", "", err
-	}
+	tablesDir = filepath.Join(dataDir, tablesDirName)
 	if err := os.MkdirAll(walDir, 0o755); err != nil {
 		return "", "", err
 	}
-	if err := cleanupSnapTmp(snapDir); err != nil {
+	if err := os.MkdirAll(tablesDir, 0o755); err != nil {
 		return "", "", err
 	}
-	return snapDir, walDir, nil
+	if err := cleanupSnapTmp(filepath.Join(dataDir, snapDirName)); err != nil {
+		return "", "", err
+	}
+	return walDir, tablesDir, nil
 }
 
 func downtimeGateFired(m persistMeta, hasMeta bool, gcTTL time.Duration) bool {
@@ -122,26 +157,26 @@ func logDowntimeGate(m persistMeta, hasMeta bool, gcTTL time.Duration) {
 	}
 }
 
-func loadSnapshotIfPresent(s *store.Store, snapDir, nodeID string) (uint64, error) {
+func loadSnapshotIfPresent(s *store.Store, snapDir, nodeID string) (uint64, bool, error) {
 	snapPath, err := findLatestSnapshot(snapDir)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	if snapPath == "" {
-		return 0, nil
+		return 0, false, nil
 	}
 	f, err := os.Open(snapPath)
 	if err != nil {
-		return 0, fmt.Errorf("persist: open snapshot: %w", err)
+		return 0, false, fmt.Errorf("persist: open snapshot: %w", err)
 	}
 	hdr, err := s.LoadSnapshot(f, nodeID)
 	_ = f.Close()
 	if err != nil {
-		return 0, fmt.Errorf("persist: load snapshot: %w", err)
+		return 0, false, fmt.Errorf("persist: load snapshot: %w", err)
 	}
-	log.Printf("persist: loaded snapshot epoch=%d sequence_at=%d entries=%d",
+	log.Printf("persist: loaded legacy snapshot epoch=%d sequence_at=%d entries=%d",
 		hdr.Epoch, hdr.SequenceAt, hdr.EntryCount)
-	return hdr.SequenceAt, nil
+	return hdr.SequenceAt, true, nil
 }
 
 func replayWALSegments(s *store.Store, walDir string, skipBelow uint64) error {
@@ -163,77 +198,38 @@ func replayWALSegments(s *store.Store, walDir string, skipBelow uint64) error {
 	return nil
 }
 
-func openWALAndReturn(s *store.Store, p *persistence, walDir string) (*store.Store, *persistence, error) {
+func openWALAndReturn(s *store.Store, p *persistence, walDir, tablesDir string, memtableMaxBytes int64) (*store.Store, *persistence, error) {
 	w, err := wal.Open(walDir)
 	if err != nil {
 		return nil, nil, err
 	}
 	p.w = w
 	s.SetWAL(w)
+	s.SetFlushPolicy(tablesDir, memtableMaxBytes)
 	return s, p, nil
 }
 
-// finalize takes a final snapshot, writes a CHECKPOINT, truncates covered
-// WAL segments, closes the WAL, and updates meta with last_clean_shutdown.
-// Safe to call on a nil receiver — useful for memory-only mode.
+// finalize flushes the memtable to a final SSTable (which truncates covered
+// WAL segments), closes the table readers and the WAL, and updates meta with
+// last_clean_shutdown. Safe to call on a nil receiver — useful for
+// memory-only mode.
 func (p *persistence) finalize() error {
 	if p == nil {
 		return nil
 	}
-	prior, _, _ := readPersistMeta(filepath.Join(p.dataDir, metaFile))
-	nextEpoch := prior.SnapshotEpoch + 1
-	// nextSeq returns the seq the next Append would use; the highest applied
-	// is one less. NextSeq is at least 1 even with no writes, so subtract.
-	seq := p.w.NextSeq() - 1
-
-	snapDir := filepath.Join(p.dataDir, snapDirName)
-	snapName := fmt.Sprintf("%020d%s", nextEpoch, snapSuffix)
-	finalPath := filepath.Join(snapDir, snapName)
-	tmpPath := finalPath + ".tmp"
-
-	f, err := os.Create(tmpPath)
-	if err != nil {
-		return fmt.Errorf("persist: create snap.tmp: %w", err)
+	if err := p.s.Flush(); err != nil {
+		return fmt.Errorf("persist: final flush: %w", err)
 	}
-	hdr := store.SnapHeader{NodeID: p.nodeID, Epoch: nextEpoch, SequenceAt: seq}
-	if err := p.s.Snapshot(f, hdr); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("persist: write snapshot: %w", err)
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("persist: sync snap.tmp: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("persist: close snap.tmp: %w", err)
-	}
-	if err := os.Rename(tmpPath, finalPath); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("persist: rename snap: %w", err)
-	}
-	if err := fsyncDir(snapDir); err != nil {
-		return fmt.Errorf("persist: fsync snap dir: %w", err)
-	}
-
-	// Anchor the WAL with a CHECKPOINT, then drop segments the snapshot covers.
-	if err := p.s.WriteCheckpoint(seq); err != nil {
-		return fmt.Errorf("persist: write checkpoint: %w", err)
-	}
-	if err := p.w.TruncateThrough(seq); err != nil {
-		return fmt.Errorf("persist: truncate wal: %w", err)
+	if err := p.s.CloseTables(); err != nil {
+		return fmt.Errorf("persist: close tables: %w", err)
 	}
 	if err := p.w.Close(); err != nil {
 		return fmt.Errorf("persist: close wal: %w", err)
 	}
-
 	next := persistMeta{
 		NodeID:            p.nodeID,
 		LastCleanShutdown: time.Now(),
-		SnapshotEpoch:     nextEpoch,
-		LatestSeq:         seq,
+		LatestSeq:         p.s.LastSeq(),
 	}
 	if err := writePersistMeta(filepath.Join(p.dataDir, metaFile), next); err != nil {
 		return fmt.Errorf("persist: write meta: %w", err)
@@ -283,6 +279,9 @@ func fsyncDir(path string) error {
 
 func findLatestSnapshot(snapDir string) (string, error) {
 	entries, err := os.ReadDir(snapDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
 	if err != nil {
 		return "", fmt.Errorf("persist: read snap dir: %w", err)
 	}
@@ -322,11 +321,13 @@ func cleanupSnapTmp(snapDir string) error {
 	return nil
 }
 
-func clearStorageFiles(snapDir, walDir string) error {
-	if err := clearDirFiles(snapDir); err != nil {
-		return err
+func clearStorageFiles(dirs ...string) error {
+	for _, dir := range dirs {
+		if err := clearDirFiles(dir); err != nil {
+			return err
+		}
 	}
-	return clearDirFiles(walDir)
+	return nil
 }
 
 func clearDirFiles(dir string) error {

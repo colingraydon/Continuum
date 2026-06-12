@@ -29,6 +29,8 @@ func (f *failingWAL) Append(payload []byte) (uint64, error) {
 	return uint64(len(f.appended)), nil
 }
 
+func (f *failingWAL) TruncateThrough(uint64) error { return nil }
+
 func (f *failingWAL) Sync() error {
 	if f.syncErr != nil {
 		return f.syncErr
@@ -44,7 +46,7 @@ func TestStore_Put_WALAppendError(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "append failed") {
 		t.Fatalf("got %v", err)
 	}
-	if _, ok := s.Get("k"); ok {
+	if _, ok, _ := s.Get("k"); ok {
 		t.Fatalf("memory must not be modified on Append failure")
 	}
 }
@@ -55,7 +57,7 @@ func TestStore_Put_WALSyncError(t *testing.T) {
 	if err := s.Put("k", "v", newTestVC(map[string]uint64{"a": 1})); err == nil {
 		t.Fatalf("expected sync error")
 	}
-	if _, ok := s.Get("k"); ok {
+	if _, ok, _ := s.Get("k"); ok {
 		t.Fatalf("memory must not be modified on Sync failure")
 	}
 }
@@ -66,7 +68,7 @@ func TestStore_Delete_WALAppendError(t *testing.T) {
 	if err := s.Delete("k", newTestVC(map[string]uint64{"a": 1})); err == nil {
 		t.Fatalf("expected error")
 	}
-	if _, ok := s.Get("k"); ok {
+	if _, ok, _ := s.Get("k"); ok {
 		t.Fatalf("memory must not be modified")
 	}
 }
@@ -77,7 +79,7 @@ func TestStore_Delete_WALSyncError(t *testing.T) {
 	if err := s.Delete("k", newTestVC(map[string]uint64{"a": 1})); err == nil {
 		t.Fatalf("expected error")
 	}
-	if _, ok := s.Get("k"); ok {
+	if _, ok, _ := s.Get("k"); ok {
 		t.Fatalf("memory must not be modified")
 	}
 }
@@ -90,7 +92,7 @@ func TestStore_Evict_WALAppendError(t *testing.T) {
 	if err := s.Evict("k"); err == nil {
 		t.Fatalf("expected error")
 	}
-	if _, ok := s.Get("k"); !ok {
+	if _, ok, _ := s.Get("k"); !ok {
 		t.Fatalf("memory must not be modified on Evict failure")
 	}
 }
@@ -102,7 +104,7 @@ func TestStore_Evict_WALSyncError(t *testing.T) {
 	if err := s.Evict("k"); err == nil {
 		t.Fatalf("expected error")
 	}
-	if _, ok := s.Get("k"); !ok {
+	if _, ok, _ := s.Get("k"); !ok {
 		t.Fatalf("memory must not be modified")
 	}
 }
@@ -119,7 +121,7 @@ func TestStore_GCTombstones_WALAppendError(t *testing.T) {
 	if purged != nil {
 		t.Fatalf("expected nil purged on error, got %v", purged)
 	}
-	if _, ok := s.Get("k"); !ok {
+	if _, ok, _ := s.Get("k"); !ok {
 		t.Fatalf("tombstone must remain when WAL fails")
 	}
 }
@@ -132,7 +134,7 @@ func TestStore_GCTombstones_WALSyncError(t *testing.T) {
 	if _, err := s.GCTombstones(time.Hour); err == nil {
 		t.Fatalf("expected error")
 	}
-	if _, ok := s.Get("k"); !ok {
+	if _, ok, _ := s.Get("k"); !ok {
 		t.Fatalf("tombstone must remain")
 	}
 }

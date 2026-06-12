@@ -16,7 +16,8 @@
 | `REPLICA_TIMEOUT_MS` | `500` | Timeout in milliseconds for inter-node replication and read calls |
 | `SEED_NODES` | (none) | Comma-separated HTTP addresses to bootstrap from on first join |
 | `SELF_WEIGHT` | `1.0` | Capacity weight for vnode allocation; `2.0` gives twice the vnodes |
-| `DATA_DIR` | (none) | Directory for WAL + snapshot persistence. Empty disables persistence (memory-only) |
+| `DATA_DIR` | (none) | Directory for WAL + SSTable persistence. Empty disables persistence (memory-only) |
+| `MEMTABLE_MAX_BYTES` | `16777216` (16 MiB) | Memtable size that triggers a flush to an SSTable (requires `DATA_DIR`) |
 
 **Notes on specific variables:**
 
@@ -28,7 +29,7 @@
 
 `SELF_WEIGHT` follows the formula `round(REPLICAS * SELF_WEIGHT)` with a minimum of 1 vnode. A weight of `0.5` on a 150-replica configuration gives 75 vnodes and roughly half the key space.
 
-`DATA_DIR` enables crash-durable persistence: every `PUT`/`DELETE`/`EVICT`/`GC` is appended to a write-ahead log and fsynced before the in-memory store is updated, and a snapshot is taken on graceful shutdown. On restart the node replays its snapshot+WAL before joining gossip. A node whose last clean shutdown is older than `GCTTL` (24 h) discards its local data and re-bootstraps from peers, so the cluster cannot resurrect tombstones that other replicas have already purged. See [docs/persistence.md](persistence.md) for the format and recovery flow.
+`DATA_DIR` enables crash-durable persistence: every `PUT`/`DELETE`/`EVICT`/`GC` is appended to a write-ahead log and fsynced before the in-memory store is updated. When the memtable exceeds `MEMTABLE_MAX_BYTES` it is flushed to an immutable SSTable and the covered WAL segments are deleted; a final flush runs on graceful shutdown. On restart the node opens its SSTables and replays the WAL tail before joining gossip. A node whose last clean shutdown is older than `GCTTL` (24 h) discards its local data and re-bootstraps from peers, so the cluster cannot resurrect tombstones that other replicas have already purged. Pre-LSM data dirs (snapshot-based) are migrated to an SSTable automatically on first startup. See [docs/persistence.md](persistence.md) and [docs/sstable.md](sstable.md) for formats and recovery flow.
 
 ## Running Locally
 
@@ -108,12 +109,12 @@ Continuum shuts down gracefully on `SIGINT` or `SIGTERM`:
 2. Marks self as dead in the member list and broadcasts to all alive peers (not just the usual fanout of 3)
 3. Flushes pending hints to any currently-alive nodes
 4. Stops accepting new HTTP connections and drains in-flight requests with a 30-second timeout
-5. **Finalizes persistence** (if `DATA_DIR` is set): takes a snapshot, appends a `CHECKPOINT` record to the WAL, truncates WAL segments covered by the snapshot, and writes `meta.json` with `last_clean_shutdown = now`
+5. **Finalizes persistence** (if `DATA_DIR` is set): flushes the memtable to a final SSTable, truncates WAL segments the table covers, closes the table readers and WAL, and writes `meta.json` with `last_clean_shutdown = now`
 6. Stops the gossip transport
 
 The push in step 1 and the flush in step 3 are best-effort - if a successor is unreachable, those keys and hints are not retried. Anti-entropy covers the gap.
 
-Step 5 is what makes the downtime gate work: the gate compares `last_clean_shutdown` against `GCTTL` on the next start. A node that crashes still recovers by replaying its snapshot and WAL, as long as its last clean shutdown is within `GCTTL`. If the last clean shutdown is older than `GCTTL` (or `meta.json` is missing entirely), the node discards its local data and re-bootstraps rather than risk resurrecting tombstones that peers have already purged.
+Step 5 is what makes the downtime gate work: the gate compares `last_clean_shutdown` against `GCTTL` on the next start. A node that crashes still recovers by opening its SSTables and replaying the WAL tail, as long as its last clean shutdown is within `GCTTL`. If the last clean shutdown is older than `GCTTL` (or `meta.json` is missing entirely), the node discards its local data and re-bootstraps rather than risk resurrecting tombstones that peers have already purged.
 
 ## CI Pipeline
 

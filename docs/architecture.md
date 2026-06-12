@@ -15,7 +15,7 @@ flowchart TD
     subgraph internals [internal packages]
         Ring[Ring\nRBT + vnodes + murmur3]
         Store[KV Store\nvector clocks + tombstones]
-        WAL[WAL + Snapshot\ncrash-durable storage]
+        WAL[WAL + SSTables\nLSM crash-durable storage]
         Gossip[Gossip\nUDP membership + failure detection]
         AE[Anti-Entropy\nMerkle sync + tombstone GC]
         HH[Hint Store\ndurability buffer]
@@ -34,8 +34,8 @@ flowchart TD
 
     Store -- onUpdate callback --> AE
     Store -- onEvict callback --> AE
-    Store -- append + fsync per mutation --> WAL
-    WAL -- snapshot + replay on startup --> Store
+    Store -- append + fsync per mutation, memtable flush --> WAL
+    WAL -- open tables + replay tail on startup --> Store
 
     HH -- replay writes on recovery --> HTTP
     AE -- HTTP sync endpoints --> HTTP
@@ -51,8 +51,8 @@ flowchart TD
 | ----- | ------- | ---- |
 | Hash Ring | `internal/ring` | Routes keys to nodes via consistent hashing |
 | Gossip | `internal/gossip` | Membership, failure detection, cluster convergence |
-| KV Store | `internal/store` | In-memory storage with vector clock versioning; optional WAL hook for durability |
-| WAL + Snapshot | `internal/wal`, `internal/store/snapshot.go` | Append-only log with CRC framing + atomic snapshot file; reloaded on startup |
+| KV Store | `internal/store` | LSM storage engine: memtable with vector clock versioning, flushes to SSTables, merged reads across generations |
+| WAL + SSTables | `internal/wal`, `internal/sstable` | Append-only log with CRC framing + immutable sorted tables with bloom filters; recovery opens tables and replays the WAL tail |
 | Anti-Entropy | `internal/antientropy` | Background Merkle-tree repair of divergent replicas |
 | Hint Store | `internal/hintstore` | Durability buffer for writes to temporarily-down replicas |
 | Stats | `internal/stats` | Aggregates ring and gossip state into a single view |

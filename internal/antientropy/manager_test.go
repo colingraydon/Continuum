@@ -117,7 +117,7 @@ func TestAntiEntropyRepairsPrimaryFromReplica(t *testing.T) {
 
 	syncAll(t, mgr)
 
-	entry, ok := s1.Get(key)
+	entry, ok, _ := s1.Get(key)
 	if !ok {
 		t.Fatal("key not found in primary store after sync")
 	}
@@ -187,7 +187,7 @@ func TestAntiEntropyPushesToReplica(t *testing.T) {
 	mgr := New(r1, s1, "node1", 2, time.Second)
 	syncAll(t, mgr)
 
-	entry, ok := s2.Get(key)
+	entry, ok, _ := s2.Get(key)
 	if !ok {
 		t.Fatal("replica did not receive pushed entry")
 	}
@@ -216,7 +216,7 @@ func TestAntiEntropyGCPurgesTombstone(t *testing.T) {
 	}
 	mgr.RemoveFromTrees(key)
 
-	if _, ok := s1.Get(key); ok {
+	if _, ok, _ := s1.Get(key); ok {
 		t.Error("key still present in store after GC")
 	}
 
@@ -263,7 +263,7 @@ func TestAntiEntropyRepairsTombstone(t *testing.T) {
 
 	syncAll(t, mgr)
 
-	entry, ok := s1.Get(key)
+	entry, ok, _ := s1.Get(key)
 	if !ok {
 		t.Fatal("key not found in primary store after tombstone sync")
 	}
@@ -358,7 +358,7 @@ func TestSyncRound_SyncsToReplica(t *testing.T) {
 		mgr.syncRound()
 	}
 
-	entry, ok := s2.Get(key)
+	entry, ok, _ := s2.Get(key)
 	if !ok {
 		t.Fatal("replica did not receive key after syncRound")
 	}
@@ -377,7 +377,7 @@ func TestRunGC_FreshTombstoneNotPurged(t *testing.T) {
 	mgr := New(r, s, "node1", 1, time.Second)
 	mgr.runGC()
 
-	if _, ok := s.Get(key); !ok {
+	if _, ok, _ := s.Get(key); !ok {
 		t.Error("fresh tombstone should not be purged by runGC")
 	}
 }
@@ -394,6 +394,7 @@ type aeFailWAL struct{ err error }
 
 func (f aeFailWAL) Append([]byte) (uint64, error) { return 0, f.err }
 func (f aeFailWAL) Sync() error                   { return nil }
+func (f aeFailWAL) TruncateThrough(uint64) error  { return nil }
 
 func TestRunGC_WALErrorIsLogged(t *testing.T) {
 	r, s, _ := newSyncNode(t, "node1")
@@ -441,7 +442,7 @@ func TestAETreeUpdatedViaOnUpdateCallback(t *testing.T) {
 	// it to node2's replica.
 	syncAll(t, mgr)
 
-	entry, ok := s2.Get(key)
+	entry, ok, _ := s2.Get(key)
 	if !ok {
 		t.Fatal("node2 should have the key after AE sync of a post-init write")
 	}

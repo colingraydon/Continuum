@@ -32,6 +32,7 @@ type config struct {
 	replicaTimeout    time.Duration
 	selfWeight        float64
 	dataDir           string
+	memtableMaxBytes  int64
 }
 
 func getEnvInt(key string, dflt int) int {
@@ -108,6 +109,7 @@ func loadConfig() config {
 		replicaTimeout:    getEnvDurationMs("REPLICA_TIMEOUT_MS", 500*time.Millisecond),
 		selfWeight:        getEnvFloat64("SELF_WEIGHT", 1.0),
 		dataDir:           getEnvString("DATA_DIR", ""),
+		memtableMaxBytes:  int64(getEnvPositiveInt("MEMTABLE_MAX_BYTES", 16<<20)),
 	}
 }
 
@@ -153,7 +155,7 @@ func main() {
 	// Recover persisted state before anything else touches the store. The
 	// downtime gate may discard local data and force a fresh bootstrap; the
 	// seed-node bootstrap path below handles that case naturally.
-	s, persist, err := recoverStore(cfg.dataDir, cfg.selfID, antientropy.GCTTL)
+	s, persist, err := recoverStore(cfg.dataDir, cfg.selfID, antientropy.GCTTL, cfg.memtableMaxBytes)
 	if err != nil {
 		log.Fatalf("persist: recover failed: %v", err)
 	}
