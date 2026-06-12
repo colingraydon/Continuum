@@ -578,17 +578,17 @@ func (h *Handler) quorumFanOut(nodes []*ring.Node, quorum int, op func(*ring.Nod
 		pending++
 		go func(n *ring.Node) { inner <- op(n) }(n)
 	}
+	// If quorum is already satisfied by self's ack (e.g. W=1), don't wait at
+	// all: the fan-out still happens, and the caller's hint-buffering goroutine
+	// drains the channel for failures.
 	collected := 0
-	for collected < pending {
+	for collected < pending && acks < quorum {
 		r := <-inner
 		collected++
 		if r.err == nil {
 			acks++
 		} else {
 			failed = append(failed, r.nodeID)
-		}
-		if acks >= quorum {
-			break
 		}
 	}
 	return acks, pending - collected, failed, inner
@@ -630,6 +630,13 @@ func (h *Handler) PutKey(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// Bootstrap clock from current local entry if the client didn't provide one,
+	// so a blind overwrite dominates the existing value rather than equaling it
+	// (an equal clock would be dropped as an idempotent write).
+	if len(incoming.Clocks) == 0 {
+		incoming.Clocks = h.bootstrapClock(key)
+	}
+
 	// Primary write: increment self's counter and store locally.
 	version := incoming.Increment(h.selfID)
 	if err := h.store.Put(key, body.Value, version); err != nil {
@@ -637,14 +644,11 @@ func (h *Handler) PutKey(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Quorum write: fan out to all replica nodes and wait for W acks.
+	// Quorum write: fan out to all replica nodes and wait for W acks. The
+	// fan-out happens even when self's ack already satisfies quorum (W=1) so
+	// replicas still receive the write without waiting on anti-entropy.
 	nodes := h.ring.GetReplicationNodes(key, h.replicationFactor)
 	quorum := min(h.writeQuorum, len(nodes))
-	if quorum <= 1 {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-
 	acks, remaining, failed, resultCh := h.quorumFanOut(nodes, quorum, func(n *ring.Node) replicaResult {
 		return replicaResult{n.ID, h.replicateToSync(n.Address, key, body.Value, version.Clocks)}
 	})
@@ -730,11 +734,6 @@ func (h *Handler) DeleteKey(w http.ResponseWriter, req *http.Request) {
 
 	nodes := h.ring.GetReplicationNodes(key, h.replicationFactor)
 	quorum := min(h.writeQuorum, len(nodes))
-	if quorum <= 1 {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-
 	acks, remaining, failed, resultCh := h.quorumFanOut(nodes, quorum, func(n *ring.Node) replicaResult {
 		return replicaResult{n.ID, h.replicateDeleteToSync(n.Address, key, version.Clocks)}
 	})

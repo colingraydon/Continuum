@@ -5,7 +5,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/spaolacci/murmur3"
+	"github.com/twmb/murmur3"
 )
 
 // BucketCount is the number of hash-range buckets per tree.
@@ -57,7 +57,9 @@ func New() *Tree {
 }
 
 func bucketIndex(key string) int {
-	return int(murmur3.Sum32([]byte(key))) % BucketCount
+	// Reduce before converting: int(uint32) can be negative on 32-bit
+	// platforms, which would make the modulo negative and panic on index.
+	return int(murmur3.Sum32([]byte(key)) % BucketCount)
 }
 
 // Update inserts or replaces the value hash for key. hash should be

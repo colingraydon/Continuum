@@ -110,8 +110,8 @@ func (r *Ring) walkRing(hash uint32, factor int) []*Node {
 	// Continue clockwise, wrapping around, until factor nodes are collected.
 	for len(result) < factor {
 		if !it.Next() {
+			// First() positions the iterator ON the lowest-hash vnode.
 			it.First()
-			it.Next()
 		}
 		vnode := it.Value().(*VNode)
 		if seen[vnode.Node.ID] {
@@ -148,8 +148,8 @@ func (r *Ring) walkRingHealthy(hash uint32) (*Node, bool) {
 	// Continue clockwise, wrapping around, until a healthy node is found.
 	for len(seen) < len(r.nodes) {
 		if !it.Next() {
+			// First() positions the iterator ON the lowest-hash vnode.
 			it.First()
-			it.Next()
 		}
 		vnode := it.Value().(*VNode)
 		if seen[vnode.Node.ID] {

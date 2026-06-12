@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	"github.com/emirpasic/gods/trees/redblacktree"
-	"github.com/spaolacci/murmur3"
+	"github.com/twmb/murmur3"
 )
 
 type Tree struct {

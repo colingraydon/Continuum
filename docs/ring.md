@@ -12,7 +12,7 @@ Membership is driven entirely by the gossip layer through a callback registered 
 
 ### Virtual Nodes
 
-Physical nodes are represented as multiple virtual nodes (vnodes) distributed across the ring. The number of vnodes per node is set by `REPLICAS` (default 150). Each vnode is placed at position `murmur3(nodeID + ":v" + index)` on the 2^32 integer ring.
+Physical nodes are represented as multiple virtual nodes (vnodes) distributed across the ring. The number of vnodes per node is set by `REPLICAS` (default 150). Each vnode is placed at position `murmur3(nodeID + "#" + index)` on the 2^32 integer ring.
 
 More vnodes per node means a smoother key distribution and less imbalance when a node is added or removed. With 150 vnodes per node in a 3-node cluster, each node owns roughly 150 out of 450 ring positions. When a fourth node joins, it claims roughly 112 positions from its neighbors, redistributing about 25% of the key space - compared to 33% if there were only 3 positions.
 
@@ -44,7 +44,7 @@ A node with `SELF_WEIGHT=2.0` gets twice as many vnodes as a default node and ha
 
 ### Key Counters
 
-Each physical node carries an atomic `int64` key counter. It increments on each successful lookup, decrements when a node is removed, and resets on eviction. These feed the `/stats` load distribution report and the Prometheus variance gauge.
+Each physical node carries an atomic `int64` key counter. It increments on each successful single-node lookup (`GetNode`); the replica-set walk (`GetReplicationNodes`) does not touch it. The counter is discarded along with the node when it is removed from the ring. These feed the `/stats` load distribution report and the Prometheus variance gauge.
 
 ## Design Decisions
 

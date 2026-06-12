@@ -111,6 +111,9 @@ func (ml *MemberList) Merge(incoming []*Member) {
 			if ok {
 				prevStatus = existing.Status
 			}
+			// Stamp with the local clock: the wire value is the sender's wall
+			// time, and the stale checker compares against our own clock.
+			m.UpdatedAt = time.Now()
 			ml.members[m.ID] = m
 			ml.notifyMemberChange(m, ok, prevStatus, wasBootstrapping)
 		}

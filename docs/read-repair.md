@@ -19,7 +19,7 @@ A replica that returned no entry at all (key not found) when the merged result i
 Stale replicas are repaired asynchronously in a background goroutine so the client's read latency is not affected. Two paths:
 
 - **Local node** - the coordinator itself was stale. The coordinator writes the merged result directly to its own store via a normal `store.Put` call.
-- **Remote replica** - the coordinator sends the merged entry as a replica sub-write via `POST /keys/:key` with `X-Proxied-From` set, reusing the same HTTP path as coordinator fan-out and hinted handoff delivery.
+- **Remote replica** - the coordinator sends the merged entry as a replica sub-write via `PUT /keys/:key` with `X-Proxied-From` set, reusing the same HTTP path as coordinator fan-out and hinted handoff delivery.
 
 If the background repair write fails, it is logged and dropped. Anti-entropy covers any keys that could not be repaired immediately.
 
@@ -51,7 +51,7 @@ Repairing even during a conflict ensures all replicas converge to the same sibli
 
 ### Reusing the X-Proxied-From Write Path
 
-**Choice:** Remote repair uses `POST /keys/:key` with `X-Proxied-From`, the same path used by coordinator fan-out and hinted handoff.
+**Choice:** Remote repair uses `PUT /keys/:key` with `X-Proxied-From`, the same path used by coordinator fan-out and hinted handoff.
 
 The alternative is a dedicated repair endpoint. Reusing the existing path means repair writes go through the same vector clock conflict resolution logic as any other replica sub-write. A repair that arrives after the application has already resolved the conflict will be correctly dominated and dropped. There is no special-casing required.
 
