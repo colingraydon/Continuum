@@ -117,6 +117,7 @@ make coverage  # HTML coverage report
 | [Anti-Entropy](docs/antientropy.md) | Merkle trees, bidirectional sync, tombstone GC safety argument |
 | [Hinted Handoff](docs/hinted-handoff.md) | Durability gap, hint lifecycle, event-driven delivery, graceful flush |
 | [Persistence](docs/persistence.md) | WAL framing, snapshot format, recovery flow, downtime gate |
+| [SSTable](docs/sstable.md) | Immutable sorted table format: data blocks, sparse index, bloom filter, LSM roadmap |
 | [Read Repair](docs/read-repair.md) | Async repair, always-repair-on-conflict, X-Proxied-From path reuse |
 | [Data Migration](docs/data-migration.md) | Pull on join, push on leave, bootstrapping state machine |
 | [API Reference](docs/api.md) | All endpoints with request/response examples and internal headers |
@@ -127,6 +128,7 @@ make coverage  # HTML coverage report
 
 ## What's Next
 
+- **LSM storage engine** - `internal/sstable` (table format, writer, reader, bloom filter) is in; remaining phases wire it into the store: memtable flush + manifest, merged read path, size-tiered compaction ([roadmap](docs/sstable.md#roadmap))
 - **Hint store persistence** - hints currently live in memory only; a coordinator crash before delivery loses them, and anti-entropy is the fallback
 - **Group commit** - per-write fsync caps single-node throughput around 1k writes/sec; batched fsync is the next lever
 - **Benchmark coverage** - store, anti-entropy, gossip, and end-to-end latency benchmarks
