@@ -14,7 +14,7 @@ func TestPutAndGet(t *testing.T) {
 	v := NewClock().Increment("node1")
 	s.Put("k", "v", v)
 
-	e, ok := s.Get("k")
+	e, ok, _ := s.Get("k")
 	if !ok {
 		t.Fatal("expected entry to exist")
 	}
@@ -31,7 +31,7 @@ func TestPutAndGet(t *testing.T) {
 
 func TestGetMissing(t *testing.T) {
 	s := New()
-	_, ok := s.Get("missing")
+	_, ok, _ := s.Get("missing")
 	if ok {
 		t.Error("expected miss for unknown key")
 	}
@@ -42,7 +42,7 @@ func TestNewerClockWins(t *testing.T) {
 	s.Put("k", "old", clock(map[string]uint64{"node1": 1}))
 	s.Put("k", "new", clock(map[string]uint64{"node1": 2}))
 
-	e, _ := s.Get("k")
+	e, _, _ := s.Get("k")
 	if len(e.Siblings) != 1 {
 		t.Fatalf("expected 1 sibling, got %d", len(e.Siblings))
 	}
@@ -56,7 +56,7 @@ func TestOlderClockDropped(t *testing.T) {
 	s.Put("k", "new", clock(map[string]uint64{"node1": 2}))
 	s.Put("k", "old", clock(map[string]uint64{"node1": 1}))
 
-	e, _ := s.Get("k")
+	e, _, _ := s.Get("k")
 	if len(e.Siblings) != 1 {
 		t.Fatalf("expected 1 sibling, got %d", len(e.Siblings))
 	}
@@ -71,7 +71,7 @@ func TestConcurrentClocksAreSiblings(t *testing.T) {
 	s.Put("k", "first", clock(map[string]uint64{"node1": 1}))
 	s.Put("k", "second", clock(map[string]uint64{"node2": 1}))
 
-	e, _ := s.Get("k")
+	e, _, _ := s.Get("k")
 	if len(e.Siblings) != 2 {
 		t.Fatalf("expected 2 siblings for concurrent writes, got %d", len(e.Siblings))
 	}
@@ -89,7 +89,7 @@ func TestDominatingWriteResolvesSiblings(t *testing.T) {
 	// A write whose clock dominates both siblings resolves the conflict.
 	s.Put("k", "resolved", clock(map[string]uint64{"node1": 1, "node2": 1}))
 
-	e, _ := s.Get("k")
+	e, _, _ := s.Get("k")
 	if len(e.Siblings) != 1 {
 		t.Fatalf("expected 1 sibling after resolution, got %d", len(e.Siblings))
 	}
@@ -103,7 +103,7 @@ func TestEqualClocksAreIdempotent(t *testing.T) {
 	s.Put("k", "first", clock(map[string]uint64{"node1": 1}))
 	s.Put("k", "second", clock(map[string]uint64{"node1": 1}))
 
-	e, _ := s.Get("k")
+	e, _, _ := s.Get("k")
 	if len(e.Siblings) != 1 {
 		t.Fatalf("expected 1 sibling for equal clocks, got %d", len(e.Siblings))
 	}
@@ -115,11 +115,11 @@ func TestEqualClocksAreIdempotent(t *testing.T) {
 func TestHashDeterministic(t *testing.T) {
 	s := New()
 	s.Put("k", "v", NewClock().Increment("node1"))
-	e1, _ := s.Get("k")
+	e1, _, _ := s.Get("k")
 
 	s2 := New()
 	s2.Put("k", "v", NewClock().Increment("node1").Increment("node1"))
-	e2, _ := s2.Get("k")
+	e2, _, _ := s2.Get("k")
 
 	if e1.Siblings[0].Hash != e2.Siblings[0].Hash {
 		t.Errorf("hash should depend only on value, got %d vs %d", e1.Siblings[0].Hash, e2.Siblings[0].Hash)
@@ -132,8 +132,8 @@ func TestHashDiffersForDifferentValues(t *testing.T) {
 	s.Put("a", "foo", v)
 	s.Put("b", "bar", v)
 
-	ea, _ := s.Get("a")
-	eb, _ := s.Get("b")
+	ea, _, _ := s.Get("a")
+	eb, _, _ := s.Get("b")
 	if ea.Siblings[0].Hash == eb.Siblings[0].Hash {
 		t.Error("expected different hashes for different values")
 	}
@@ -238,7 +238,7 @@ func TestDeleteWritesTombstone(t *testing.T) {
 	s.Put("k", "v", clock(map[string]uint64{"node1": 1}))
 	s.Delete("k", clock(map[string]uint64{"node1": 2}))
 
-	e, ok := s.Get("k")
+	e, ok, _ := s.Get("k")
 	if !ok {
 		t.Fatal("expected entry to exist after delete")
 	}
@@ -254,7 +254,7 @@ func TestDeleteOnMissingKeyCreatesTombstone(t *testing.T) {
 	s := New()
 	s.Delete("k", clock(map[string]uint64{"node1": 1}))
 
-	e, ok := s.Get("k")
+	e, ok, _ := s.Get("k")
 	if !ok {
 		t.Fatal("expected entry to exist")
 	}
@@ -268,7 +268,7 @@ func TestOlderDeleteDropped(t *testing.T) {
 	s.Put("k", "v", clock(map[string]uint64{"node1": 2}))
 	s.Delete("k", clock(map[string]uint64{"node1": 1}))
 
-	e, _ := s.Get("k")
+	e, _, _ := s.Get("k")
 	if len(e.Siblings) != 1 {
 		t.Fatalf("expected 1 sibling, got %d", len(e.Siblings))
 	}
@@ -285,7 +285,7 @@ func TestConcurrentWriteAndDeleteAreSiblings(t *testing.T) {
 	s.Put("k", "v", clock(map[string]uint64{"node1": 1}))
 	s.Delete("k", clock(map[string]uint64{"node2": 1}))
 
-	e, _ := s.Get("k")
+	e, _, _ := s.Get("k")
 	if len(e.Siblings) != 2 {
 		t.Fatalf("expected 2 siblings for concurrent write/delete, got %d", len(e.Siblings))
 	}
@@ -308,7 +308,7 @@ func TestDominatingDeleteResolvesSiblings(t *testing.T) {
 	s.Put("k", "second", clock(map[string]uint64{"node2": 1}))
 	s.Delete("k", clock(map[string]uint64{"node1": 1, "node2": 1}))
 
-	e, _ := s.Get("k")
+	e, _, _ := s.Get("k")
 	if len(e.Siblings) != 1 {
 		t.Fatalf("expected 1 sibling after dominating delete, got %d", len(e.Siblings))
 	}
@@ -339,7 +339,7 @@ func TestOnUpdateFiredOnPut(t *testing.T) {
 	if gotKey != "k" {
 		t.Errorf("expected key 'k', got %q", gotKey)
 	}
-	e, _ := s.Get("k")
+	e, _, _ := s.Get("k")
 	if gotHash != entryHash(e) {
 		t.Errorf("callback hash %d does not match entryHash %d", gotHash, entryHash(e))
 	}
@@ -411,7 +411,7 @@ func TestOnUpdateHashForSiblings(t *testing.T) {
 	s.Put("k", "first", clock(map[string]uint64{"node1": 1}))
 	s.Put("k", "second", clock(map[string]uint64{"node2": 1}))
 
-	e, _ := s.Get("k")
+	e, _, _ := s.Get("k")
 	if len(e.Siblings) != 2 {
 		t.Fatalf("expected 2 siblings, got %d", len(e.Siblings))
 	}
@@ -439,7 +439,7 @@ func TestGCTombstonesRemovesEligibleTombstone(t *testing.T) {
 	if len(purged) != 1 || purged[0] != "k" {
 		t.Fatalf("expected [k] purged, got %v", purged)
 	}
-	if _, ok := s.Get("k"); ok {
+	if _, ok, _ := s.Get("k"); ok {
 		t.Error("key should be gone from store after GC")
 	}
 }
@@ -465,7 +465,7 @@ func TestGCTombstonesPreservesFreshTombstone(t *testing.T) {
 	if len(purged) != 0 {
 		t.Errorf("fresh tombstone must not be GC'd, got %v", purged)
 	}
-	if _, ok := s.Get("k"); !ok {
+	if _, ok, _ := s.Get("k"); !ok {
 		t.Error("tombstone should still be present")
 	}
 }
@@ -476,7 +476,7 @@ func TestGCTombstonesPreservesContestedEntry(t *testing.T) {
 	s.Put("k", "v", clock(map[string]uint64{"node1": 1}))
 	s.Delete("k", clock(map[string]uint64{"node2": 1}))
 
-	e, _ := s.Get("k")
+	e, _, _ := s.Get("k")
 	if len(e.Siblings) != 2 {
 		t.Fatalf("expected 2 siblings (contested), got %d", len(e.Siblings))
 	}
@@ -511,7 +511,7 @@ func TestGCTombstonesMultipleKeys(t *testing.T) {
 	if !purgedSet["a"] || !purgedSet["b"] {
 		t.Errorf("expected a and b purged, got %v", purged)
 	}
-	if _, ok := s.Get("c"); !ok {
+	if _, ok, _ := s.Get("c"); !ok {
 		t.Error("live key c should remain after GC")
 	}
 }
@@ -571,7 +571,7 @@ func TestEvict_RemovesKey(t *testing.T) {
 	s := New()
 	s.Put("k", "v", clock(map[string]uint64{"n1": 1}))
 	s.Evict("k")
-	if _, ok := s.Get("k"); ok {
+	if _, ok, _ := s.Get("k"); ok {
 		t.Fatal("key should be gone after Evict")
 	}
 }
@@ -599,7 +599,7 @@ func TestEvict_DoesNotCreateTombstone(t *testing.T) {
 	s.Evict("k")
 	// A subsequent Put with the same clock should succeed (no dominated-by-tombstone logic).
 	s.Put("k", "v2", v)
-	e, ok := s.Get("k")
+	e, ok, _ := s.Get("k")
 	if !ok || len(e.Siblings) != 1 || e.Siblings[0].Value != "v2" {
 		t.Errorf("put after evict should succeed cleanly, got %+v", e)
 	}
@@ -609,7 +609,7 @@ func TestEvict_DoesNotCreateTombstone(t *testing.T) {
 
 func TestKeyHashes_EmptyStore(t *testing.T) {
 	s := New()
-	if hashes := s.KeyHashes(); len(hashes) != 0 {
+	if hashes, _ := s.KeyHashes(); len(hashes) != 0 {
 		t.Errorf("expected empty map, got %v", hashes)
 	}
 }
@@ -621,7 +621,7 @@ func TestKeyHashes_ContainsAllKeys(t *testing.T) {
 	s.Put("b", "bar", v)
 	s.Delete("c", v)
 
-	hashes := s.KeyHashes()
+	hashes, _ := s.KeyHashes()
 	if len(hashes) != 3 {
 		t.Fatalf("expected 3 entries, got %d", len(hashes))
 	}
@@ -637,8 +637,8 @@ func TestKeyHashes_MatchesEntryHash(t *testing.T) {
 	v := clock(map[string]uint64{"node1": 1})
 	s.Put("k", "value", v)
 
-	hashes := s.KeyHashes()
-	entry, _ := s.Get("k")
+	hashes, _ := s.KeyHashes()
+	entry, _, _ := s.Get("k")
 	if hashes["k"] != entryHash(entry) {
 		t.Errorf("KeyHashes[k]=%d, entryHash=%d", hashes["k"], entryHash(entry))
 	}

@@ -68,14 +68,13 @@ func postNode(t *testing.T, url, body string) *http.Response {
 	return resp
 }
 
-
 func TestE2EAddAndGetNode(t *testing.T) {
 	srv := newTestServer(t)
 	addr := serverAddress(srv)
 
 	resp := postNode(t,
 		fmt.Sprintf("%s/nodes", srv.URL),
-		fmt.Sprintf(`{"id": "node1", "address": "%s"}`, addr), 
+		fmt.Sprintf(`{"id": "node1", "address": "%s"}`, addr),
 	)
 	defer resp.Body.Close()
 
@@ -108,7 +107,7 @@ func TestE2EAddAndRemoveNode(t *testing.T) {
 
 	resp0 := postNode(t,
 		fmt.Sprintf("%s/nodes", srv.URL),
-		fmt.Sprintf(`{"id": "node1", "address": "%s"}`, addr), 
+		fmt.Sprintf(`{"id": "node1", "address": "%s"}`, addr),
 	)
 	defer resp0.Body.Close()
 
@@ -142,7 +141,7 @@ func TestE2EGetNodes(t *testing.T) {
 	addr := serverAddress(srv) // ✅
 
 	for i := 1; i <= 3; i++ {
-		body := fmt.Sprintf(`{"id": "node%d", "address": "%s"}`, i, addr) 
+		body := fmt.Sprintf(`{"id": "node%d", "address": "%s"}`, i, addr)
 		r := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), body)
 		defer r.Body.Close()
 	}
@@ -238,7 +237,7 @@ func TestE2EGetReplicationNodes(t *testing.T) {
 	addr := serverAddress(srv)
 
 	for i := 1; i <= 3; i++ {
-		body := fmt.Sprintf(`{"id": "node%d", "address": "%s"}`, i, addr) 
+		body := fmt.Sprintf(`{"id": "node%d", "address": "%s"}`, i, addr)
 		r := postNode(t, fmt.Sprintf("%s/nodes", srv.URL), body)
 		defer r.Body.Close()
 	}
@@ -372,7 +371,6 @@ func TestE2EGossipMembershipPropagates(t *testing.T) {
 		t.Errorf("nodeA not found in srv2's ring after gossip exchange")
 	}
 }
-
 
 // TestE2EWriteAndRead verifies that a PUT stores a value that a subsequent GET
 // returns on the same node.
@@ -714,7 +712,7 @@ func TestHintedHandoff_PutHintStoredAndDelivered(t *testing.T) {
 	node1Handler.DeliverHints("node2", recoveredAddr2)
 
 	// node2's store should now contain the hinted write.
-	entry, ok := node2Handler.store.Get("hint-key")
+	entry, ok, _ := node2Handler.store.Get("hint-key")
 	if !ok {
 		t.Fatal("recovered node2 should have 'hint-key' after hint delivery")
 	}
@@ -786,7 +784,7 @@ func TestHintedHandoff_DeleteHintDelivered(t *testing.T) {
 	node1Handler.DeliverHints("node2", recoveredAddr2)
 
 	// Recovered node2 should have a tombstone for delete-key.
-	entry, ok := node2Handler.store.Get("delete-key")
+	entry, ok, _ := node2Handler.store.Get("delete-key")
 	if !ok {
 		t.Fatal("recovered node2 should have tombstone for 'delete-key'")
 	}
@@ -839,14 +837,14 @@ func TestE2EReadRepair(t *testing.T) {
 	// new value (direct store write, so very fast in practice).
 	deadline := time.Now().Add(200 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		if entry, ok := node1Handler.store.Get("rr-key"); ok {
+		if entry, ok, _ := node1Handler.store.Get("rr-key"); ok {
 			if len(entry.Siblings) == 1 && entry.Siblings[0].Value == "new" {
 				return
 			}
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	entry, _ := node1Handler.store.Get("rr-key")
+	entry, _, _ := node1Handler.store.Get("rr-key")
 	t.Errorf("node1 not repaired within 200ms; store: %+v", entry)
 }
 

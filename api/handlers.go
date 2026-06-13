@@ -29,6 +29,7 @@ const (
 	errFailedWrite       = "failed to write response"
 	errNodeBootstrapping = "node is bootstrapping"
 	errNoNodes           = "no nodes available"
+	errLocalRead         = "local store read failed"
 )
 
 // HandlerConfig holds the scalar settings for a Handler.
@@ -424,7 +425,13 @@ func (h *Handler) GetNodes(w http.ResponseWriter, req *http.Request) {
 // entry (including any siblings) for clock merging on the coordinator side.
 func (h *Handler) handleReplicaRead(w http.ResponseWriter, key string) {
 	resp := NodeResponse{ID: h.selfID, Status: h.nodeStatus(h.selfID)}
-	if entry, ok := h.store.Get(key); ok {
+	entry, ok, err := h.store.Get(key)
+	if err != nil {
+		log.Printf("replica read %s: %v", key, err)
+		http.Error(w, errLocalRead, http.StatusInternalServerError)
+		return
+	}
+	if ok {
 		resp = entryToResponse(h.selfID, h.nodeStatus(h.selfID), entry)
 	}
 	w.Header().Set(contentTypeHeader, contentTypeJSON)
@@ -445,27 +452,36 @@ func (h *Handler) filterReadNodes(nodes []*ring.Node) []*ring.Node {
 	return out
 }
 
+type readResult struct {
+	resp NodeResponse
+	err  error
+}
+
+// readNode reads key from one node: the local store when it is self, otherwise
+// the replica over HTTP. An error counts as a failed replica; quorum can still
+// be met from the remaining nodes.
+func (h *Handler) readNode(node *ring.Node, key string) readResult {
+	if node.ID != h.selfID {
+		r, err := h.readFromReplica(node.Address, key)
+		return readResult{resp: r, err: err}
+	}
+	entry, ok, err := h.store.Get(key)
+	if err != nil {
+		return readResult{err: err}
+	}
+	r := NodeResponse{ID: h.selfID, Status: h.nodeStatus(h.selfID)}
+	if ok {
+		r = entryToResponse(h.selfID, h.nodeStatus(h.selfID), entry)
+	}
+	return readResult{resp: r}
+}
+
 // quorumReadFanOut fans out reads to readNodes, collects results until quorum
 // is met, and returns the responses plus whether quorum was reached.
 func (h *Handler) quorumReadFanOut(readNodes []*ring.Node, key string, quorum int) ([]NodeResponse, bool) {
-	type readResult struct {
-		resp NodeResponse
-		err  error
-	}
 	results := make(chan readResult, len(readNodes))
 	for _, n := range readNodes {
-		go func(node *ring.Node) {
-			if node.ID == h.selfID {
-				r := NodeResponse{ID: h.selfID, Status: h.nodeStatus(h.selfID)}
-				if entry, ok := h.store.Get(key); ok {
-					r = entryToResponse(h.selfID, h.nodeStatus(h.selfID), entry)
-				}
-				results <- readResult{resp: r}
-			} else {
-				r, err := h.readFromReplica(node.Address, key)
-				results <- readResult{resp: r, err: err}
-			}
-		}(n)
+		go func(node *ring.Node) { results <- h.readNode(node, key) }(n)
 	}
 	var responses []NodeResponse
 	for i := 0; i < len(readNodes); i++ {
@@ -675,7 +691,12 @@ type DeleteKeyRequest struct {
 // for key. Used to seed delete tombstones so they causally dominate the current value.
 func (h *Handler) bootstrapClock(key string) map[string]uint64 {
 	clocks := make(map[string]uint64)
-	if entry, ok := h.store.Get(key); ok {
+	entry, ok, err := h.store.Get(key)
+	if err != nil {
+		log.Printf("bootstrap clock %s: %v", key, err)
+		return clocks
+	}
+	if ok {
 		for _, sib := range entry.Siblings {
 			for nodeID, c := range sib.Version.Clocks {
 				if clocks[nodeID] < c {
@@ -948,8 +969,14 @@ func (h *Handler) GetSyncBucketKeys(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	hashes, err := h.store.KeyHashes()
+	if err != nil {
+		log.Printf("sync bucket keys scan: %v", err)
+		http.Error(w, errLocalRead, http.StatusInternalServerError)
+		return
+	}
 	var keys []string
-	for key := range h.store.KeyHashes() {
+	for key := range hashes {
 		if vr.Contains(merkle.HashKey(key)) && merkle.BucketIndex(key) == parsedBucket {
 			keys = append(keys, key)
 		}
@@ -1012,11 +1039,17 @@ func (h *Handler) GetSyncState(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	hashes, err := h.store.KeyHashes()
+	if err != nil {
+		log.Printf("sync state scan: %v", err)
+		http.Error(w, errLocalRead, http.StatusInternalServerError)
+		return
+	}
 	buckets := make([]map[string]uint32, merkle.BucketCount)
 	for i := range buckets {
 		buckets[i] = make(map[string]uint32)
 	}
-	for key, hash := range h.store.KeyHashes() {
+	for key, hash := range hashes {
 		if !vr.Contains(merkle.HashKey(key)) {
 			continue
 		}
@@ -1048,7 +1081,11 @@ func (h *Handler) GetSyncKeys(w http.ResponseWriter, req *http.Request) {
 	}
 	entries := make(map[string][]SyncSibling, len(body.Keys))
 	for _, key := range body.Keys {
-		entry, ok := h.store.Get(key)
+		entry, ok, err := h.store.Get(key)
+		if err != nil {
+			log.Printf("sync keys read %s: %v", key, err)
+			continue
+		}
 		if !ok {
 			continue
 		}

@@ -55,7 +55,7 @@ func TestCleanupStaleKeys_EvictsNonOwned(t *testing.T) {
 	h.store.Put(node2Key, "stale", store.VectorClockVersion{Clocks: map[string]uint64{"node2": 1}})
 	h.CleanupStaleKeys()
 
-	if _, ok := h.store.Get(node2Key); ok {
+	if _, ok, _ := h.store.Get(node2Key); ok {
 		t.Errorf("key %q should have been evicted (owned by node2, not node1)", node2Key)
 	}
 }
@@ -82,7 +82,7 @@ func TestCleanupStaleKeys_KeepsOwnedKeys(t *testing.T) {
 	h.store.Put(node1Key, "mine", store.VectorClockVersion{Clocks: map[string]uint64{"node1": 1}})
 	h.CleanupStaleKeys()
 
-	if _, ok := h.store.Get(node1Key); !ok {
+	if _, ok, _ := h.store.Get(node1Key); !ok {
 		t.Errorf("key %q should NOT have been evicted (owned by node1)", node1Key)
 	}
 }
@@ -130,7 +130,7 @@ func TestBootstrap_PullsFromSources(t *testing.T) {
 
 	joinHandler.Bootstrap()
 
-	entry, ok := joinHandler.store.Get(migrKey)
+	entry, ok, _ := joinHandler.store.Get(migrKey)
 	if !ok {
 		t.Fatalf("Bootstrap should have pulled %q from existing into joining", migrKey)
 	}
@@ -158,7 +158,7 @@ func TestPushKeysToSuccessors_SendsToAliveReplicas(t *testing.T) {
 
 	node1Handler.PushKeysToSuccessors()
 
-	entry, ok := node2Handler.store.Get("push-key")
+	entry, ok, _ := node2Handler.store.Get("push-key")
 	if !ok {
 		t.Fatal("node2 should have received push-key from PushKeysToSuccessors")
 	}
@@ -227,7 +227,7 @@ func TestE2EMigrationOnJoin(t *testing.T) {
 
 	joinHandler.Bootstrap()
 
-	entry, ok := joinHandler.store.Get(migrKey)
+	entry, ok, _ := joinHandler.store.Get(migrKey)
 	if !ok {
 		t.Fatalf("joining node should have %q after Bootstrap", migrKey)
 	}
@@ -255,7 +255,7 @@ func TestE2ELeaveDataPreserved(t *testing.T) {
 
 	node1Handler.PushKeysToSuccessors()
 
-	entry, ok := node2Handler.store.Get("leave-key")
+	entry, ok, _ := node2Handler.store.Get("leave-key")
 	if !ok {
 		t.Fatal("node2 should have leave-key after node1's graceful leave")
 	}
@@ -380,7 +380,7 @@ func TestBootstrap_PullsTombstoneFromSource(t *testing.T) {
 	existHandler.store.Delete(tombKey, store.VectorClockVersion{Clocks: map[string]uint64{"existing": 1}})
 	joinHandler.Bootstrap()
 
-	entry, ok := joinHandler.store.Get(tombKey)
+	entry, ok, _ := joinHandler.store.Get(tombKey)
 	if !ok {
 		t.Fatal("Bootstrap should have pulled tombstone from existing into joining")
 	}

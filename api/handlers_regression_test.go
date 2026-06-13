@@ -28,7 +28,7 @@ func TestPutKeyClockBootstrapping(t *testing.T) {
 	if code := put("v1"); code != http.StatusNoContent {
 		t.Fatalf("first put: expected 204, got %d", code)
 	}
-	entry, ok := h.store.Get("k")
+	entry, ok, _ := h.store.Get("k")
 	if !ok || entry.Siblings[0].Version.Clocks["self"] != 1 {
 		t.Fatalf("expected value at clock {self:1}, got %+v", entry)
 	}
@@ -36,7 +36,7 @@ func TestPutKeyClockBootstrapping(t *testing.T) {
 	if code := put("v2"); code != http.StatusNoContent {
 		t.Fatalf("second put: expected 204, got %d", code)
 	}
-	entry, ok = h.store.Get("k")
+	entry, ok, _ = h.store.Get("k")
 	if !ok {
 		t.Fatal("expected entry to exist after overwrite")
 	}

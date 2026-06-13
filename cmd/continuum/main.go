@@ -18,6 +18,7 @@ import (
 	"github.com/colingraydon/continuum/internal/gossip"
 	"github.com/colingraydon/continuum/internal/hintstore"
 	"github.com/colingraydon/continuum/internal/ring"
+	"github.com/colingraydon/continuum/internal/store"
 )
 
 type config struct {
@@ -32,6 +33,7 @@ type config struct {
 	replicaTimeout    time.Duration
 	selfWeight        float64
 	dataDir           string
+	memtableMaxBytes  int64
 }
 
 func getEnvInt(key string, dflt int) int {
@@ -108,6 +110,7 @@ func loadConfig() config {
 		replicaTimeout:    getEnvDurationMs("REPLICA_TIMEOUT_MS", 500*time.Millisecond),
 		selfWeight:        getEnvFloat64("SELF_WEIGHT", 1.0),
 		dataDir:           getEnvString("DATA_DIR", ""),
+		memtableMaxBytes:  int64(getEnvPositiveInt("MEMTABLE_MAX_BYTES", 16<<20)),
 	}
 }
 
@@ -147,13 +150,56 @@ func runHintExpiry(ctx context.Context, hs *hintstore.HintStore) {
 	}
 }
 
+// compactionInterval is how often the store is checked for a size-tiered
+// compaction opportunity.
+const compactionInterval = 30 * time.Second
+
+// runCompaction periodically compacts the store's SSTables, cascading within a
+// tick until no run qualifies. It uses the anti-entropy GC window so the
+// bottom-level drop of aged tombstones matches GCTombstones. Returns on ctx
+// cancellation; main waits for it before finalizing so no merge is in flight
+// when the tables are closed.
+func runCompaction(ctx context.Context, s *store.Store) {
+	ticker := time.NewTicker(compactionInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			compactFully(ctx, s)
+		}
+	}
+}
+
+// compactFully cascades compaction within one tick until no run qualifies,
+// bailing out promptly on ctx cancellation so a backlog of merges cannot
+// stall shutdown past the drain window.
+func compactFully(ctx context.Context, s *store.Store) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		merged, err := s.Compact(antientropy.GCTTL)
+		if err != nil {
+			log.Printf("store: compaction failed: %v", err)
+			return
+		}
+		if !merged {
+			return
+		}
+	}
+}
+
 func main() {
 	cfg := loadConfig()
 
 	// Recover persisted state before anything else touches the store. The
 	// downtime gate may discard local data and force a fresh bootstrap; the
 	// seed-node bootstrap path below handles that case naturally.
-	s, persist, err := recoverStore(cfg.dataDir, cfg.selfID, antientropy.GCTTL)
+	s, persist, err := recoverStore(cfg.dataDir, cfg.selfID, antientropy.GCTTL, cfg.memtableMaxBytes)
 	if err != nil {
 		log.Fatalf("persist: recover failed: %v", err)
 	}
@@ -219,6 +265,18 @@ func main() {
 
 	go runHintExpiry(ctx, hs)
 
+	// Background compaction only runs when persistence is enabled (otherwise
+	// there are no tables). Joined before finalize so no merge is mid-flight
+	// when the tables are closed.
+	var compactionDone chan struct{}
+	if persist != nil {
+		compactionDone = make(chan struct{})
+		go func() {
+			defer close(compactionDone)
+			runCompaction(ctx, s)
+		}()
+	}
+
 	mux := api.BuildMux(h)
 	srv := &http.Server{Addr: ":" + httpPort, Handler: mux}
 
@@ -253,6 +311,11 @@ func main() {
 	defer drainCancel()
 	if err := srv.Shutdown(drainCtx); err != nil {
 		log.Printf("shutdown: drain error: %v", err)
+	}
+
+	if compactionDone != nil {
+		log.Printf("shutdown: waiting for in-flight compaction")
+		<-compactionDone
 	}
 
 	log.Printf("shutdown: finalizing persistence")

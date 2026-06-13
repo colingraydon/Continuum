@@ -57,14 +57,14 @@ var (
 			Help: "Current number of healthy nodes in the ring",
 		},
 	)
-	
+
 	ringSuspectNodes = promauto.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "continuum_ring_suspect_nodes",
 			Help: "Current number of suspect nodes in the ring",
 		},
 	)
-	
+
 	ringDeadNodes = promauto.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "continuum_ring_dead_nodes",

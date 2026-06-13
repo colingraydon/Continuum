@@ -69,7 +69,12 @@ func (m *Manager) rebuild() {
 	}
 	m.mu.Unlock()
 
-	for key, hash := range m.s.KeyHashes() {
+	hashes, err := m.s.KeyHashes()
+	if err != nil {
+		log.Printf("antientropy: rebuild scan failed: %v", err)
+		return
+	}
+	for key, hash := range hashes {
 		m.Update(key, hash)
 	}
 }
@@ -176,7 +181,12 @@ func (m *Manager) syncRound() {
 func (m *Manager) snapshotBucketEntries(localKeys []string) map[string][]syncSibling {
 	snap := make(map[string][]syncSibling)
 	for _, key := range localKeys {
-		if entry, ok := m.s.Get(key); ok {
+		entry, ok, err := m.s.Get(key)
+		if err != nil {
+			log.Printf("antientropy: snapshot read %s: %v", key, err)
+			continue
+		}
+		if ok {
 			sibs := make([]syncSibling, len(entry.Siblings))
 			for j, sib := range entry.Siblings {
 				sibs[j] = syncSibling{Value: sib.Value, Deleted: sib.Deleted, Clocks: sib.Version.Clocks}

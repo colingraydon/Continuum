@@ -9,10 +9,8 @@ func TestNewTree(t *testing.T) {
 	// Arrange + Act
 	tree := NewTree()
 
-	// Assert
-	if tree == nil {
-		t.Fatal("expected tree to not be nil")
-	}
+	// Assert: the constructor returns a ready-to-use tree with its inner
+	// red-black tree initialized.
 	if tree.Tree == nil {
 		t.Fatal("expected inner tree to not be nil")
 	}

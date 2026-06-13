@@ -95,6 +95,9 @@ func (s *Store) LoadSnapshot(r io.Reader, expectedNodeID string) (SnapHeader, er
 	s.mu.Lock()
 	s.data = data
 	s.tombstoneAges = ages
+	if header.SequenceAt > s.lastSeq {
+		s.lastSeq = header.SequenceAt
+	}
 	s.mu.Unlock()
 	return header, nil
 }

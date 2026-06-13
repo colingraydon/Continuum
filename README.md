@@ -10,7 +10,7 @@
 
 A distributed key-value store implementing the core data layer patterns from Cassandra and Dynamo - written in Go.
 
-Continuum maps keys to nodes via a consistent hash ring, propagates cluster membership through a gossip protocol, fans writes to N replicas with quorum acknowledgment, surfaces concurrent writes as vector clock siblings rather than discarding them, and repairs divergent replicas through a combination of inline read repair, event-driven hinted handoff, and background Merkle tree anti-entropy. With `DATA_DIR` set, every write goes through a CRC-checked write-ahead log and snapshots are taken on graceful shutdown, so state survives restart.
+Continuum maps keys to nodes via a consistent hash ring, propagates cluster membership through a gossip protocol, fans writes to N replicas with quorum acknowledgment, surfaces concurrent writes as vector clock siblings rather than discarding them, and repairs divergent replicas through a combination of inline read repair, event-driven hinted handoff, and background Merkle tree anti-entropy. With `DATA_DIR` set, the store runs as an LSM engine: every write goes through a CRC-checked write-ahead log, the memtable flushes to immutable SSTables with bloom filters on a size threshold, and reads merge across generations — so state survives restart and the dataset is no longer RAM-bound on the write path.
 
 ---
 
@@ -54,8 +54,8 @@ flowchart LR
 | ----- | ------- | ---- |
 | Hash Ring | `internal/ring` | Routes keys to nodes via consistent hashing with a Red-Black Tree and virtual nodes |
 | Gossip | `internal/gossip` | Cluster membership and failure detection over UDP without a central coordinator |
-| KV Store | `internal/store` | Vector clock versioning, tombstone deletes, optional WAL+snapshot durability hook |
-| WAL + Snapshot | `internal/wal`, `internal/store/snapshot.go` | Crash-durable append-only log with CRC framing; atomic snapshot file replayed on restart |
+| KV Store | `internal/store` | LSM engine: vector clock versioning, tombstone deletes, memtable flush, merged reads |
+| WAL + SSTables | `internal/wal`, `internal/sstable` | Crash-durable append-only log with CRC framing; immutable sorted tables with bloom filters |
 | Anti-Entropy | `internal/antientropy` | Background Merkle-tree comparison and bidirectional repair of divergent replicas |
 | Hint Store | `internal/hintstore` | Durability buffer that replays missed writes when a down replica recovers |
 | HTTP API | `api` | Transport, read repair, data migration, Prometheus instrumentation |
@@ -117,6 +117,7 @@ make coverage  # HTML coverage report
 | [Anti-Entropy](docs/antientropy.md) | Merkle trees, bidirectional sync, tombstone GC safety argument |
 | [Hinted Handoff](docs/hinted-handoff.md) | Durability gap, hint lifecycle, event-driven delivery, graceful flush |
 | [Persistence](docs/persistence.md) | WAL framing, snapshot format, recovery flow, downtime gate |
+| [SSTable](docs/sstable.md) | Immutable sorted table format: data blocks, sparse index, bloom filter, LSM roadmap |
 | [Read Repair](docs/read-repair.md) | Async repair, always-repair-on-conflict, X-Proxied-From path reuse |
 | [Data Migration](docs/data-migration.md) | Pull on join, push on leave, bootstrapping state machine |
 | [API Reference](docs/api.md) | All endpoints with request/response examples and internal headers |
@@ -127,6 +128,7 @@ make coverage  # HTML coverage report
 
 ## What's Next
 
+- **LSM compaction** - the storage engine flushes and reads tables but never merges them; size-tiered compaction with tombstone GC and evict-marker purge is the last LSM phase ([roadmap](docs/sstable.md#roadmap))
 - **Hint store persistence** - hints currently live in memory only; a coordinator crash before delivery loses them, and anti-entropy is the fallback
 - **Group commit** - per-write fsync caps single-node throughput around 1k writes/sec; batched fsync is the next lever
 - **Benchmark coverage** - store, anti-entropy, gossip, and end-to-end latency benchmarks

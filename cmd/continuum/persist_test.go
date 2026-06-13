@@ -16,7 +16,7 @@ func vc(clocks map[string]uint64) store.VectorClockVersion {
 }
 
 func TestRecoverStore_EmptyDataDir(t *testing.T) {
-	s, p, err := recoverStore("", "node-A", time.Hour)
+	s, p, err := recoverStore("", "node-A", time.Hour, 1<<20)
 	if err != nil {
 		t.Fatalf("recoverStore: %v", err)
 	}
@@ -30,7 +30,7 @@ func TestRecoverStore_EmptyDataDir(t *testing.T) {
 
 func TestRecoverStore_FreshDir(t *testing.T) {
 	dir := t.TempDir()
-	s, p, err := recoverStore(dir, "node-A", time.Hour)
+	s, p, err := recoverStore(dir, "node-A", time.Hour, 1<<20)
 	if err != nil {
 		t.Fatalf("recoverStore: %v", err)
 	}
@@ -40,9 +40,9 @@ func TestRecoverStore_FreshDir(t *testing.T) {
 	if s == nil {
 		t.Fatalf("expected non-nil store")
 	}
-	// snap and wal dirs should exist.
-	if _, err := os.Stat(filepath.Join(dir, snapDirName)); err != nil {
-		t.Fatalf("snap dir missing: %v", err)
+	// tables and wal dirs should exist.
+	if _, err := os.Stat(filepath.Join(dir, tablesDirName)); err != nil {
+		t.Fatalf("tables dir missing: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, walDirName)); err != nil {
 		t.Fatalf("wal dir missing: %v", err)
@@ -58,7 +58,7 @@ func TestRecoverStore_FreshDir(t *testing.T) {
 
 func TestRecoverStore_RoundTripPreservesData(t *testing.T) {
 	dir := t.TempDir()
-	s, p, err := recoverStore(dir, "node-A", time.Hour)
+	s, p, err := recoverStore(dir, "node-A", time.Hour, 1<<20)
 	if err != nil {
 		t.Fatalf("recoverStore: %v", err)
 	}
@@ -76,18 +76,18 @@ func TestRecoverStore_RoundTripPreservesData(t *testing.T) {
 	}
 
 	// Reopen and verify.
-	s2, p2, err := recoverStore(dir, "node-A", time.Hour)
+	s2, p2, err := recoverStore(dir, "node-A", time.Hour, 1<<20)
 	if err != nil {
 		t.Fatalf("recoverStore reopen: %v", err)
 	}
 	defer p2.finalize()
-	if e, ok := s2.Get("k1"); !ok || e.Siblings[0].Value != "v1" {
+	if e, ok, _ := s2.Get("k1"); !ok || e.Siblings[0].Value != "v1" {
 		t.Fatalf("k1 missing or wrong after reopen: %v", e)
 	}
-	if e, ok := s2.Get("k2"); !ok || e.Siblings[0].Value != "v2" {
+	if e, ok, _ := s2.Get("k2"); !ok || e.Siblings[0].Value != "v2" {
 		t.Fatalf("k2 missing or wrong after reopen: %v", e)
 	}
-	if e, ok := s2.Get("k3"); !ok || !e.Siblings[0].Deleted {
+	if e, ok, _ := s2.Get("k3"); !ok || !e.Siblings[0].Deleted {
 		t.Fatalf("k3 should be tombstoned: %v", e)
 	}
 }
@@ -97,7 +97,7 @@ func TestRecoverStore_RoundTripWithoutSnapshot(t *testing.T) {
 	// from scratch with no snapshot to skip ahead from. The WAL records are
 	// still on disk because each Put fsyncs them.
 	dir := t.TempDir()
-	s, p, err := recoverStore(dir, "node-A", time.Hour)
+	s, p, err := recoverStore(dir, "node-A", time.Hour, 1<<20)
 	if err != nil {
 		t.Fatalf("recoverStore: %v", err)
 	}
@@ -115,19 +115,19 @@ func TestRecoverStore_RoundTripWithoutSnapshot(t *testing.T) {
 		t.Fatalf("wal close: %v", err)
 	}
 
-	s2, p2, err := recoverStore(dir, "node-A", time.Hour)
+	s2, p2, err := recoverStore(dir, "node-A", time.Hour, 1<<20)
 	if err != nil {
 		t.Fatalf("recoverStore reopen: %v", err)
 	}
 	defer p2.finalize()
-	if e, ok := s2.Get("k"); !ok || e.Siblings[0].Value != "v" {
+	if e, ok, _ := s2.Get("k"); !ok || e.Siblings[0].Value != "v" {
 		t.Fatalf("k missing or wrong after WAL-only recovery: %v", e)
 	}
 }
 
 func TestRecoverStore_DowntimeGateDiscardsData(t *testing.T) {
 	dir := t.TempDir()
-	s, p, err := recoverStore(dir, "node-A", time.Hour)
+	s, p, err := recoverStore(dir, "node-A", time.Hour, 1<<20)
 	if err != nil {
 		t.Fatalf("recoverStore: %v", err)
 	}
@@ -145,19 +145,19 @@ func TestRecoverStore_DowntimeGateDiscardsData(t *testing.T) {
 		t.Fatalf("writeMeta: %v", err)
 	}
 
-	s2, p2, err := recoverStore(dir, "node-A", time.Hour)
+	s2, p2, err := recoverStore(dir, "node-A", time.Hour, 1<<20)
 	if err != nil {
 		t.Fatalf("recoverStore reopen: %v", err)
 	}
 	defer p2.finalize()
-	if _, ok := s2.Get("k"); ok {
+	if _, ok, _ := s2.Get("k"); ok {
 		t.Fatalf("key should be discarded after downtime gate fires")
 	}
 }
 
 func TestRecoverStore_IdentityMismatchRefused(t *testing.T) {
 	dir := t.TempDir()
-	s, p, err := recoverStore(dir, "node-A", time.Hour)
+	s, p, err := recoverStore(dir, "node-A", time.Hour, 1<<20)
 	if err != nil {
 		t.Fatalf("recoverStore: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestRecoverStore_IdentityMismatchRefused(t *testing.T) {
 		t.Fatalf("finalize: %v", err)
 	}
 
-	_, _, err = recoverStore(dir, "node-B", time.Hour)
+	_, _, err = recoverStore(dir, "node-B", time.Hour, 1<<20)
 	if err == nil || !strings.Contains(err.Error(), "data dir owned by") {
 		t.Fatalf("expected identity mismatch, got %v", err)
 	}
@@ -183,7 +183,7 @@ func TestRecoverStore_CleansSnapTmp(t *testing.T) {
 	if err := os.WriteFile(junk, []byte("garbage"), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	_, p, err := recoverStore(dir, "node-A", time.Hour)
+	_, p, err := recoverStore(dir, "node-A", time.Hour, 1<<20)
 	if err != nil {
 		t.Fatalf("recoverStore: %v", err)
 	}
@@ -204,7 +204,7 @@ func TestRecoverStore_CrashWithoutFinalizeDiscardsData(t *testing.T) {
 	// Simulate: writes go through the WAL, process crashes before finalize.
 	// Recovery has no meta → downtime gate fires → data is discarded.
 	dir := t.TempDir()
-	s, p, err := recoverStore(dir, "node-A", time.Hour)
+	s, p, err := recoverStore(dir, "node-A", time.Hour, 1<<20)
 	if err != nil {
 		t.Fatalf("recoverStore: %v", err)
 	}
@@ -217,19 +217,19 @@ func TestRecoverStore_CrashWithoutFinalizeDiscardsData(t *testing.T) {
 		t.Fatalf("wal close: %v", err)
 	}
 
-	s2, p2, err := recoverStore(dir, "node-A", time.Hour)
+	s2, p2, err := recoverStore(dir, "node-A", time.Hour, 1<<20)
 	if err != nil {
 		t.Fatalf("recoverStore reopen: %v", err)
 	}
 	defer p2.finalize()
-	if _, ok := s2.Get("k"); ok {
+	if _, ok, _ := s2.Get("k"); ok {
 		t.Fatalf("expected store empty after gate fires, found key")
 	}
 }
 
 func TestRecoverStore_TruncatesCoveredWALAfterFinalize(t *testing.T) {
 	dir := t.TempDir()
-	s, p, err := recoverStore(dir, "node-A", time.Hour)
+	s, p, err := recoverStore(dir, "node-A", time.Hour, 1<<20)
 	if err != nil {
 		t.Fatalf("recoverStore: %v", err)
 	}
@@ -257,5 +257,92 @@ func TestRecoverStore_TruncatesCoveredWALAfterFinalize(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("expected 1 wal segment after finalize, got %d", count)
+	}
+}
+
+func TestRecoverStore_TablesRecoverAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	s, p, err := recoverStore(dir, "node-A", time.Hour, 1<<20)
+	if err != nil {
+		t.Fatalf("recoverStore: %v", err)
+	}
+	if err := s.Put("k", "v", vc(map[string]uint64{"a": 1})); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := p.finalize(); err != nil { // flushes the memtable to an SSTable
+		t.Fatalf("finalize: %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, tablesDirName))
+	if err != nil {
+		t.Fatalf("ReadDir tables: %v", err)
+	}
+	sst := 0
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".sst") {
+			sst++
+		}
+	}
+	if sst != 1 {
+		t.Fatalf("expected 1 sstable after finalize, got %d", sst)
+	}
+
+	s2, p2, err := recoverStore(dir, "node-A", time.Hour, 1<<20)
+	if err != nil {
+		t.Fatalf("recoverStore reopen: %v", err)
+	}
+	defer p2.finalize()
+	if s2.TableCount() != 1 {
+		t.Fatalf("TableCount after reopen = %d, want 1", s2.TableCount())
+	}
+	if e, ok, _ := s2.Get("k"); !ok || e.Siblings[0].Value != "v" {
+		t.Fatalf("k missing or wrong after table recovery: %v", e)
+	}
+}
+
+func TestRecoverStore_MigratesLegacySnapshot(t *testing.T) {
+	dir := t.TempDir()
+	snapDir := filepath.Join(dir, snapDirName)
+	if err := os.MkdirAll(snapDir, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	// Build a pre-LSM layout by hand: a snapshot file plus fresh meta.
+	legacy := store.New()
+	if err := legacy.Put("k", "v", vc(map[string]uint64{"a": 1})); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	f, err := os.Create(filepath.Join(snapDir, "00000000000000000001.snap"))
+	if err != nil {
+		t.Fatalf("Create snap: %v", err)
+	}
+	hdr := store.SnapHeader{NodeID: "node-A", Epoch: 1, SequenceAt: 0}
+	if err := legacy.Snapshot(f, hdr); err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	meta := persistMeta{NodeID: "node-A", LastCleanShutdown: time.Now()}
+	if err := writePersistMeta(filepath.Join(dir, metaFile), meta); err != nil {
+		t.Fatalf("writeMeta: %v", err)
+	}
+
+	s, p, err := recoverStore(dir, "node-A", time.Hour, 1<<20)
+	if err != nil {
+		t.Fatalf("recoverStore: %v", err)
+	}
+	defer p.finalize()
+	if e, ok, _ := s.Get("k"); !ok || e.Siblings[0].Value != "v" {
+		t.Fatalf("legacy key missing after migration: %v", e)
+	}
+	if s.TableCount() != 1 {
+		t.Fatalf("TableCount = %d, want 1 (migrated snapshot)", s.TableCount())
+	}
+	// Legacy snapshot files are removed once the SSTable is durable.
+	entries, err := os.ReadDir(snapDir)
+	if err != nil {
+		t.Fatalf("ReadDir snap: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("snap dir should be empty after migration, found %d entries", len(entries))
 	}
 }

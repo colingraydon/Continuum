@@ -18,6 +18,7 @@ type fakeWAL struct{ err error }
 
 func (f fakeWAL) Append([]byte) (uint64, error) { return 0, f.err }
 func (f fakeWAL) Sync() error                   { return nil }
+func (f fakeWAL) TruncateThrough(uint64) error  { return nil }
 
 func attachFailingWAL(h *Handler) {
 	h.store.SetWAL(fakeWAL{err: errors.New("simulated disk error")})
@@ -134,6 +135,7 @@ type fakeWALSatisfies struct{}
 
 func (fakeWALSatisfies) Append([]byte) (uint64, error) { return 0, nil }
 func (fakeWALSatisfies) Sync() error                   { return nil }
+func (fakeWALSatisfies) TruncateThrough(uint64) error  { return nil }
 
 // Confirm we don't accidentally drop the ring import (needed for the test
 // helper file's ring.NewRing call elsewhere).
