@@ -19,6 +19,14 @@ const (
 	tableTmpSuffix = ".sst.tmp"
 )
 
+// liveTable pairs an open table reader with its base filename so the manifest
+// can be rewritten from the in-memory table set and so compaction can unlink
+// the files it retires.
+type liveTable struct {
+	r    *sstable.Reader
+	file string
+}
+
 // SetFlushPolicy enables memtable flushing: once the memtable's estimated
 // size exceeds thresholdBytes, the next write flushes it to an SSTable in
 // dir and truncates the WAL segments it covers. thresholdBytes <= 0 leaves
@@ -56,21 +64,41 @@ func (s *Store) flushIfNeeded() {
 // not — concurrent writes go to the fresh memtable and reads consult the
 // frozen one until the table is attached. Only one flush runs at a time; a
 // failed flush leaves the frozen memtable in place for retry, and the WAL is
-// only truncated after the table is durably on disk.
+// only truncated after the table is durably on disk and named in the manifest.
 func (s *Store) flush(force bool) error {
-	s.mu.Lock()
-	if s.flushDir == "" || s.flushing {
-		s.mu.Unlock()
+	frozen, dir, fileNum, ok := s.beginFlush(force)
+	if !ok {
 		return nil
+	}
+	reader, writeErr := writeTable(dir, fileNum, frozen)
+	w, err := s.finishFlush(reader, writeErr, fileNum, frozen, dir)
+	if err != nil {
+		return err
+	}
+	if w != nil {
+		if err := w.TruncateThrough(frozen.seq); err != nil {
+			// The table is durable; stale WAL segments only cost replay time.
+			return fmt.Errorf("store: truncate wal after flush: %w", err)
+		}
+	}
+	return nil
+}
+
+// beginFlush decides under the lock whether a flush should proceed, freezing
+// the active memtable if needed and reserving a file number. ok is false when
+// there is nothing to flush or a flush is already running.
+func (s *Store) beginFlush(force bool) (frozen *memtable, dir string, fileNum uint64, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.flushDir == "" || s.flushing {
+		return nil, "", 0, false
 	}
 	if s.frozen == nil {
 		if !force && (s.flushBytes <= 0 || s.memBytes < s.flushBytes) {
-			s.mu.Unlock()
-			return nil
+			return nil, "", 0, false
 		}
 		if len(s.data) == 0 && len(s.evicted) == 0 {
-			s.mu.Unlock()
-			return nil
+			return nil, "", 0, false
 		}
 		s.frozen = &memtable{
 			data:    s.data,
@@ -83,38 +111,51 @@ func (s *Store) flush(force bool) error {
 		s.tombstoneAges = make(map[string]time.Time)
 		s.memBytes = 0
 	}
-	frozen := s.frozen
-	dir := s.flushDir
+	fileNum = s.nextFileNum
+	s.nextFileNum++
 	s.flushing = true
-	s.mu.Unlock()
+	return s.frozen, s.flushDir, fileNum, true
+}
 
-	reader, err := writeTable(dir, frozen)
-
+// finishFlush installs a freshly written table: it clears the flushing flag,
+// commits the new table to the manifest (the durable point), then swaps it
+// into the in-memory set. Returns the WAL so the caller can truncate covered
+// segments after the lock is released. On a write or manifest error the frozen
+// memtable is retained for retry and the unreferenced file is removed.
+func (s *Store) finishFlush(reader *sstable.Reader, writeErr error, fileNum uint64, frozen *memtable, dir string) (WAL, error) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.flushing = false
-	if err != nil {
-		s.mu.Unlock()
-		return err
+	if writeErr != nil {
+		return nil, writeErr
 	}
-	tables := make([]*sstable.Reader, 0, len(s.tables)+1)
-	tables = append(tables, reader)
-	s.tables = append(tables, s.tables...)
+	newTables := append([]liveTable{{r: reader, file: tableName(fileNum)}}, s.tables...)
+	newMaxSeq := s.maxTableSeq
+	if frozen.seq > newMaxSeq {
+		newMaxSeq = frozen.seq
+	}
+	if err := writeManifest(dir, manifest{
+		Tables:      tableNames(newTables),
+		MaxSeq:      newMaxSeq,
+		NextFileNum: s.nextFileNum,
+	}); err != nil {
+		// The manifest is the source of truth: a table not named in it is an
+		// orphan cleaned at the next startup. Drop the unreferenced file and
+		// keep the frozen memtable for retry. Leave maxTableSeq untouched so
+		// in-memory state never claims coverage that isn't durable.
+		_ = reader.Close()
+		_ = os.Remove(filepath.Join(dir, tableName(fileNum)))
+		return nil, fmt.Errorf("store: write manifest after flush: %w", err)
+	}
+	s.tables = newTables
+	s.maxTableSeq = newMaxSeq
 	s.frozen = nil
-	w := s.wal
-	s.mu.Unlock()
-
-	if w != nil {
-		if err := w.TruncateThrough(frozen.seq); err != nil {
-			// The table is durable; stale WAL segments only cost replay time.
-			return fmt.Errorf("store: truncate wal after flush: %w", err)
-		}
-	}
-	return nil
+	return s.wal, nil
 }
 
 // writeTable encodes a frozen memtable as an SSTable: temp file, fsync,
 // rename, fsync directory. Returns an open reader for the finished table.
-func writeTable(dir string, m *memtable) (*sstable.Reader, error) {
+func writeTable(dir string, fileNum uint64, m *memtable) (*sstable.Reader, error) {
 	keys := make([]string, 0, len(m.data)+len(m.evicted))
 	for k := range m.data {
 		keys = append(keys, k)
@@ -124,7 +165,7 @@ func writeTable(dir string, m *memtable) (*sstable.Reader, error) {
 	}
 	sort.Strings(keys)
 
-	name := tableName(m.seq)
+	name := tableName(fileNum)
 	tmpPath := filepath.Join(dir, name+".tmp")
 	f, err := os.Create(tmpPath)
 	if err != nil {
@@ -178,56 +219,119 @@ func writeTableEntries(f *os.File, keys []string, m *memtable) error {
 	return nil
 }
 
-// OpenTables attaches every finished table in dir, newest first, and removes
-// abandoned .sst.tmp files from crashed flushes. Returns the highest WAL
-// sequence covered, for use as the replay skip threshold. Call before Replay
-// so replayed records merge against table-resident state.
+// OpenTables attaches the live table set recorded in dir's manifest, newest
+// first, and removes orphaned .sst/.sst.tmp files left by crashed flushes or
+// compactions. A pre-compaction data dir has tables but no manifest; one is
+// synthesized from the .sst listing (whose names are the WAL sequences they
+// cover) and written out. Returns the highest WAL sequence covered, for use
+// as the replay skip threshold. Call before Replay so replayed records merge
+// against table-resident state.
 func (s *Store) OpenTables(dir string) (uint64, error) {
-	entries, err := os.ReadDir(dir)
+	m, hasManifest, err := readManifest(dir)
 	if err != nil {
-		return 0, fmt.Errorf("store: read table dir: %w", err)
+		return 0, err
 	}
-	var names []string
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		if strings.HasSuffix(e.Name(), tableTmpSuffix) {
-			_ = os.Remove(filepath.Join(dir, e.Name()))
-			continue
-		}
-		if strings.HasSuffix(e.Name(), tableSuffix) {
-			names = append(names, e.Name())
-		}
-	}
-	sort.Sort(sort.Reverse(sort.StringSlice(names))) // newest (highest seq) first
-
-	var maxSeq uint64
-	tables := make([]*sstable.Reader, 0, len(names))
-	for _, name := range names {
-		seq, err := tableSeqFromName(name)
+	if !hasManifest {
+		m, err = migrateLegacyManifest(dir)
 		if err != nil {
-			closeAll(tables)
 			return 0, err
 		}
+	}
+	if err := cleanOrphanTables(dir, m.Tables); err != nil {
+		return 0, err
+	}
+
+	live := make([]liveTable, 0, len(m.Tables))
+	for _, name := range m.Tables {
 		r, err := sstable.Open(filepath.Join(dir, name))
 		if err != nil {
-			closeAll(tables)
+			closeAll(live)
 			return 0, fmt.Errorf("store: open table %s: %w", name, err)
 		}
-		tables = append(tables, r)
-		if seq > maxSeq {
-			maxSeq = seq
+		live = append(live, liveTable{r: r, file: name})
+	}
+	// Persist the synthesized manifest so later startups take the fast path.
+	// A brand-new empty dir writes nothing — the first flush creates it — so
+	// startup stays I/O-free when there are no tables to record.
+	if !hasManifest && len(m.Tables) > 0 {
+		if err := writeManifest(dir, m); err != nil {
+			closeAll(live)
+			return 0, err
 		}
 	}
 
 	s.mu.Lock()
-	s.tables = tables
-	if maxSeq > s.lastSeq {
-		s.lastSeq = maxSeq
+	s.tables = live
+	s.maxTableSeq = m.MaxSeq
+	s.nextFileNum = m.NextFileNum
+	if m.MaxSeq > s.lastSeq {
+		s.lastSeq = m.MaxSeq
 	}
 	s.mu.Unlock()
-	return maxSeq, nil
+	return m.MaxSeq, nil
+}
+
+// migrateLegacyManifest builds a manifest from a pre-compaction tables dir
+// where files are named by the WAL sequence they cover. File numbers are
+// seeded past the largest existing name so freshly allocated tables never
+// collide with a migrated one.
+func migrateLegacyManifest(dir string) (manifest, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return manifest{}, fmt.Errorf("store: read table dir: %w", err)
+	}
+	var nums []uint64
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), tableSuffix) {
+			continue
+		}
+		n, err := tableNumFromName(e.Name())
+		if err != nil {
+			return manifest{}, err
+		}
+		nums = append(nums, n)
+	}
+	sort.Slice(nums, func(i, j int) bool { return nums[i] > nums[j] }) // newest first
+	m := manifest{NextFileNum: 1}
+	for _, n := range nums {
+		m.Tables = append(m.Tables, tableName(n))
+		if n > m.MaxSeq {
+			m.MaxSeq = n // a legacy filename is the WAL sequence it covers
+		}
+		if n+1 > m.NextFileNum {
+			m.NextFileNum = n + 1
+		}
+	}
+	return m, nil
+}
+
+// cleanOrphanTables removes every .sst.tmp file and every .sst file not named
+// in keep. Orphans arise when a crash interrupts a flush or compaction after
+// the file is written but before the manifest naming it is committed.
+func cleanOrphanTables(dir string, keep []string) error {
+	want := make(map[string]struct{}, len(keep))
+	for _, n := range keep {
+		want[n] = struct{}{}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("store: read table dir: %w", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		switch {
+		case strings.HasSuffix(name, tableTmpSuffix):
+			_ = os.Remove(filepath.Join(dir, name))
+		case strings.HasSuffix(name, tableSuffix):
+			if _, ok := want[name]; !ok {
+				_ = os.Remove(filepath.Join(dir, name))
+			}
+		}
+	}
+	return nil
 }
 
 // TableCount returns the number of attached SSTables.
@@ -246,30 +350,38 @@ func (s *Store) CloseTables() error {
 	s.mu.Unlock()
 	var firstErr error
 	for _, t := range tables {
-		if err := t.Close(); err != nil && firstErr == nil {
+		if err := t.r.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	return firstErr
 }
 
-func closeAll(tables []*sstable.Reader) {
+func closeAll(tables []liveTable) {
 	for _, t := range tables {
-		_ = t.Close()
+		_ = t.r.Close()
 	}
 }
 
-func tableName(seq uint64) string {
-	return fmt.Sprintf("%020d%s", seq, tableSuffix)
+func tableNames(tables []liveTable) []string {
+	names := make([]string, len(tables))
+	for i, t := range tables {
+		names[i] = t.file
+	}
+	return names
 }
 
-func tableSeqFromName(name string) (uint64, error) {
+func tableName(fileNum uint64) string {
+	return fmt.Sprintf("%020d%s", fileNum, tableSuffix)
+}
+
+func tableNumFromName(name string) (uint64, error) {
 	base := strings.TrimSuffix(name, tableSuffix)
-	seq, err := strconv.ParseUint(base, 10, 64)
+	num, err := strconv.ParseUint(base, 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("store: bad table name %q: %w", name, err)
 	}
-	return seq, nil
+	return num, nil
 }
 
 func fsyncDir(path string) error {

@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/colingraydon/continuum/internal/sstable"
 	"github.com/colingraydon/continuum/internal/wal"
 	"github.com/twmb/murmur3"
 )
@@ -120,8 +119,8 @@ type Store struct {
 	data          map[string]Entry
 	evicted       map[string]struct{} // keys locally evicted but still present in tables
 	tombstoneAges map[string]time.Time
-	frozen        *memtable         // non-nil while a flush is in progress or pending retry
-	tables        []*sstable.Reader // immutable, newest first
+	frozen        *memtable   // non-nil while a flush is in progress or pending retry
+	tables        []liveTable // immutable readers, newest first
 	onUpdate      func(key string, hash uint32)
 	onEvict       func(key string)
 	wal           WAL // nil = memory-only mode
@@ -130,6 +129,16 @@ type Store struct {
 	flushDir      string // "" = flushing disabled
 	flushBytes    int64
 	flushing      bool
+	maxTableSeq   uint64 // highest WAL sequence any attached table covers
+	nextFileNum   uint64 // next table file number to allocate
+	compacting    bool
+	compaction    compactionPolicy
+	// tablesRW guards table-reader lifetime. Lock-free reads (Get, KeyHashes)
+	// hold it shared while reading from table files outside s.mu; compaction
+	// takes it exclusively before closing retired readers, so a closed reader
+	// can never be read. It is distinct from s.mu so table IO does not block
+	// writers.
+	tablesRW sync.RWMutex
 }
 
 func New() *Store {
@@ -137,6 +146,8 @@ func New() *Store {
 		data:          make(map[string]Entry),
 		evicted:       make(map[string]struct{}),
 		tombstoneAges: make(map[string]time.Time),
+		nextFileNum:   1,
+		compaction:    defaultCompactionPolicy(),
 	}
 }
 
@@ -219,10 +230,10 @@ func (s *Store) lookupLocked(key string) (Entry, bool, error) {
 
 // tableGet probes tables newest-first and returns the first hit. An evict
 // marker means the key was migrated away: it shadows older tables.
-func tableGet(tables []*sstable.Reader, key string) (Entry, bool, error) {
+func tableGet(tables []liveTable, key string) (Entry, bool, error) {
 	kb := []byte(key)
 	for _, t := range tables {
-		val, ok, err := t.Get(kb)
+		val, ok, err := t.r.Get(kb)
 		if err != nil {
 			return Entry{}, false, fmt.Errorf("store: table lookup %q: %w", key, err)
 		}
@@ -527,10 +538,14 @@ func (s *Store) Get(key string) (Entry, bool, error) {
 		}
 	}
 	tables := s.tables
+	// Acquire the table-reader guard before releasing s.mu so a compaction
+	// cannot retire and close a reader in this captured slice between here and
+	// the read below.
+	s.tablesRW.RLock()
 	s.mu.RUnlock()
-	// Table probing happens outside the lock: the slice is immutable and any
-	// key concurrently moving generations was already covered by the checks
-	// above.
+	defer s.tablesRW.RUnlock()
+	// Table probing happens outside s.mu: the slice is immutable and any key
+	// concurrently moving generations was already covered by the checks above.
 	return tableGet(tables, key)
 }
 
@@ -676,13 +691,33 @@ func (s *Store) KeyHashes() (map[string]uint32, error) {
 	s.mu.RLock()
 	tables := s.tables
 	frozen := s.frozen
+	// Hold the table-reader guard across the scan (acquired before releasing
+	// s.mu) so compaction cannot close a reader mid-iteration. It is released
+	// before the memtable overlay re-acquires s.mu below.
+	s.tablesRW.RLock()
 	s.mu.RUnlock()
 
+	out, err := scanTableHashes(tables)
+	s.tablesRW.RUnlock()
+	if err != nil {
+		return nil, err
+	}
+	if frozen != nil {
+		overlayHashes(out, frozen.data, frozen.evicted)
+	}
+	s.mu.RLock()
+	overlayHashes(out, s.data, s.evicted)
+	s.mu.RUnlock()
+	return out, nil
+}
+
+// scanTableHashes folds every table's entries into a key→hash map, oldest to
+// newest so later generations overwrite earlier ones and evict markers remove
+// the key entirely. The caller holds s.tablesRW for the duration.
+func scanTableHashes(tables []liveTable) (map[string]uint32, error) {
 	out := make(map[string]uint32)
-	// Oldest to newest: later generations overwrite earlier ones, and evict
-	// markers remove the key entirely.
 	for i := len(tables) - 1; i >= 0; i-- {
-		it := tables[i].Iter()
+		it := tables[i].r.Iter()
 		for it.Next() {
 			key := string(it.Key())
 			e, evicted, err := decodeTableEntry(it.Value())
@@ -699,12 +734,6 @@ func (s *Store) KeyHashes() (map[string]uint32, error) {
 			return nil, fmt.Errorf("store: table scan: %w", err)
 		}
 	}
-	if frozen != nil {
-		overlayHashes(out, frozen.data, frozen.evicted)
-	}
-	s.mu.RLock()
-	overlayHashes(out, s.data, s.evicted)
-	s.mu.RUnlock()
 	return out, nil
 }
 
