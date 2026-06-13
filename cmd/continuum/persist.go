@@ -88,26 +88,10 @@ func recoverStore(dataDir, nodeID string, gcTTL time.Duration, memtableMaxBytes 
 		return openWALAndReturn(s, p, walDir, tablesDir, memtableMaxBytes)
 	}
 
-	skipBelow, err := s.OpenTables(tablesDir)
+	skipBelow, migrate, err := loadTablesOrSnapshot(s, tablesDir, snapDir, nodeID)
 	if err != nil {
 		return nil, nil, err
 	}
-
-	// Legacy migration: a pre-LSM data dir has a snapshot and no tables.
-	// Load it as memtable contents; after the WAL is open it gets flushed
-	// out as the first SSTable and the snapshot files are removed.
-	migrate := false
-	if s.TableCount() == 0 {
-		snapSeq, loaded, err := loadSnapshotIfPresent(s, snapDir, nodeID)
-		if err != nil {
-			return nil, nil, err
-		}
-		if loaded {
-			skipBelow = snapSeq
-			migrate = true
-		}
-	}
-
 	if err := replayWALSegments(s, walDir, skipBelow); err != nil {
 		return nil, nil, err
 	}
@@ -115,15 +99,47 @@ func recoverStore(dataDir, nodeID string, gcTTL time.Duration, memtableMaxBytes 
 		return nil, nil, err
 	}
 	if migrate {
-		if err := s.Flush(); err != nil {
-			return nil, nil, fmt.Errorf("persist: migrate snapshot to sstable: %w", err)
-		}
-		if err := clearDirFiles(snapDir); err != nil {
+		if err := finishSnapshotMigration(s, snapDir); err != nil {
 			return nil, nil, err
 		}
-		log.Printf("persist: migrated legacy snapshot to sstable")
 	}
 	return s, p, nil
+}
+
+// loadTablesOrSnapshot attaches existing SSTables and returns the WAL
+// replay-skip threshold. For a pre-LSM data dir (no tables but a snapshot
+// present) it instead loads the snapshot into the memtable and reports
+// migrate=true, so the caller flushes it out as the first SSTable after the
+// WAL opens.
+func loadTablesOrSnapshot(s *store.Store, tablesDir, snapDir, nodeID string) (skipBelow uint64, migrate bool, err error) {
+	skipBelow, err = s.OpenTables(tablesDir)
+	if err != nil {
+		return 0, false, err
+	}
+	if s.TableCount() > 0 {
+		return skipBelow, false, nil
+	}
+	snapSeq, loaded, err := loadSnapshotIfPresent(s, snapDir, nodeID)
+	if err != nil {
+		return 0, false, err
+	}
+	if loaded {
+		return snapSeq, true, nil
+	}
+	return skipBelow, false, nil
+}
+
+// finishSnapshotMigration flushes the migrated snapshot to its first SSTable
+// and removes the legacy snapshot files.
+func finishSnapshotMigration(s *store.Store, snapDir string) error {
+	if err := s.Flush(); err != nil {
+		return fmt.Errorf("persist: migrate snapshot to sstable: %w", err)
+	}
+	if err := clearDirFiles(snapDir); err != nil {
+		return err
+	}
+	log.Printf("persist: migrated legacy snapshot to sstable")
+	return nil
 }
 
 func setupDataDirs(dataDir string) (walDir, tablesDir string, err error) {

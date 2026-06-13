@@ -73,7 +73,7 @@ func TestAutoFlushOnThreshold(t *testing.T) {
 			t.Fatalf("Put(%q): %v", k, err)
 		}
 	}
-	if n := s.TableCount(); n == 0 {
+	if s.TableCount() == 0 {
 		t.Fatal("expected auto-flush to produce at least one table")
 	}
 	entries, err := os.ReadDir(tablesDir)

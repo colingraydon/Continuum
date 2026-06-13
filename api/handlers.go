@@ -452,34 +452,36 @@ func (h *Handler) filterReadNodes(nodes []*ring.Node) []*ring.Node {
 	return out
 }
 
+type readResult struct {
+	resp NodeResponse
+	err  error
+}
+
+// readNode reads key from one node: the local store when it is self, otherwise
+// the replica over HTTP. An error counts as a failed replica; quorum can still
+// be met from the remaining nodes.
+func (h *Handler) readNode(node *ring.Node, key string) readResult {
+	if node.ID != h.selfID {
+		r, err := h.readFromReplica(node.Address, key)
+		return readResult{resp: r, err: err}
+	}
+	entry, ok, err := h.store.Get(key)
+	if err != nil {
+		return readResult{err: err}
+	}
+	r := NodeResponse{ID: h.selfID, Status: h.nodeStatus(h.selfID)}
+	if ok {
+		r = entryToResponse(h.selfID, h.nodeStatus(h.selfID), entry)
+	}
+	return readResult{resp: r}
+}
+
 // quorumReadFanOut fans out reads to readNodes, collects results until quorum
 // is met, and returns the responses plus whether quorum was reached.
 func (h *Handler) quorumReadFanOut(readNodes []*ring.Node, key string, quorum int) ([]NodeResponse, bool) {
-	type readResult struct {
-		resp NodeResponse
-		err  error
-	}
 	results := make(chan readResult, len(readNodes))
 	for _, n := range readNodes {
-		go func(node *ring.Node) {
-			if node.ID == h.selfID {
-				entry, ok, err := h.store.Get(key)
-				if err != nil {
-					// Counts as a failed replica; quorum can still be met
-					// from the remaining nodes.
-					results <- readResult{err: err}
-					return
-				}
-				r := NodeResponse{ID: h.selfID, Status: h.nodeStatus(h.selfID)}
-				if ok {
-					r = entryToResponse(h.selfID, h.nodeStatus(h.selfID), entry)
-				}
-				results <- readResult{resp: r}
-			} else {
-				r, err := h.readFromReplica(node.Address, key)
-				results <- readResult{resp: r, err: err}
-			}
-		}(n)
+		go func(node *ring.Node) { results <- h.readNode(node, key) }(n)
 	}
 	var responses []NodeResponse
 	for i := 0; i < len(readNodes); i++ {
