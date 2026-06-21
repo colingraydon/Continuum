@@ -40,8 +40,15 @@ type Record struct {
 }
 
 // Writer is an append-only segmented WAL. Append buffers a record and Sync
-// fsyncs the current segment. Append and Sync are safe to call from
-// multiple goroutines but are serialized internally.
+// (or SyncUpTo) fsyncs the current segment. Append and Sync are safe to call
+// from multiple goroutines but are serialized internally.
+//
+// Group commit: callers that append under their own lock (so append order
+// matches sequence order) can release that lock and call SyncUpTo without it.
+// Concurrent SyncUpTo callers collapse into a single fsync — the first to
+// claim the sync slot flushes for everyone, and the rest return as soon as
+// that flush covers their sequence. This trades a small visibility-before-
+// durability window for far fewer fsyncs under write load.
 type Writer struct {
 	mu              sync.Mutex
 	dir             string
@@ -49,6 +56,21 @@ type Writer struct {
 	f               *os.File
 	segmentSize     int64
 	nextSeq         uint64
+
+	// rotateGen increments each time the active segment is rotated. A SyncUpTo
+	// that finds it changed knows the segment it captured was fsynced before
+	// being closed (see rotateLocked), so its target is already durable.
+	rotateGen uint64
+	// fsyncCount counts fsync syscalls issued; read via FsyncCount for the
+	// group-commit batching metric. Guarded by mu.
+	fsyncCount uint64
+
+	// syncMu serializes group-commit leaders so only one fsync runs at a time.
+	// syncedSeq is the highest sequence known durable; syncErr is the result of
+	// the last fsync, returned to followers it covered. Both guarded by mu.
+	syncMu    sync.Mutex
+	syncedSeq uint64
+	syncErr   error
 }
 
 // Open opens (or creates) a WAL in dir. If the newest segment ends with a
@@ -130,14 +152,85 @@ func (w *Writer) Append(payload []byte) (uint64, error) {
 	return seq, nil
 }
 
-// Sync fsyncs the current segment.
+// Sync fsyncs the current segment, making every record appended so far
+// durable. It routes through the group-commit path so a synchronous Sync and
+// concurrent SyncUpTo callers share one serialized fsync slot.
 func (w *Writer) Sync() error {
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	if w.f == nil {
+		w.mu.Unlock()
 		return nil
 	}
-	return w.f.Sync()
+	target := w.nextSeq - 1
+	w.mu.Unlock()
+	return w.SyncUpTo(target)
+}
+
+// SyncUpTo makes every record through sequence target durable, batching
+// concurrent callers into a single fsync (group commit). Callers append under
+// their own lock (so append order matches sequence order) and call SyncUpTo
+// without that lock held; the first to claim the sync slot fsyncs for all
+// waiters, and the rest return as soon as that flush covers their sequence.
+func (w *Writer) SyncUpTo(target uint64) error {
+	w.mu.Lock()
+	if w.syncedSeq >= target {
+		err := w.syncErr
+		w.mu.Unlock()
+		return err
+	}
+	w.mu.Unlock()
+
+	// One leader fsyncs at a time; followers block here and re-check below.
+	w.syncMu.Lock()
+	defer w.syncMu.Unlock()
+
+	w.mu.Lock()
+	if w.syncedSeq >= target {
+		// A leader that ran while we waited for syncMu already covered us.
+		err := w.syncErr
+		w.mu.Unlock()
+		return err
+	}
+	f := w.f
+	gen := w.rotateGen
+	upTo := w.nextSeq - 1
+	w.mu.Unlock()
+
+	// fsync outside w.mu so concurrent appends are not blocked by the flush.
+	syncErr := f.Sync()
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.rotateGen != gen {
+		// The captured segment was rotated out. rotateLocked fsyncs a segment
+		// before closing it, so every record up to the rotation point — which
+		// includes target — is already durable. Go's *os.File returns ErrClosed
+		// here rather than syncing a reused fd, so syncErr is irrelevant.
+		if upTo > w.syncedSeq {
+			w.syncedSeq = upTo
+		}
+		w.syncErr = nil
+		return nil
+	}
+	w.fsyncCount++
+	if syncErr != nil {
+		w.syncErr = syncErr
+		return syncErr
+	}
+	if upTo > w.syncedSeq {
+		w.syncedSeq = upTo
+	}
+	w.syncErr = nil
+	return nil
+}
+
+// FsyncCount returns the number of fsync syscalls the writer has issued. Used
+// to quantify group-commit batching: under load it grows far slower than the
+// number of appended records.
+func (w *Writer) FsyncCount() uint64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.fsyncCount
 }
 
 // Close fsyncs and closes the current segment.
@@ -148,6 +241,7 @@ func (w *Writer) Close() error {
 		return nil
 	}
 	syncErr := w.f.Sync()
+	w.fsyncCount++
 	closeErr := w.f.Close()
 	w.f = nil
 	if syncErr != nil {
@@ -198,11 +292,18 @@ func (w *Writer) rotateLocked(startSeq uint64) error {
 		if err := w.f.Sync(); err != nil {
 			return fmt.Errorf("wal: sync before rotate: %w", err)
 		}
+		w.fsyncCount++
 		if err := w.f.Close(); err != nil {
 			return fmt.Errorf("wal: close before rotate: %w", err)
 		}
 	}
-	return w.startSegment(startSeq)
+	if err := w.startSegment(startSeq); err != nil {
+		return err
+	}
+	// Bump only after the new segment is open: a SyncUpTo whose captured fsync
+	// fails sees an unchanged generation and surfaces the error.
+	w.rotateGen++
+	return nil
 }
 
 func (w *Writer) startSegment(startSeq uint64) error {

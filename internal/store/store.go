@@ -83,10 +83,13 @@ type Entry struct {
 }
 
 // WAL is the contract the store needs from a write-ahead log. *wal.Writer
-// satisfies it; tests inject fakes to exercise error paths.
+// satisfies it; tests inject fakes to exercise error paths. SyncUpTo batches
+// concurrent hot-path fsyncs (group commit); Sync is the synchronous flush
+// used by the strict durable-before-visible mutations.
 type WAL interface {
 	Append(payload []byte) (uint64, error)
 	Sync() error
+	SyncUpTo(seq uint64) error
 	TruncateThrough(seq uint64) error
 }
 
@@ -324,16 +327,22 @@ func (s *Store) Put(key, value string, v VectorClockVersion) error {
 		s.mu.Unlock()
 		return nil
 	}
+	var (
+		w   WAL
+		seq uint64
+	)
 	if s.wal != nil {
 		payload, err := encodePut(key, value, v)
 		if err != nil {
 			s.mu.Unlock()
 			return err
 		}
-		if err := s.walAppendLocked(payload); err != nil {
+		seq, err = s.walAppendLocked(payload)
+		if err != nil {
 			s.mu.Unlock()
 			return err
 		}
+		w = s.wal
 	}
 	s.commitEntry(key, merged, incoming)
 	// A live write supersedes any prior tombstone age for this key. If the
@@ -343,6 +352,13 @@ func (s *Store) Put(key, value string, v VectorClockVersion) error {
 		s.onUpdate(key, entryHash(merged))
 	}
 	s.mu.Unlock()
+	// Group commit: the record is buffered and applied; SyncUpTo batches this
+	// fsync with other concurrent writers before the write is acknowledged.
+	if w != nil {
+		if err := w.SyncUpTo(seq); err != nil {
+			return err
+		}
+	}
 	s.flushIfNeeded()
 	return nil
 }
@@ -365,16 +381,22 @@ func (s *Store) Delete(key string, v VectorClockVersion) error {
 		return nil
 	}
 	tombAt := time.Now()
+	var (
+		w   WAL
+		seq uint64
+	)
 	if s.wal != nil {
 		payload, err := encodeDelete(key, tombAt, v)
 		if err != nil {
 			s.mu.Unlock()
 			return err
 		}
-		if err := s.walAppendLocked(payload); err != nil {
+		seq, err = s.walAppendLocked(payload)
+		if err != nil {
 			s.mu.Unlock()
 			return err
 		}
+		w = s.wal
 	}
 	s.commitEntry(key, merged, incoming)
 	// Always record the current time so that a new deletion event (different
@@ -385,6 +407,12 @@ func (s *Store) Delete(key string, v VectorClockVersion) error {
 		s.onUpdate(key, entryHash(merged))
 	}
 	s.mu.Unlock()
+	// Group commit: see Put.
+	if w != nil {
+		if err := w.SyncUpTo(seq); err != nil {
+			return err
+		}
+	}
 	s.flushIfNeeded()
 	return nil
 }
@@ -405,7 +433,7 @@ func (s *Store) Evict(key string) error {
 			s.mu.Unlock()
 			return err
 		}
-		if err := s.walAppendLocked(payload); err != nil {
+		if err := s.walAppendSyncLocked(payload); err != nil {
 			s.mu.Unlock()
 			return err
 		}
@@ -439,18 +467,29 @@ func (s *Store) evictLocked(key string) error {
 	return nil
 }
 
-// walAppendLocked appends payload, fsyncs, and records the assigned
-// sequence. Must be called with s.mu held for writing and s.wal non-nil.
-func (s *Store) walAppendLocked(payload []byte) error {
+// walAppendLocked appends payload and records the assigned sequence WITHOUT
+// fsyncing, returning the sequence. The hot path (Put, Delete) batches the
+// fsync via SyncUpTo after releasing s.mu; the strict mutations follow with a
+// synchronous Sync. Must be called with s.mu held for writing and s.wal
+// non-nil.
+func (s *Store) walAppendLocked(payload []byte) (uint64, error) {
 	seq, err := s.wal.Append(payload)
 	if err != nil {
-		return err
-	}
-	if err := s.wal.Sync(); err != nil {
-		return err
+		return 0, err
 	}
 	s.lastSeq = seq
-	return nil
+	return seq, nil
+}
+
+// walAppendSyncLocked appends payload and fsyncs before returning, preserving
+// the durable-before-visible contract. Used by the non-hot-path mutations
+// (evict, GC, checkpoint). Must be called with s.mu held for writing and
+// s.wal non-nil.
+func (s *Store) walAppendSyncLocked(payload []byte) error {
+	if _, err := s.walAppendLocked(payload); err != nil {
+		return err
+	}
+	return s.wal.Sync()
 }
 
 // GCTombstones removes uncontested tombstones — entries with exactly one
@@ -488,7 +527,7 @@ func (s *Store) GCTombstones(maxAge time.Duration) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := s.walAppendLocked(payload); err != nil {
+		if err := s.walAppendSyncLocked(payload); err != nil {
 			return nil, err
 		}
 	}
@@ -559,7 +598,7 @@ func (s *Store) WriteCheckpoint(snapshotSeq uint64) error {
 	if s.wal == nil {
 		return nil
 	}
-	return s.walAppendLocked(encodeCheckpoint(snapshotSeq))
+	return s.walAppendSyncLocked(encodeCheckpoint(snapshotSeq))
 }
 
 // Replay applies every record from r whose sequence is greater than

@@ -10,42 +10,49 @@
 
 A distributed key-value store implementing the core data layer patterns from Cassandra and Dynamo - written in Go.
 
-Continuum maps keys to nodes via a consistent hash ring, propagates cluster membership through a gossip protocol, fans writes to N replicas with quorum acknowledgment, surfaces concurrent writes as vector clock siblings rather than discarding them, and repairs divergent replicas through a combination of inline read repair, event-driven hinted handoff, and background Merkle tree anti-entropy. With `DATA_DIR` set, the store runs as an LSM engine: every write goes through a CRC-checked write-ahead log, the memtable flushes to immutable SSTables with bloom filters on a size threshold, and reads merge across generations — so state survives restart and the dataset is no longer RAM-bound on the write path.
+Continuum maps keys to nodes via a consistent hash ring, propagates cluster membership through a gossip protocol, fans writes to N replicas with quorum acknowledgment, surfaces concurrent writes as vector clock siblings rather than discarding them, and repairs divergent replicas through a combination of inline read repair, event-driven hinted handoff, and background Merkle tree anti-entropy. With `DATA_DIR` set, the store runs as an LSM engine: every write goes through a CRC-checked write-ahead log whose fsyncs are batched across concurrent writers by group commit, the memtable flushes to immutable SSTables with bloom filters on a size threshold, and reads merge across generations, so state survives restart and the dataset is no longer RAM-bound on the write path. Buffered hints are persisted to their own append-only log, so undelivered writes survive a coordinator crash rather than depending on anti-entropy alone.
 
 ---
 
 ## Architecture
 
 ```mermaid
-flowchart LR
-    Client([Client])
+flowchart TB
+    Client([Client]) --> HTTP[HTTP Handlers]
 
-    subgraph api [api]
-        HTTP[HTTP Handlers]
-    end
-
-    subgraph internals [ ]
+    subgraph core [internal - core]
         direction LR
-        subgraph core [internal - core]
-            direction TB
-            Gossip[Gossip]
-            Ring[Ring]
-            Store[KV Store]
-        end
-        subgraph bg [internal - background]
-            direction TB
-            HH[Hint Store]
-            AE[Anti-Entropy]
+        Ring[Ring]
+        Gossip[Gossip]
+        Store[KV Store / Memtable]
+        subgraph storage [LSM storage]
+            direction LR
+            WAL[WAL - group commit]
+            SST[SSTables + Bloom]
+            Compact[Compaction]
         end
     end
 
-    Client --> HTTP
-    HTTP --> Gossip
+    subgraph bg [internal - background]
+        direction LR
+        AE[Anti-Entropy]
+        HH[Hint Store]
+        HintLog[Hint Log]
+    end
+
     HTTP --> Ring
+    HTTP --> Gossip
     HTTP --> Store
     Gossip --> Ring
+
+    Store -->|append| WAL
+    Store -->|flush| SST
+    Compact -->|merge| SST
+
     Gossip --> HH
     Store --> AE
+    HH -->|persist| HintLog
+
     AE -.->|sync| HTTP
     HH -.->|replay| HTTP
 ```
@@ -128,8 +135,6 @@ make coverage  # HTML coverage report
 
 ## What's Next
 
-- **LSM compaction** - the storage engine flushes and reads tables but never merges them; size-tiered compaction with tombstone GC and evict-marker purge is the last LSM phase ([roadmap](docs/sstable.md#roadmap))
-- **Hint store persistence** - hints currently live in memory only; a coordinator crash before delivery loses them, and anti-entropy is the fallback
-- **Group commit** - per-write fsync caps single-node throughput around 1k writes/sec; batched fsync is the next lever
-- **Benchmark coverage** - store, anti-entropy, gossip, and end-to-end latency benchmarks
+- **Benchmark coverage** - store, anti-entropy, gossip, and end-to-end latency benchmarks, including before/after numbers for group commit
+- **Fault-injection harness** - drive the cluster under partitions and node kills, asserting quorum durability and convergence invariants
 - **Sharded store** - split the single store mutex into 256 shards to unlock parallel replay and parallel snapshot iteration

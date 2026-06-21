@@ -1,6 +1,6 @@
 # Persistence
 
-> **Status: implemented (v2, LSM).** WAL + SSTable persistence on the store, gated by the `DATA_DIR` environment variable. v1's shutdown-only snapshot has been replaced by memtable flushes to immutable SSTables ([docs/sstable.md](sstable.md)); legacy snapshot dirs migrate automatically. Hint store persistence and group commit are still future work.
+> **Status: implemented (v2, LSM).** WAL + SSTable persistence on the store, gated by the `DATA_DIR` environment variable. v1's shutdown-only snapshot has been replaced by memtable flushes to immutable SSTables ([docs/sstable.md](sstable.md)); legacy snapshot dirs migrate automatically. WAL fsyncs on the `Put`/`Delete` hot path are batched across concurrent writers by group commit, and buffered hints persist to their own append-only log ([docs/hinted-handoff.md](hinted-handoff.md)).
 
 ## Why
 
@@ -210,8 +210,8 @@ Trade-off: a node down longer than `gcTTL` loses any writes it accepted that had
 
 Quick reference of what bites as the cluster grows, roughly in order:
 
-- **fsync ceiling**: ~500-1k writes/sec/node without group commit. Group commit pushes to 10k-50k.
-- **Single store lock**: holding `s.mu` across fsync serializes all writers. Group commit pattern: append under lock, release lock, group fsync outside, re-acquire to apply in seq order.
+- **fsync ceiling**: ~500-1k writes/sec/node with a per-write fsync. **Done**: the `Put`/`Delete` hot path now appends under `s.mu`, releases, then batches the fsync via `wal.SyncUpTo` (group commit), so concurrent writers collapse into one flush. Trades a small visibility-before-durability window (the write is acknowledged only after its batched fsync) for far fewer syscalls; `wal.FsyncCount` exposes the batching ratio.
+- **Single store lock**: a single `map[string]Entry` under one `RWMutex` still serializes the in-memory merge; the sharded-store PR splits it into 256 shards.
 - **Vector clock bloat**: every node that ever wrote a key leaves an entry in its clock forever. At 100-node clusters with hot keys, real GB of clock overhead. Dotted version vectors (Riak) or timestamp-bounded pruning fix it.
 - **Map sharding**: a single `map[string]Entry` under one RWMutex tops out around a few hundred-k QPS. 256 shards by hash; also unlocks parallel snapshot iteration and parallel WAL replay.
 - **Snapshot copy-under-lock**: works fine at 100k keys; freezes writes for seconds at 100M keys. Sharding solves it (snapshot iterates shards one at a time under per-shard locks).

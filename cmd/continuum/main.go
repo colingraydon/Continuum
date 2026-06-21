@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -137,6 +138,28 @@ func makeMemberChangeCallback(r *ring.Ring, hptr *atomic.Pointer[api.Handler]) f
 	}
 }
 
+// hintCapPerNode bounds buffered hints per target node; hintTTL bounds how
+// long an undelivered hint is retained before anti-entropy takes over.
+const (
+	hintCapPerNode = 10_000
+	hintTTL        = time.Hour
+)
+
+// openHintStore returns a crash-durable hint store backed by DATA_DIR/hints
+// when persistence is enabled, or a memory-only store otherwise. A failure to
+// open the persistent log is fatal: silently falling back to memory would
+// reintroduce the durability gap persistence is meant to close.
+func openHintStore(dataDir string) *hintstore.HintStore {
+	if dataDir == "" {
+		return hintstore.New(hintCapPerNode, hintTTL)
+	}
+	hs, err := hintstore.NewPersistent(filepath.Join(dataDir, "hints"), hintCapPerNode, hintTTL)
+	if err != nil {
+		log.Fatalf("hintstore: open failed: %v", err)
+	}
+	return hs
+}
+
 func runHintExpiry(ctx context.Context, hs *hintstore.HintStore) {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
@@ -209,7 +232,7 @@ func main() {
 		api.UpdateRingMetrics(nodeCount, vnodeCount)
 	})
 
-	hs := hintstore.New(10_000, time.Hour)
+	hs := openHintStore(cfg.dataDir)
 
 	var hptr atomic.Pointer[api.Handler]
 
@@ -305,6 +328,11 @@ func main() {
 
 	log.Printf("shutdown: flushing pending hints to alive nodes")
 	h.FlushHints()
+
+	// Persist remove records from the flush and compact the hint log before exit.
+	if err := hs.Close(); err != nil {
+		log.Printf("shutdown: hintstore close error: %v", err)
+	}
 
 	log.Printf("shutdown: draining in-flight requests")
 	drainCtx, drainCancel := context.WithTimeout(context.Background(), 30*time.Second)

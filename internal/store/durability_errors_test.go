@@ -39,6 +39,14 @@ func (f *failingWAL) Sync() error {
 	return nil
 }
 
+func (f *failingWAL) SyncUpTo(uint64) error {
+	if f.syncErr != nil {
+		return f.syncErr
+	}
+	f.synced++
+	return nil
+}
+
 func TestStore_Put_WALAppendError(t *testing.T) {
 	s := New()
 	s.SetWAL(&failingWAL{appendErr: errors.New("append failed")})
@@ -57,8 +65,11 @@ func TestStore_Put_WALSyncError(t *testing.T) {
 	if err := s.Put("k", "v", newTestVC(map[string]uint64{"a": 1})); err == nil {
 		t.Fatalf("expected sync error")
 	}
-	if _, ok, _ := s.Get("k"); ok {
-		t.Fatalf("memory must not be modified on Sync failure")
+	// Group commit applies the write to the memtable before the batched fsync,
+	// so the value is visible even though durability was not confirmed. The
+	// returned error tells the caller the write is not acknowledged as durable.
+	if _, ok, _ := s.Get("k"); !ok {
+		t.Fatalf("group-committed write should be visible before the batched fsync")
 	}
 }
 
@@ -79,8 +90,10 @@ func TestStore_Delete_WALSyncError(t *testing.T) {
 	if err := s.Delete("k", newTestVC(map[string]uint64{"a": 1})); err == nil {
 		t.Fatalf("expected error")
 	}
-	if _, ok, _ := s.Get("k"); ok {
-		t.Fatalf("memory must not be modified")
+	// As with Put, group commit applies the tombstone before the batched fsync,
+	// so it is visible despite the unconfirmed durability and returned error.
+	if _, ok, _ := s.Get("k"); !ok {
+		t.Fatalf("group-committed tombstone should be present before the batched fsync")
 	}
 }
 
