@@ -66,13 +66,13 @@ The alternative is a background loop that periodically checks which nodes are al
 
 **Tradeoff:** Tighter coupling between gossip and the handler layer. The `onChange` callback is wired in `main.go` and passes a delivery function through to the handler, keeping neither package importing the other directly. This is more boilerplate than a polling approach but keeps the packages decoupled while still achieving event-driven delivery.
 
-### In-Memory Store over Persistent Store
+### Persistent Hint Log (with Anti-Entropy as Backstop)
 
-**Choice:** Hints live in memory only.
+**Choice:** With `DATA_DIR` set, hints are persisted to an append-only log under `DATA_DIR/hints`; without it, the store is memory-only.
 
-Persisting hints to disk would survive coordinator restarts and eliminate the "lost hints on restart" failure mode. The cost is complexity - WAL format, fsync timing, recovery logic, and the interaction with hint expiry and delivery. For this system, anti-entropy is the persistent fallback. The 30-second anti-entropy interval means the maximum inconsistency window after a coordinator restart is one sync cycle, which is acceptable.
+The hint log reuses the segmented WAL (`internal/wal`) for CRC framing, torn-tail recovery, and group-commit fsyncs. Each `Store` writes an op-coded record; drains, cap evictions, and TTL expiry write `REMOVE` records carrying the affected hint sequence numbers, so removals are precise append-only events rather than full rewrites. The log is replayed on startup to rebuild the buffer, and rewrite-compacted once it accumulates enough superseded records (and on graceful shutdown). Hints already older than the TTL are dropped during replay, so a long coordinator downtime self-prunes stale hints without coupling to the storage downtime gate.
 
-**Tradeoff:** Coordinator restarts produce a brief consistency gap for keys whose hints were lost, repaired by anti-entropy. For a system with stronger durability requirements, the hint store should be backed by a WAL.
+**Tradeoff:** Hint durability is best-effort (anti-entropy still backstops any loss), so a failed fsync is logged rather than surfaced. The drain path syncs its `REMOVE` record before delivering, so a crash mid-delivery cannot resurrect already-delivered hints on restart.
 
 ### Oldest-First Eviction under the Cap
 
