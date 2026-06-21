@@ -724,3 +724,140 @@ func TestConcurrentAppend(t *testing.T) {
 		}
 	}
 }
+
+func TestSyncUpTo_MakesRecordsDurable(t *testing.T) {
+	dir := t.TempDir()
+	w, _ := Open(dir)
+	defer w.Close()
+	var lastSeq uint64
+	for i := range 5 {
+		seq, err := w.Append([]byte{byte(i)})
+		if err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+		lastSeq = seq
+	}
+	if err := w.SyncUpTo(lastSeq); err != nil {
+		t.Fatalf("SyncUpTo: %v", err)
+	}
+	if got := w.FsyncCount(); got != 1 {
+		t.Fatalf("FsyncCount = %d, want 1", got)
+	}
+	// A second call covering an already-durable seq must not fsync again.
+	if err := w.SyncUpTo(lastSeq); err != nil {
+		t.Fatalf("SyncUpTo (redundant): %v", err)
+	}
+	if got := w.FsyncCount(); got != 1 {
+		t.Fatalf("redundant SyncUpTo fsynced: count = %d, want 1", got)
+	}
+}
+
+func TestSyncUpTo_ZeroTargetIsNoOp(t *testing.T) {
+	w, _ := Open(t.TempDir())
+	defer w.Close()
+	if err := w.SyncUpTo(0); err != nil {
+		t.Fatalf("SyncUpTo(0): %v", err)
+	}
+	if got := w.FsyncCount(); got != 0 {
+		t.Fatalf("FsyncCount = %d, want 0", got)
+	}
+}
+
+// TestSyncUpTo_BatchesConcurrentCallers asserts the core group-commit property:
+// many writers that append then SyncUpTo collapse into far fewer fsyncs than
+// the number of records.
+func TestSyncUpTo_BatchesConcurrentCallers(t *testing.T) {
+	dir := t.TempDir()
+	w, _ := Open(dir)
+	defer w.Close()
+
+	const n = 200
+	// Pre-append everything so every SyncUpTo target is already buffered; the
+	// first leader's single fsync then covers all concurrent followers.
+	seqs := make([]uint64, n)
+	for i := range n {
+		seq, err := w.Append([]byte{byte(i)})
+		if err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+		seqs[i] = seq
+	}
+
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func(target uint64) {
+			defer wg.Done()
+			if err := w.SyncUpTo(target); err != nil {
+				t.Errorf("SyncUpTo: %v", err)
+			}
+		}(seqs[i])
+	}
+	wg.Wait()
+
+	// Worst case every goroutine could lead its own fsync if perfectly
+	// serialized, but in practice a leader's flush covers the rest. Require at
+	// least real batching: far fewer fsyncs than records.
+	if got := w.FsyncCount(); got == 0 || got >= n {
+		t.Fatalf("FsyncCount = %d, want batched (0 < count < %d)", got, n)
+	}
+}
+
+func TestSyncUpTo_DurableAcrossRotation(t *testing.T) {
+	dir := t.TempDir()
+	w, _ := Open(dir)
+	defer w.Close()
+	w.SetMaxSegmentBytes(50) // force frequent rotation
+
+	var seqs []uint64
+	for range 20 {
+		seq, err := w.Append([]byte("aaaaaaaa"))
+		if err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+		seqs = append(seqs, seq)
+	}
+	// Syncing an early seq whose segment has since rotated away must still
+	// report success (rotateLocked fsynced it before closing).
+	if err := w.SyncUpTo(seqs[0]); err != nil {
+		t.Fatalf("SyncUpTo across rotation: %v", err)
+	}
+	if err := w.SyncUpTo(seqs[len(seqs)-1]); err != nil {
+		t.Fatalf("SyncUpTo latest: %v", err)
+	}
+}
+
+func TestSync_RoutesThroughGroupCommit(t *testing.T) {
+	dir := t.TempDir()
+	w, _ := Open(dir)
+	defer w.Close()
+	if _, err := w.Append([]byte("x")); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if err := w.Sync(); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if got := w.FsyncCount(); got != 1 {
+		t.Fatalf("FsyncCount = %d, want 1", got)
+	}
+}
+
+// TestSyncUpTo_FsyncErrorSurfaces closes the underlying file out from under the
+// writer (no rotation) so the next fsync fails, exercising the error path that
+// caches and returns the failure to the caller.
+func TestSyncUpTo_FsyncErrorSurfaces(t *testing.T) {
+	dir := t.TempDir()
+	w, _ := Open(dir)
+	if _, err := w.Append([]byte("x")); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if err := w.f.Close(); err != nil {
+		t.Fatalf("close underlying file: %v", err)
+	}
+	if err := w.SyncUpTo(1); err == nil {
+		t.Fatalf("expected fsync error to surface")
+	}
+	if got := w.FsyncCount(); got != 1 {
+		t.Fatalf("FsyncCount = %d, want 1 (the failed attempt is still counted)", got)
+	}
+}

@@ -394,6 +394,7 @@ type aeFailWAL struct{ err error }
 
 func (f aeFailWAL) Append([]byte) (uint64, error) { return 0, f.err }
 func (f aeFailWAL) Sync() error                   { return nil }
+func (f aeFailWAL) SyncUpTo(uint64) error         { return nil }
 func (f aeFailWAL) TruncateThrough(uint64) error  { return nil }
 
 func TestRunGC_WALErrorIsLogged(t *testing.T) {
