@@ -6,13 +6,13 @@
 
 Anti-entropy is the durable safety net beneath hinted handoff and read repair. Hinted handoff closes the gap for replicas that missed writes while briefly down. Read repair fixes stale replicas inline on reads. Anti-entropy covers everything else - replicas that diverged while hints were lost, nodes that restarted and lost in-memory hints, or any divergence that slipped through the other two layers.
 
-The primary node for each vnode range owns an in-memory Merkle tree for that range. Every 30 seconds, one vnode range is selected at random, and its tree is compared against each of its replicas. Divergent buckets are reconciled bidirectionally.
+The primary node for each vnode range owns an in-memory Merkle tree for that range. Every sync tick (`SYNC_INTERVAL_MS`, default 30 seconds), the next vnode range in a deterministic round-robin order is compared against each of its replicas. Divergent buckets are reconciled bidirectionally. When ring membership changes the set of ranges this node is primary for, the manager detects it at the next tick and rebuilds its trees from a store scan.
 
 ## How It Works
 
 ### Merkle Trees
 
-Each Merkle tree covers one vnode range and is partitioned into 16 hash buckets. Keys within the vnode range are assigned to buckets by `keyHash % 16`. Each bucket's hash is a murmur3 digest of its sorted (key, value-hash) pairs. The tree's root hash is a murmur3 digest of the 16 bucket hashes in order.
+Each Merkle tree covers one vnode range and is partitioned into 16 hash buckets. Keys within the vnode range are assigned to buckets by `keyHash % 16`. Each bucket's hash is a murmur3 digest of its sorted (key, entry-hash) pairs, where an entry hash folds together each sibling's value hash and a canonical hash of its vector clock. The tree's root hash is a murmur3 digest of the 16 bucket hashes in order.
 
 Comparing two Merkle trees requires sending 16 bucket hashes (64 bytes) plus the root hash. If the root hashes match, the replicas are in sync and no further work is done. If the root hashes differ, the per-bucket comparison identifies exactly which buckets diverged, bounding the sync work to only the affected keys.
 
@@ -20,11 +20,11 @@ Comparing two Merkle trees requires sending 16 bucket hashes (64 bytes) plus the
 
 ### Precomputed Value Hashes
 
-Each store entry carries a `Hash uint32` - a murmur3 hash of the value computed at write time. When the anti-entropy manager registers an `onUpdate` callback with the store, it is notified of every accepted write with the key and its new hash. The Merkle tree is updated incrementally - no full scan needed after each write.
+Each store entry carries a `Hash uint32` - a murmur3 hash of the value computed at write time. The entry hash fed to the trees XORs each sibling's value hash with a canonical hash of its vector clock, so two replicas holding the same value at different clocks still hash differently - without the clock component, that divergence would be invisible to sync forever (a fault-harness finding). When the anti-entropy manager registers an `onUpdate` callback with the store, it is notified of every accepted write with the key and its new entry hash. The Merkle tree is updated incrementally - no full scan needed after each write.
 
 ### Sync Cycle
 
-Every 30 seconds, the manager picks one vnode range at random from the set of ranges this node is primary for, then runs `syncWithReplica` against each replica in that range's replica set.
+Every sync tick, the manager first re-derives its primary ranges from the ring and rebuilds its trees if membership changed them (a cheap comparison otherwise), then advances a round-robin cursor over the sorted vnode ends and runs `syncWithReplica` against each replica in that range's replica set. Cycling guarantees every primary range is synced exactly once per `N` ticks, where `N` is the number of primary vnodes; random selection had an unbounded worst case.
 
 `syncWithReplica` fetches the replica's Merkle state (`GET /sync?vnode=<endHash>`) - the replica computes its bucket hashes on-the-fly from its store. It then compares each bucket hash against the primary's local tree. For each divergent bucket, `syncBucket` is called.
 
@@ -85,13 +85,21 @@ Bidirectional sync makes the TTL approach viable. Because the primary pushes tom
 
 **Tradeoff:** A node partitioned (or shut down) for longer than `GCTTL` would risk resurrecting GC'd tombstones if it rejoined with stale live values. With persistence enabled, the recovery driver enforces a max-downtime invariant: such a node refuses to load its local data and re-bootstraps from peers instead. The trade is that any writes it accepted that hadn't reached quorum are lost - the same risk Cassandra accepts with `gc_grace_seconds`.
 
-### Sync Interval of 30 Seconds
+### One Vnode per Tick, Round-Robin
 
-**Choice:** One vnode selected per 30-second tick.
+**Choice:** One vnode synced per tick (`SYNC_INTERVAL_MS`, default 30 seconds), cycling deterministically through the sorted primary vnode ends.
 
-A shorter interval would detect divergence faster but add more background HTTP traffic between nodes. A longer interval would reduce traffic but widen the window during which replicas are inconsistent. 30 seconds is a reasonable default for a system where hinted handoff and read repair handle the acute cases - anti-entropy is the slow but thorough backstop.
+A shorter interval would detect divergence faster but add more background HTTP traffic between nodes. A longer interval would reduce traffic but widen the window during which replicas are inconsistent. 30 seconds is a reasonable default for a system where hinted handoff and read repair handle the acute cases - anti-entropy is the slow but thorough backstop. Round-robin (rather than the original random sampling, a fault-harness finding) bounds a full keyspace pass at exactly `vnodes x interval` instead of a coupon-collector expected time with an unbounded tail.
 
-**Tradeoff:** With many vnode ranges, a node might take a long time to cycle through all of them. A node with 150 vnodes as primary for all of them would take 150 * 30 seconds = 4,500 seconds (75 minutes) to complete one full pass. In practice, with replication factor 3 and 3 nodes, each node is primary for 1/3 of its vnodes, so the cycle time is more manageable. For larger clusters or higher replication factors, a smarter scheduling strategy (prioritize ranges with known divergence, or run multiple syncs per tick) would be needed.
+**Tradeoff:** A full pass still scales linearly with vnode count: a node primary for 150 vnodes at the default interval takes 75 minutes per pass. Tune `SYNC_INTERVAL_MS` or `REPLICAS` when faster convergence matters; prioritizing ranges with known divergence or syncing several vnodes per tick are the next steps if that isn't enough.
+
+### Primary Ranges Rebuilt on Membership Change
+
+**Choice:** Each sync tick re-derives the primary ranges from the ring and, only when they changed, rebuilds the Merkle trees with one `KeyHashes` scan.
+
+Ranges were previously computed once at startup, so a node that started alone considered itself primary for the whole keyspace forever (another fault-harness finding). Comparing the range set is cheap enough to do every tick; the expensive scan only runs on actual membership events, which are rare.
+
+**Tradeoff:** A rebuild discards incremental tree state and rescans the store, which is O(total data). A future refinement could diff the old and new range sets and move only the affected keys.
 
 ## See Also
 

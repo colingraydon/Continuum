@@ -350,10 +350,14 @@ func TestOnUpdateFiredOnDelete(t *testing.T) {
 	var gotHash uint32
 	s.SetOnUpdate(func(_ string, hash uint32) { gotHash = hash })
 
-	s.Delete("k", clock(map[string]uint64{"node1": 1}))
+	v := clock(map[string]uint64{"node1": 1})
+	s.Delete("k", v)
 
-	if gotHash != tombstoneSentinel {
-		t.Errorf("expected tombstone sentinel %#x, got %#x", tombstoneSentinel, gotHash)
+	// The tombstone contribution is the sentinel folded with the clock hash,
+	// so tombstones at different clocks stay distinguishable to anti-entropy.
+	want := tombstoneSentinel ^ clockHash(v)
+	if gotHash != want {
+		t.Errorf("expected tombstone hash %#x (sentinel^clock), got %#x", want, gotHash)
 	}
 }
 

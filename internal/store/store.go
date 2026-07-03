@@ -1,9 +1,12 @@
 package store
 
 import (
+	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"sync"
 	"time"
 
@@ -198,17 +201,42 @@ func (s *Store) LastSeq() uint64 {
 const tombstoneSentinel uint32 = 0x544f4d42 // "TOMB"
 
 // entryHash returns a canonical hash for an entry by XOR-ing all sibling
-// hashes. Commutative across siblings, so sibling order doesn't matter.
+// contributions. Commutative across siblings, so sibling order doesn't
+// matter. Each contribution folds in the sibling's vector clock: replicas
+// holding the same value at different clocks must hash differently, or
+// anti-entropy can never see (and repair) the clock divergence.
 func entryHash(e Entry) uint32 {
 	var h uint32
 	for _, sib := range e.Siblings {
+		sh := sib.Hash
 		if sib.Deleted {
-			h ^= tombstoneSentinel
-		} else {
-			h ^= sib.Hash
+			sh = tombstoneSentinel
 		}
+		h ^= sh ^ clockHash(sib.Version)
 	}
 	return h
+}
+
+// clockHash returns a canonical hash of a vector clock: node IDs are sorted
+// so the result is independent of map iteration order.
+func clockHash(v VectorClockVersion) uint32 {
+	if len(v.Clocks) == 0 {
+		return 0
+	}
+	ids := make([]string, 0, len(v.Clocks))
+	for id := range v.Clocks {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	var buf bytes.Buffer
+	for _, id := range ids {
+		buf.WriteString(id)
+		buf.WriteByte(0)
+		var n [8]byte
+		binary.BigEndian.PutUint64(n[:], v.Clocks[id])
+		buf.Write(n[:])
+	}
+	return murmur3.Sum32(buf.Bytes())
 }
 
 // lookupLocked returns the complete visible entry for key, searching

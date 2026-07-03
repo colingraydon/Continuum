@@ -162,10 +162,10 @@ func (c *cluster) start(n *node) {
 		"GOSSIP_PORT="+n.gossipPort,
 		"GOSSIP_ADVERTISE_ADDR="+n.udpProxy.Addr(),
 		"DATA_DIR="+n.dataDir,
-		// Few vnodes: anti-entropy syncs ONE random primary vnode per round,
-		// so keyspace repair time scales with vnode count. 8 vnodes at a 2s
-		// interval covers the keyspace in well under a minute; the default 150
-		// would take ~5 minutes even at test cadence.
+		// Few vnodes: anti-entropy round-robins one primary vnode per round,
+		// so a full keyspace pass takes vnodes x interval. 8 vnodes at a 2s
+		// interval is a 16s pass; the default 150 would take 5 minutes even
+		// at test cadence.
 		"REPLICAS=8",
 		fmt.Sprintf("REPLICATION_FACTOR=%d", c.cfg.replicationFactor),
 		fmt.Sprintf("WRITE_QUORUM=%d", c.cfg.writeQuorum),
