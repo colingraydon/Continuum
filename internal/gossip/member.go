@@ -59,6 +59,10 @@ type MemberList struct {
 	members  map[string]*Member
 	self     *Member
 	onChange func(member *Member, status MemberStatus)
+	// persistIncarnation, if set, is called (outside mu) whenever this node
+	// advances its own incarnation, so the new epoch can be durably recorded
+	// before it is gossiped onward. See SetIncarnationSink.
+	persistIncarnation func(uint64)
 }
 
 func NewMemberList(selfID, selfAddress string, onChange func(member *Member, status MemberStatus)) *MemberList {
@@ -108,6 +112,30 @@ func (ml *MemberList) IncrementHeartbeat() {
 	ml.self.UpdatedAt = time.Now()
 }
 
+// SetSelfIncarnation sets this node's incarnation (epoch). Used at startup to
+// restore a persisted incarnation so a crash-restarted node's gossip
+// immediately supersedes the stale entry peers remember, rather than depending
+// on receiving an inbound refutation trigger. Advancing the incarnation is by
+// itself enough for peers to accept the update; no heartbeat bump is needed.
+func (ml *MemberList) SetSelfIncarnation(v uint64) {
+	ml.mu.Lock()
+	defer ml.mu.Unlock()
+	ml.self.Incarnation = v
+	ml.self.UpdatedAt = time.Now()
+}
+
+// SetIncarnationSink registers a callback invoked, outside the member lock,
+// whenever this node advances its own incarnation via refutation — so the new
+// epoch can be persisted before it is gossiped onward. Persisting outside the
+// lock keeps a slow fsync off the gossip path; the small window where the
+// advance is in memory but not yet on disk falls back to refutation, since a
+// value that was never gossiped cannot have been remembered by any peer.
+func (ml *MemberList) SetIncarnationSink(fn func(uint64)) {
+	ml.mu.Lock()
+	defer ml.mu.Unlock()
+	ml.persistIncarnation = fn
+}
+
 func (ml *MemberList) notifyMemberChange(m *Member, ok bool, prevStatus MemberStatus, wasBootstrapping bool) {
 	if ml.onChange == nil {
 		return
@@ -153,8 +181,8 @@ func (ml *MemberList) refuteSelf(incoming *Member) {
 
 func (ml *MemberList) Merge(incoming []*Member) {
 	ml.mu.Lock()
-	defer ml.mu.Unlock()
 
+	beforeInc := ml.self.Incarnation
 	for _, m := range incoming {
 		if m.ID == ml.self.ID {
 			ml.refuteSelf(m)
@@ -173,6 +201,15 @@ func (ml *MemberList) Merge(incoming []*Member) {
 			ml.members[m.ID] = m
 			ml.notifyMemberChange(m, ok, prevStatus, wasBootstrapping)
 		}
+	}
+	afterInc := ml.self.Incarnation
+	sink := ml.persistIncarnation
+	ml.mu.Unlock()
+
+	// Persist a refutation-driven advance before it propagates. Done outside
+	// the lock so the fsync does not stall concurrent membership reads.
+	if sink != nil && afterInc != beforeInc {
+		sink(afterInc)
 	}
 }
 

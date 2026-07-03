@@ -92,9 +92,12 @@ Each node carries an **incarnation** number - an epoch that only the node itself
 
 This exists to fix crash-rejoin. A restarted node's heartbeat resets to zero, but peers still hold its pre-crash heartbeat (potentially in the hundreds). Under a heartbeat-only rule, the restarted node's gossip would be rejected until its counter climbed back past the stale value - hundreds of seconds. Incarnation decouples "which view is newer" from the reset-prone heartbeat.
 
-Because the incarnation also resets to zero on restart, the node learns its correct epoch by **refutation**. When it receives gossip carrying its own entry - either a stale higher incarnation that peers remember, or a suspect/dead claim at its current incarnation - it advances its incarnation just past the stale value and keeps asserting `alive`. Its next gossip round then supersedes the stale entry everywhere within a round or two. An `alive` echo at the node's current incarnation is ignored, so the incarnation does not grow without bound in steady state.
+The node learns its correct epoch two ways:
 
-Refutation only fires when the node *receives* gossip about itself, which is why the [seed bootstrap reply](#seed-nodes) is part of the same fix: it guarantees a rejoining node gets that inbound message even after peers have buried it.
+- **Persistence (primary, when `DATA_DIR` is set).** The incarnation is stored on disk, Cassandra-generation style. On restart the node loads the last value, advances past it, and installs it before gossiping — so its very first gossip already dominates any stale entry, with no peer round trip. A refutation-driven advance at runtime is persisted through the same store before it propagates. The write is atomic (temp + fsync + rename) and monotonic. A missing or corrupt file is treated as a fresh start (epoch 0), which simply falls back to refutation.
+- **Refutation (fallback, always available).** When the node receives gossip carrying its own entry — either a stale higher incarnation that peers remember, or a suspect/dead claim at its current incarnation — it advances its incarnation just past the stale value and keeps asserting `alive`. Its next gossip round then supersedes the stale entry everywhere within a round or two. An `alive` echo at the node's current incarnation is ignored, so the incarnation does not grow without bound in steady state.
+
+Refutation only fires when the node *receives* gossip about itself, which is why the [seed bootstrap reply](#seed-nodes) is part of the same fix: it guarantees a rejoining node gets that inbound message even after peers have buried it. Persistence removes the dependency entirely for the common case — a node with `DATA_DIR` never needs a peer to remember it in order to reclaim a fresh epoch. Without `DATA_DIR`, the node runs in refutation-only mode and behaves as before.
 
 ## Design Decisions
 
@@ -114,7 +117,7 @@ Membership state is simple - alive, suspect, or dead. The most recent observatio
 
 Heartbeat alone is not enough because a crashed and restarted node starts its heartbeat from 0, and gossip still holds the high pre-crash heartbeat - so under a heartbeat-only rule the restarted node is ignored until its counter climbs back past the stale value (hundreds of seconds). The incarnation number, advanced by the node via refutation on restart, supersedes the stale entry immediately. See [Incarnation Numbers](#incarnation-numbers).
 
-**Tradeoff:** Refutation depends on the node receiving gossip that carries its own stale entry. The [seed bootstrap reply](#seed-nodes) guarantees this on rejoin; the incarnation is not persisted, so it is reconstructed from what peers remember rather than read from disk.
+**Tradeoff:** With `DATA_DIR` set, the incarnation is persisted (atomic, monotonic), so a restarted node reclaims a fresh epoch from disk with no peer round trip. Without it, the node runs in refutation-only mode and depends on receiving gossip that carries its own stale entry — the [seed bootstrap reply](#seed-nodes) guarantees this on rejoin.
 
 ### Event-Driven Ring Updates over Polling
 

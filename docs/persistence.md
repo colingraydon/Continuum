@@ -21,6 +21,7 @@ Today every layer holds state in memory only. A graceful single-node restart sur
 ```
 DATA_DIR/
   meta.json                  node_id, last_clean_shutdown, latest_seq
+  incarnation                gossip epoch (decimal uint64); advanced each restart
   tables/NNNNNNNN.sst        immutable SSTable covering WAL sequences ≤ NNNNNNNN
   tables/NNNNNNNN.sst.tmp    in-flight flush; cleaned up at startup
   wal/NNNNNNNN.wal           segment starting at sequence NNNNNNNN

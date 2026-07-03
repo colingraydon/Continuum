@@ -204,6 +204,52 @@ func TestHandleMessageNoReplyWithoutWantReply(t *testing.T) {
 	}
 }
 
+// TestSetSelfIncarnation restores a persisted epoch onto self.
+func TestSetSelfIncarnation(t *testing.T) {
+	ml := newTestMemberList()
+	ml.SetSelfIncarnation(42)
+	if got := ml.self.Incarnation; got != 42 {
+		t.Errorf("expected self incarnation 42, got %d", got)
+	}
+}
+
+// TestMergeFiresIncarnationSinkOnRefute confirms a refutation-driven advance is
+// handed to the persistence sink (with the new value) so it can be durably
+// recorded before the node gossips it onward.
+func TestMergeFiresIncarnationSinkOnRefute(t *testing.T) {
+	ml := newTestMemberList()
+	var persisted []uint64
+	ml.SetIncarnationSink(func(v uint64) { persisted = append(persisted, v) })
+
+	ml.Merge([]*Member{
+		{ID: "self", Address: "10.0.0.1", Incarnation: 5, Heartbeat: 500, Status: MemberDead},
+	})
+
+	if len(persisted) != 1 || persisted[0] != 6 {
+		t.Errorf("expected sink called once with 6, got %v", persisted)
+	}
+}
+
+// TestMergeNoSinkWithoutAdvance: an ordinary merge that does not move self's
+// incarnation must not trigger a persist.
+func TestMergeNoSinkWithoutAdvance(t *testing.T) {
+	ml := newTestMemberList()
+	called := 0
+	ml.SetIncarnationSink(func(uint64) { called++ })
+
+	ml.Merge([]*Member{
+		{ID: "node1", Address: "10.0.0.2", Incarnation: 3, Heartbeat: 1, Status: MemberAlive},
+	})
+	// An alive echo of self at the current incarnation is also a no-op.
+	ml.Merge([]*Member{
+		{ID: "self", Address: "10.0.0.1", Incarnation: 0, Heartbeat: 9, Status: MemberAlive},
+	})
+
+	if called != 0 {
+		t.Errorf("expected sink not called, got %d", called)
+	}
+}
+
 // TestSenderGossipAddrUnknownSender returns empty when we can resolve no
 // address for the sender, so replyTo becomes a no-op instead of sending blind.
 func TestSenderGossipAddrUnknownSender(t *testing.T) {

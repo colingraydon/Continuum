@@ -156,6 +156,28 @@ func makeMemberChangeCallback(r *ring.Ring, hptr *atomic.Pointer[api.Handler]) f
 	}
 }
 
+// restorePersistedIncarnation loads this node's last gossip incarnation from
+// DATA_DIR, advances past it, persists the new value, and installs it on the
+// member list — so a crash-restarted node's first gossip already supersedes any
+// stale entry peers remember instead of waiting to refute. A refutation-driven
+// advance at runtime is persisted through the same store via the sink. A
+// persist failure is fatal: continuing would risk reusing an epoch and losing
+// to a stale entry, defeating the point of persistence.
+func restorePersistedIncarnation(dataDir string, ml *gossip.MemberList) {
+	incStore := newIncarnationStore(dataDir)
+	next := incStore.load() + 1
+	if err := incStore.store(next); err != nil {
+		log.Fatalf("gossip: persist incarnation: %v", err)
+	}
+	ml.SetSelfIncarnation(next)
+	ml.SetIncarnationSink(func(v uint64) {
+		if err := incStore.store(v); err != nil {
+			log.Printf("gossip: persist incarnation %d: %v", v, err)
+		}
+	})
+	log.Printf("gossip: restored incarnation %d", next)
+}
+
 // hintCapPerNode bounds buffered hints per target node; hintTTL bounds how
 // long an undelivered hint is retained before anti-entropy takes over.
 const (
@@ -257,6 +279,9 @@ func main() {
 	ml := gossip.NewMemberList(cfg.selfID, cfg.selfAddress, makeMemberChangeCallback(r, &hptr))
 	ml.SetSelfWeight(cfg.selfWeight)
 	ml.SetSelfGossipAddr(cfg.gossipAdvertise)
+	if cfg.dataDir != "" {
+		restorePersistedIncarnation(cfg.dataDir, ml)
+	}
 
 	r.SetHealthFilter(func(id string) bool {
 		m, ok := ml.Get(id)
