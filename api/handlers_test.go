@@ -854,6 +854,141 @@ func TestGetSyncKeysInvalidBody(t *testing.T) {
 	}
 }
 
+// --- Per-request consistency tests ---
+
+func TestRequestedQuorumLevels(t *testing.T) {
+	h := newTestHandler(t) // ReplicationFactor: 3
+	cases := []struct {
+		param   string
+		want    int
+		wantErr bool
+	}{
+		{"", 2, false}, // absent -> caller's default
+		{"one", 1, false},
+		{"quorum", 2, false}, // RF/2+1
+		{"all", 3, false},    // RF
+		{"ONE", 0, true},     // levels are case-sensitive
+		{"bogus", 0, true},
+	}
+	for _, tc := range cases {
+		req := httptest.NewRequest(http.MethodGet, "/keys/k?consistency="+tc.param, nil)
+		got, err := h.requestedQuorum(req, 2)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("consistency=%q: expected error, got quorum %d", tc.param, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("consistency=%q: unexpected error: %v", tc.param, err)
+		} else if got != tc.want {
+			t.Errorf("consistency=%q: got quorum %d, want %d", tc.param, got, tc.want)
+		}
+	}
+}
+
+// newDegradedClusterHandler returns a coordinator whose ring holds self plus
+// two replicas that always fail (an httptest server answering 500), so quorum
+// outcomes depend entirely on the requested level: only self can ack.
+func newDegradedClusterHandler(t *testing.T) *Handler {
+	t.Helper()
+	failSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	t.Cleanup(failSrv.Close)
+
+	r := ring.NewRing(10)
+	ml := newTestMemberList(r)
+	s := store.New()
+	h := NewHandler(r, ml, s, HandlerConfig{SelfID: "self", ReplicationFactor: 3, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, nil)
+
+	r.AddNode("self", "localhost:8080")
+	failAddr := failSrv.Listener.Addr().String()
+	r.AddNode("down1", failAddr)
+	r.AddNode("down2", failAddr)
+	return h
+}
+
+func TestPutKeyPerRequestConsistency(t *testing.T) {
+	h := newDegradedClusterHandler(t)
+
+	put := func(consistency string) int {
+		url := "/keys/pc-key"
+		if consistency != "" {
+			url += "?consistency=" + consistency
+		}
+		req := httptest.NewRequest(http.MethodPut, url, bytes.NewBufferString(`{"value":"v"}`))
+		w := httptest.NewRecorder()
+		h.PutKey(w, req)
+		return w.Code
+	}
+
+	// one: self's ack alone meets quorum despite both replicas being down.
+	if code := put("one"); code != http.StatusNoContent {
+		t.Errorf("consistency=one: got %d, want 204", code)
+	}
+	// all: requires 3 acks; only self can ack -> quorum failure.
+	if code := put("all"); code != http.StatusServiceUnavailable {
+		t.Errorf("consistency=all: got %d, want 503", code)
+	}
+	// absent: process default (W=1) still applies.
+	if code := put(""); code != http.StatusNoContent {
+		t.Errorf("default consistency: got %d, want 204", code)
+	}
+}
+
+func TestPutKeyInvalidConsistencyRejectedBeforeWrite(t *testing.T) {
+	h := newTestHandler(t)
+	req := httptest.NewRequest(http.MethodPut, "/keys/reject-key?consistency=bogus", bytes.NewBufferString(`{"value":"v"}`))
+	w := httptest.NewRecorder()
+	h.PutKey(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", w.Code)
+	}
+	if _, ok, err := h.store.Get("reject-key"); err != nil || ok {
+		t.Errorf("invalid consistency must not write locally (ok=%v err=%v)", ok, err)
+	}
+}
+
+func TestDeleteKeyInvalidConsistencyRejectedBeforeWrite(t *testing.T) {
+	h := newTestHandler(t)
+	req := httptest.NewRequest(http.MethodDelete, "/keys/reject-del?consistency=bogus", bytes.NewBufferString(`{}`))
+	w := httptest.NewRecorder()
+	h.DeleteKey(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", w.Code)
+	}
+	if _, ok, err := h.store.Get("reject-del"); err != nil || ok {
+		t.Errorf("invalid consistency must not store a tombstone (ok=%v err=%v)", ok, err)
+	}
+}
+
+func TestGetKeyPerRequestConsistency(t *testing.T) {
+	h := newDegradedClusterHandler(t)
+	if err := h.store.Put("pc-read", "v", store.VectorClockVersion{Clocks: map[string]uint64{"self": 1}}); err != nil {
+		t.Fatalf("seed put: %v", err)
+	}
+
+	get := func(consistency string) int {
+		req := httptest.NewRequest(http.MethodGet, "/keys/pc-read?consistency="+consistency, nil)
+		w := httptest.NewRecorder()
+		h.GetNode(w, req)
+		return w.Code
+	}
+
+	if code := get("one"); code != http.StatusOK {
+		t.Errorf("consistency=one: got %d, want 200", code)
+	}
+	if code := get("all"); code != http.StatusServiceUnavailable {
+		t.Errorf("consistency=all: got %d, want 503", code)
+	}
+	if code := get("bogus"); code != http.StatusBadRequest {
+		t.Errorf("consistency=bogus: got %d, want 400", code)
+	}
+}
+
 // TestSyncHandlersProviderMatchesScanFallback proves the tree-served fast path
 // and the store-scan fallback return byte-identical JSON, so installing the
 // provider changes only cost, not behavior.

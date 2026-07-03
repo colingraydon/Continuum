@@ -72,6 +72,10 @@ A subsequent write that passes a clock dominating all sibling clocks resolves th
 
 With RF=3 and W=R=2, the system tolerates one node failure for both reads and writes. Setting `READ_QUORUM=1` gives lowest-latency reads at the cost of potentially stale data. Setting `READ_QUORUM=REPLICATION_FACTOR` gives the strongest read consistency but fails if any replica is down.
 
+### Per-Request Consistency
+
+The process-configured W and R are defaults, not fixed limits: any key request can override them with `?consistency=one|quorum|all` (`one`=1, `quorum`=RF/2+1, `all`=RF; see [API](api.md)). This lets a single deployment serve mixed workloads - a session write can demand `all` while a dashboard read takes `one` - instead of forcing one durability/latency point per process. An unrecognized level is rejected with 400 before any local write, so a typo cannot half-apply. The resolved quorum is clamped to the available replica set exactly like the configured values.
+
 > **Failure Mode - Quorum Not Met**
 >
 > If fewer than W replicas acknowledge a write, the coordinator returns 503. The write was not lost - it landed on however many replicas responded before quorum failed. Anti-entropy will propagate it. The client should treat 503 as "unknown state" and implement idempotent retry with the returned or a higher vector clock.

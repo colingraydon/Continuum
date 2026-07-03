@@ -88,6 +88,38 @@ func (h *Handler) SetSyncTreeProvider(p SyncTreeProvider) {
 	h.syncTrees = p
 }
 
+// Per-request consistency levels accepted by the ?consistency= query param on
+// GET/PUT/DELETE /keys/{key}. Each maps to a quorum size against the
+// replication factor; an absent param keeps the process-configured default.
+const (
+	consistencyParam  = "consistency"
+	consistencyOne    = "one"
+	consistencyQuorum = "quorum"
+	consistencyAll    = "all"
+)
+
+// requestedQuorum resolves the quorum size for one request: the ?consistency=
+// level mapped against the replication factor (one=1, quorum=RF/2+1, all=RF),
+// or dflt when the param is absent. An unrecognized level is an error; callers
+// must reject the request with 400 before touching the store. "all" means all
+// current replicas — like the configured W/R it is later clamped to the
+// available replica set, so it tracks membership rather than acting as a hard
+// durability floor.
+func (h *Handler) requestedQuorum(req *http.Request, dflt int) (int, error) {
+	switch level := req.URL.Query().Get(consistencyParam); level {
+	case "":
+		return dflt, nil
+	case consistencyOne:
+		return 1, nil
+	case consistencyQuorum:
+		return h.replicationFactor/2 + 1, nil
+	case consistencyAll:
+		return h.replicationFactor, nil
+	default:
+		return 0, fmt.Errorf("unknown consistency level %q (want one, quorum, or all)", level)
+	}
+}
+
 // replicaResult carries the outcome of a single replica fan-out attempt.
 type replicaResult struct {
 	nodeID string
@@ -575,6 +607,12 @@ func (h *Handler) GetNode(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	readQuorum, err := h.requestedQuorum(req, h.readQuorum)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	// Consistent read: fan out to the replica set, merge sibling sets, and
 	// return the canonical result - either a single value or a siblings list.
 	nodes := h.ring.GetReplicationNodes(key, h.replicationFactor)
@@ -590,10 +628,7 @@ func (h *Handler) GetNode(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	quorum := h.readQuorum
-	if quorum > len(readNodes) {
-		quorum = len(readNodes)
-	}
+	quorum := min(readQuorum, len(readNodes))
 
 	responses, ok := h.quorumReadFanOut(readNodes, key, quorum)
 	if !ok {
@@ -681,6 +716,14 @@ func (h *Handler) PutKey(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// Resolve the write quorum before touching the store so an invalid
+	// consistency level rejects the request without side effects.
+	writeQuorum, err := h.requestedQuorum(req, h.writeQuorum)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	// Bootstrap clock from current local entry if the client didn't provide one,
 	// so a blind overwrite dominates the existing value rather than equaling it
 	// (an equal clock would be dropped as an idempotent write).
@@ -699,7 +742,7 @@ func (h *Handler) PutKey(w http.ResponseWriter, req *http.Request) {
 	// fan-out happens even when self's ack already satisfies quorum (W=1) so
 	// replicas still receive the write without waiting on anti-entropy.
 	nodes := h.ring.GetReplicationNodes(key, h.replicationFactor)
-	quorum := min(h.writeQuorum, len(nodes))
+	quorum := min(writeQuorum, len(nodes))
 	acks, remaining, failed, resultCh := h.quorumFanOut(nodes, quorum, func(n *ring.Node) replicaResult {
 		return replicaResult{n.ID, h.replicateToSync(n.Address, key, body.Value, version.Clocks)}
 	})
@@ -775,6 +818,14 @@ func (h *Handler) DeleteKey(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// Resolve the write quorum before touching the store so an invalid
+	// consistency level rejects the request without side effects.
+	writeQuorum, err := h.requestedQuorum(req, h.writeQuorum)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	// Bootstrap clock from current local entry if the client didn't provide one,
 	// so the tombstone's clock dominates the existing value rather than equaling it.
 	if len(incoming.Clocks) == 0 {
@@ -789,7 +840,7 @@ func (h *Handler) DeleteKey(w http.ResponseWriter, req *http.Request) {
 	}
 
 	nodes := h.ring.GetReplicationNodes(key, h.replicationFactor)
-	quorum := min(h.writeQuorum, len(nodes))
+	quorum := min(writeQuorum, len(nodes))
 	acks, remaining, failed, resultCh := h.quorumFanOut(nodes, quorum, func(n *ring.Node) replicaResult {
 		return replicaResult{n.ID, h.replicateDeleteToSync(n.Address, key, version.Clocks)}
 	})
