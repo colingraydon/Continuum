@@ -82,19 +82,20 @@ acknowledged with 204. Single-writer keys make verification exact:
 Things learned building and running this suite, kept here because they are
 system behaviors, not test artifacts:
 
-1. **Anti-entropy repairs one random vnode per sync round**
-   (`syncRound` in `internal/antientropy/manager.go`). Time to cover the
-   keyspace scales with vnode count: at the default `REPLICAS=150` and 30s
-   interval, a given key's range is synced roughly every 75 minutes per node.
-   The harness runs `REPLICAS=8` with a 2s interval so convergence is
-   observable; production convergence expectations should be set accordingly
-   (or the sync loop extended to cycle through vnodes rather than sample
-   randomly).
-2. **Anti-entropy primary ranges are computed once at startup** and never
-   rebuilt on membership change. A node that starts alone considers itself
-   primary for the whole keyspace forever; ranges do not adapt when nodes
-   join or leave. Today this only over-syncs, but it will matter for any
-   feature that relies on accurate primary ownership.
+1. **Anti-entropy repaired one random vnode per sync round** — *fixed by
+   deterministic round-robin.* Random sampling gave keyspace coverage a
+   coupon-collector expected time with an unbounded tail; `syncRound` now
+   cycles through the sorted primary vnode ends, bounding a full pass at
+   exactly `vnodes x interval`. A pass still scales with vnode count (150
+   vnodes at the 30s default is 75 minutes), so the harness keeps running
+   `REPLICAS=8` with a 2s interval to make convergence observable within
+   test deadlines. See [Anti-Entropy](antientropy.md#one-vnode-per-tick-round-robin).
+2. **Anti-entropy primary ranges were computed once at startup** — *fixed by
+   rebuild-on-membership-change.* Each sync tick re-derives the primary
+   ranges from the ring (a cheap comparison) and rebuilds the Merkle trees
+   with one store scan only when membership actually changed them. A node
+   that starts alone no longer considers itself primary for the whole
+   keyspace forever.
 3. **A rejoining node's heartbeat restarts at zero** — *fixed by SWIM-style
    incarnation numbers.* Previously peers that remembered a node's pre-crash
    heartbeat ignored its gossip until the counter caught up (roughly its
@@ -115,6 +116,15 @@ system behaviors, not test artifacts:
    outbound gossip still flows), so hints buffered for it are never
    triggered for delivery; repair falls to anti-entropy. Delivery on a
    periodic timer, or on failed-then-succeeded probes, would close this.
+6. **Merkle hashes were clock-blind** — *fixed by folding vector clocks into
+   entry hashes.* Two replicas holding the same value at different clocks
+   (e.g. one received an earlier write attempt via a hint, the other holds
+   the final acknowledged one) produced identical Merkle roots, so
+   anti-entropy skipped them and the clock divergence persisted until the
+   next write or read repair. Surfaced by `QuorumLossThenClampedAvailability`
+   once the deterministic sync cadence made convergence timing reliable
+   enough to expose it; the entry hash now XORs each sibling's value hash
+   with a canonical hash of its vector clock.
 
 ## Extending the suite
 

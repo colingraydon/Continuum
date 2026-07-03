@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"math/rand"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
@@ -36,6 +36,8 @@ type Manager struct {
 	mu                sync.RWMutex
 	trees             map[uint32]*merkle.Tree    // vnode end hash → tree
 	ranges            map[uint32]ring.VnodeRange // vnode end hash → range
+	order             []uint32                   // sorted vnode end hashes; deterministic sync order
+	cursor            int                        // next index into order
 	r                 *ring.Ring
 	s                 *store.Store
 	selfID            string
@@ -53,7 +55,7 @@ func New(r *ring.Ring, s *store.Store, selfID string, replicationFactor int, tim
 		client:            &http.Client{Timeout: timeout},
 		syncEvery:         syncInterval,
 	}
-	m.rebuild()
+	m.rebuild(r.GetPrimaryVnodeRanges(selfID))
 	return m
 }
 
@@ -65,18 +67,22 @@ func (m *Manager) SetSyncInterval(d time.Duration) {
 	}
 }
 
-// rebuild initializes trees for all primary vnode ranges and populates them
-// from the current store state. Called once on startup.
-func (m *Manager) rebuild() {
-	ranges := m.r.GetPrimaryVnodeRanges(m.selfID)
-
+// rebuild replaces the trees, ranges, and sync order for the given primary
+// ranges and repopulates the trees from the current store state (one full
+// scan). Called at startup and whenever a sync round observes that
+// membership changed the primary range set.
+func (m *Manager) rebuild(ranges []ring.VnodeRange) {
 	m.mu.Lock()
 	m.trees = make(map[uint32]*merkle.Tree, len(ranges))
 	m.ranges = make(map[uint32]ring.VnodeRange, len(ranges))
+	m.order = make([]uint32, 0, len(ranges))
 	for _, vr := range ranges {
 		m.trees[vr.End] = merkle.New()
 		m.ranges[vr.End] = vr
+		m.order = append(m.order, vr.End)
 	}
+	sort.Slice(m.order, func(i, j int) bool { return m.order[i] < m.order[j] })
+	m.cursor = 0
 	m.mu.Unlock()
 
 	hashes, err := m.s.KeyHashes()
@@ -87,6 +93,36 @@ func (m *Manager) rebuild() {
 	for key, hash := range hashes {
 		m.Update(key, hash)
 	}
+}
+
+// maybeRebuild recomputes the primary ranges from the current ring and
+// rebuilds the trees when membership has changed them. Membership events are
+// rare, so the full store scan a rebuild costs is acceptable; every other
+// round this is a cheap comparison.
+func (m *Manager) maybeRebuild() {
+	ranges := m.r.GetPrimaryVnodeRanges(m.selfID)
+	m.mu.RLock()
+	same := rangesEqual(m.ranges, ranges)
+	m.mu.RUnlock()
+	if same {
+		return
+	}
+	log.Printf("antientropy: primary ranges changed (%d vnodes); rebuilding trees", len(ranges))
+	m.rebuild(ranges)
+}
+
+// rangesEqual reports whether the current range map matches the freshly
+// computed primary ranges exactly (same vnodes, same bounds).
+func rangesEqual(cur map[uint32]ring.VnodeRange, next []ring.VnodeRange) bool {
+	if len(cur) != len(next) {
+		return false
+	}
+	for _, vr := range next {
+		if got, ok := cur[vr.End]; !ok || got != vr {
+			return false
+		}
+	}
+	return true
 }
 
 // Update routes a store write to the correct primary vnode's Merkle tree.
@@ -156,19 +192,18 @@ func (m *Manager) RemoveFromTrees(key string) {
 	}
 }
 
+// syncRound refreshes the primary ranges if membership changed, then syncs
+// the next vnode in the deterministic round-robin order. Cycling (rather
+// than sampling randomly) bounds full-keyspace repair at exactly
+// len(order) rounds; random selection had an unbounded worst case and a
+// coupon-collector expected time.
 func (m *Manager) syncRound() {
-	m.mu.RLock()
-	ends := make([]uint32, 0, len(m.trees))
-	for end := range m.trees {
-		ends = append(ends, end)
-	}
-	m.mu.RUnlock()
+	m.maybeRebuild()
 
-	if len(ends) == 0 {
+	end, ok := m.nextVnode()
+	if !ok {
 		return
 	}
-
-	end := ends[rand.Intn(len(ends))]
 
 	m.mu.RLock()
 	tree := m.trees[end]
@@ -183,6 +218,19 @@ func (m *Manager) syncRound() {
 			log.Printf("antientropy: sync with %s vnode %d: %v", node.ID, end, err)
 		}
 	}
+}
+
+// nextVnode returns the next vnode end hash in the round-robin order, or
+// false when there are no primary ranges.
+func (m *Manager) nextVnode() (uint32, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.order) == 0 {
+		return 0, false
+	}
+	end := m.order[m.cursor%len(m.order)]
+	m.cursor = (m.cursor + 1) % len(m.order)
+	return end, true
 }
 
 // snapshotBucketEntries captures the current siblings for each key in localKeys

@@ -89,7 +89,7 @@ Three background loops run on every node:
 
 **Gossip loop** - every 1 second, each node increments its heartbeat, picks up to 3 random alive peers (fanout=3), and pushes its full member list to each. Membership changes propagate across the cluster in O(log n) rounds.
 
-**Anti-entropy sync** - every 30 seconds, one vnode is selected at random and its Merkle tree is compared against each replica. Divergent buckets are reconciled bidirectionally.
+**Anti-entropy sync** - every sync tick (`SYNC_INTERVAL_MS`, default 30 seconds), the next vnode in a deterministic round-robin order is compared against each replica; a full keyspace pass takes exactly vnodes x interval. Primary ranges are re-derived each tick and the trees rebuilt when membership changed them. Divergent buckets are reconciled bidirectionally.
 
 **Tombstone GC** - every 5 minutes, uncontested tombstones older than 24 hours are purged from the store and from the primary's Merkle trees.
 
