@@ -265,3 +265,53 @@ func TestSenderGossipAddrUnknownSender(t *testing.T) {
 		t.Errorf("expected empty address for unknown sender, got %q", addr)
 	}
 }
+
+// TestSenderGossipAddrFallsBackToMemberList: when the message carries no
+// self-entry, the reply address is resolved from what we already recorded for
+// the sender.
+func TestSenderGossipAddrFallsBackToMemberList(t *testing.T) {
+	ml := newTestMemberList()
+	ml.AddWithGossip("B", "10.0.0.2", "10.0.0.2:9999")
+	g, transport, err := newTestGossiper("self", ml)
+	if err != nil {
+		t.Fatalf("failed to create gossiper: %v", err)
+	}
+	defer transport.Stop()
+
+	addr := g.senderGossipAddr(&GossipMessage{From: "B", Members: nil})
+	if addr != "10.0.0.2:9999" {
+		t.Errorf("expected fallback to recorded gossip addr, got %q", addr)
+	}
+}
+
+// TestReplyToUnresolvableSenderIsNoop exercises the empty-address guard: an
+// unresolvable sender yields no send and must not panic.
+func TestReplyToUnresolvableSenderIsNoop(t *testing.T) {
+	ml := newTestMemberList()
+	g, transport, err := newTestGossiper("self", ml)
+	if err != nil {
+		t.Fatalf("failed to create gossiper: %v", err)
+	}
+	defer transport.Stop()
+
+	g.replyTo(&GossipMessage{From: "ghost", Members: nil})
+}
+
+// TestReplyToLogsOnSendFailure exercises the Send-error branch: the sender
+// advertises an unusable gossip address, so the reply fails and is logged
+// rather than crashing.
+func TestReplyToLogsOnSendFailure(t *testing.T) {
+	ml := newTestMemberList()
+	g, transport, err := newTestGossiper("self", ml)
+	if err != nil {
+		t.Fatalf("failed to create gossiper: %v", err)
+	}
+	defer transport.Stop()
+
+	g.replyTo(&GossipMessage{
+		From: "B",
+		Members: []*Member{
+			{ID: "B", Address: "10.0.0.2", GossipAddr: "invalid-address"},
+		},
+	})
+}
