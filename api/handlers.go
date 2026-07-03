@@ -117,8 +117,13 @@ func (h *Handler) bufferHints(template hintstore.Hint, preQuorumFailed []string,
 }
 
 // DeliverHints drains all buffered hints for nodeID and replays them to
-// address as replica sub-writes. Failures are logged; anti-entropy handles
-// any keys that could not be delivered.
+// address as replica sub-writes. A hint that fails to deliver is re-buffered
+// (its original timestamp is preserved, so its TTL keeps counting from the
+// original write) to be retried by the next delivery sweep; anti-entropy is
+// the backstop for any hint that ages out before its target is reachable.
+// This makes DeliverHints safe to call periodically against a target that is
+// still unreachable — e.g. an asymmetric partition where the node looks alive
+// to gossip but cannot receive inbound writes.
 func (h *Handler) DeliverHints(nodeID, address string) {
 	if h.hintStore == nil {
 		return
@@ -128,6 +133,7 @@ func (h *Handler) DeliverHints(nodeID, address string) {
 		return
 	}
 	log.Printf("hinted handoff: delivering %d hints to %s", len(hints), nodeID)
+	var requeued int
 	for _, hint := range hints {
 		var err error
 		if hint.Deleted {
@@ -137,13 +143,22 @@ func (h *Handler) DeliverHints(nodeID, address string) {
 		}
 		if err != nil {
 			log.Printf("hinted handoff: failed to deliver hint for %s to %s: %v", hint.Key, nodeID, err)
+			h.hintStore.Store(nodeID, hint)
+			requeued++
 		}
+	}
+	if requeued > 0 {
+		log.Printf("hinted handoff: re-buffered %d undelivered hints for %s", requeued, nodeID)
 	}
 }
 
-// FlushHints delivers all buffered hints to any currently-alive nodes. Called
-// during graceful shutdown so hints are not lost when the coordinator exits.
-func (h *Handler) FlushHints() {
+// DeliverPendingHints delivers all buffered hints to any currently-alive node.
+// It drives both the periodic delivery sweep — the backstop for targets that
+// never transition dead→alive, such as an asymmetric partition — and the
+// graceful-shutdown flush so buffered hints are not stranded when the
+// coordinator exits. Hints for nodes that are not alive, or that fail to
+// deliver, remain buffered (see DeliverHints).
+func (h *Handler) DeliverPendingHints() {
 	if h.hintStore == nil {
 		return
 	}

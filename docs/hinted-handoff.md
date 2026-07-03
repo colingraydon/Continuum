@@ -26,7 +26,7 @@ The hint is tagged with the intended recipient node ID. Hints are not writes - t
 
 ### Hint Delivery
 
-Delivery is triggered by the gossip `onChange` callback, not a polling loop. When gossip detects that a node has transitioned to alive (either recovering from dead or joining fresh), the callback fires `handler.DeliverHints(nodeID, address)`.
+Delivery is primarily event-driven: the gossip `onChange` callback fires `handler.DeliverHints(nodeID, address)` the moment a node transitions to alive (either recovering from dead or joining fresh). A background sweep (`runHintDelivery`, 30s tick) calls `DeliverPendingHints`, which delivers buffered hints to any currently-alive target regardless of any membership edge, backstops the callback for a target that never presents a dead→alive transition - most importantly an asymmetric partition, where the isolated node keeps gossiping (so it never looks dead) while inbound writes are dropped.
 
 `DeliverHints` drains all hints tagged for that node from the hint store and replays each one as a normal replica sub-write (`X-Proxied-From` set to the coordinator's ID). The receiving node applies them through the standard vector clock conflict resolution path:
 
@@ -34,9 +34,11 @@ Delivery is triggered by the gossip `onChange` callback, not a polling loop. Whe
 - Concurrent hints become siblings
 - Idempotent hints are no-ops
 
+A hint that fails to deliver is re-buffered rather than dropped, with its original timestamp preserved so its TTL keeps counting from the original write. This makes the periodic sweep safe to run against a target that is still unreachable: a failed attempt costs the delivery try but does not discard the hint. Anti-entropy remains the backstop for any hint that ages out before its target becomes reachable.
+
 ### Graceful Shutdown Flush
 
-On `SIGINT` or `SIGTERM`, before draining in-flight HTTP requests, the coordinator calls `FlushHints`. This iterates all pending hints and delivers any that target currently-alive nodes. This prevents hint loss on planned restarts - if the coordinator is restarting intentionally, it gets one chance to flush what it holds.
+On `SIGINT` or `SIGTERM`, before draining in-flight HTTP requests, the coordinator calls `DeliverPendingHints` (the same sweep the periodic timer drives). This iterates all pending hints and delivers any that target currently-alive nodes. This prevents hint loss on planned restarts - if the coordinator is restarting intentionally, it gets one chance to flush what it holds.
 
 ### Bounds and Limits
 
@@ -58,13 +60,13 @@ With `DATA_DIR` set, the hint store is backed by its own append-only log (layere
 
 ## Design Decisions
 
-### Event-Driven Delivery over Polling
+### Event-Driven Delivery, Periodic Sweep as Backstop
 
-**Choice:** Delivery triggered by the gossip `onChange` callback (alive transition).
+**Choice:** Deliver primarily on the gossip `onChange` alive transition, with a periodic sweep as a backstop.
 
-The alternative is a background loop that periodically checks which nodes are alive and drains hints for them. Polling adds latency proportional to the poll interval - if a node recovers at t=0 and the poll runs at t=29s, hints sit undelivered for 29 seconds. With event-driven delivery, hints are delivered within the same second that gossip detects the recovery.
+Event-driven delivery is the fast path: polling alone adds latency proportional to the poll interval - if a node recovers at t=0 and the poll runs at t=29s, hints sit undelivered for 29 seconds, whereas the callback delivers within the same second gossip detects the recovery. But a pure alive-transition trigger has a blind spot the fault-injection harness surfaced: during an asymmetric partition the isolated node never looks dead (its outbound gossip still flows), so it never presents a dead→alive edge and its hints are never triggered - repair falls entirely to anti-entropy. The 30s sweep closes that gap by delivering to any alive target on a timer, independent of membership edges, while the callback still handles the common recover-from-dead case with no added latency.
 
-**Tradeoff:** Tighter coupling between gossip and the handler layer. The `onChange` callback is wired in `main.go` and passes a delivery function through to the handler, keeping neither package importing the other directly. This is more boilerplate than a polling approach but keeps the packages decoupled while still achieving event-driven delivery.
+**Tradeoff:** The sweep retries against targets that may still be unreachable, so `DeliverHints` re-buffers failed deliveries (preserving the hint's timestamp so its TTL is not reset) rather than dropping them. The event-driven path keeps its tight coupling between gossip and the handler: the `onChange` callback is wired in `main.go` and passes a delivery function through to the handler, so neither package imports the other directly.
 
 ### Persistent Hint Log (with Anti-Entropy as Backstop)
 

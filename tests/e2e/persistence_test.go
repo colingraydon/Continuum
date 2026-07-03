@@ -52,7 +52,7 @@ func startPersistentNode(t *testing.T, selfID, dataDir string) *testNode {
 }
 
 // stopGracefully sends SIGTERM and waits for the process to exit so the
-// node's shutdown path (PushKeysToSuccessors, FlushHints, drain, finalize)
+// node's shutdown path (PushKeysToSuccessors, DeliverPendingHints, drain, finalize)
 // runs to completion.
 func stopGracefully(t *testing.T, n *testNode) {
 	t.Helper()

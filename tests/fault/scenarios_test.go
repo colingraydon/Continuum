@@ -74,6 +74,48 @@ func TestFault_CrashRecoveryFromWALAndTables(t *testing.T) {
 	}
 }
 
+// seqKeys names a batch of sequential test writes: key i is "<keyPrefix>-k%02d"
+// holding value "<valPrefix>-%02d". Shared by the hinted-handoff scenarios,
+// which all write a run of keys through a coordinator and later assert they
+// reached a replica's local store.
+type seqKeys struct{ keyPrefix, valPrefix string }
+
+func (s seqKeys) key(i int) string { return fmt.Sprintf("%s-k%02d", s.keyPrefix, i) }
+func (s seqKeys) val(i int) string { return fmt.Sprintf("%s-%02d", s.valPrefix, i) }
+
+// putSeq writes n sequential key/value pairs through coordinator via the
+// unfaulted side channel, asserting each is acknowledged with 204.
+func putSeq(t *testing.T, c *cluster, coordinator *node, sk seqKeys, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		code, err := c.put(coordinator, sk.key(i), sk.val(i), nil)
+		if err != nil || code != http.StatusNoContent {
+			t.Fatalf("put %s: code=%d err=%v (want 204 via the reachable replicas)", sk.key(i), code, err)
+		}
+	}
+}
+
+// waitLocalValues polls target's local store until every one of the n keys
+// holds its expected value or timeout elapses, returning how many are still
+// missing (0 means fully converged).
+func (c *cluster) waitLocalValues(target *node, sk seqKeys, n int, timeout time.Duration) int {
+	deadline := time.Now().Add(timeout)
+	missing := n
+	for time.Now().Before(deadline) && missing > 0 {
+		missing = 0
+		for i := 0; i < n; i++ {
+			nr, code, err := c.directGet(target, sk.key(i))
+			if err != nil || code != http.StatusOK || nr.Value != sk.val(i) {
+				missing++
+			}
+		}
+		if missing > 0 {
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
+	return missing
+}
+
 func crashKey(i int) string { return fmt.Sprintf("crash-k%02d", i) }
 
 func putCrashKeys(t *testing.T, c *cluster, n *node, from, to int, gen string) {
@@ -182,12 +224,8 @@ func TestFault_HintLogSurvivesCoordinatorCrash(t *testing.T) {
 	replica.httpProxy.Blackhole()
 
 	const keys = 10
-	for i := 0; i < keys; i++ {
-		code, err := c.put(coordinator, fmt.Sprintf("hint-k%02d", i), fmt.Sprintf("hinted-%02d", i), nil)
-		if err != nil || code != http.StatusNoContent {
-			t.Fatalf("put %d: code=%d err=%v (want 204 via the two reachable replicas)", i, code, err)
-		}
-	}
+	sk := seqKeys{"hint", "hinted"}
+	putSeq(t, c, coordinator, sk, keys)
 	time.Sleep(1500 * time.Millisecond) // async hint buffering + fsync of the hint log
 
 	t.Logf("crashing coordinator %s with buffered hints", coordinator.id)
@@ -197,21 +235,7 @@ func TestFault_HintLogSurvivesCoordinatorCrash(t *testing.T) {
 	t.Logf("restarting %s; hint log replay + alive-transition delivery must repair %s", coordinator.id, replica.id)
 	c.restart(coordinator)
 
-	deadline := time.Now().Add(25 * time.Second)
-	missing := keys
-	for time.Now().Before(deadline) && missing > 0 {
-		missing = 0
-		for i := 0; i < keys; i++ {
-			nr, code, err := c.directGet(replica, fmt.Sprintf("hint-k%02d", i))
-			if err != nil || code != http.StatusOK || nr.Value != fmt.Sprintf("hinted-%02d", i) {
-				missing++
-			}
-		}
-		if missing > 0 {
-			time.Sleep(500 * time.Millisecond)
-		}
-	}
-	if missing > 0 {
+	if missing := c.waitLocalValues(replica, sk, keys, 25*time.Second); missing > 0 {
 		t.Errorf("%d/%d hinted values never reached %s via hint-log replay", missing, keys, replica.id)
 	}
 }
@@ -293,6 +317,53 @@ func TestFault_QuorumLossThenClampedAvailability(t *testing.T) {
 	nr, code, err := c.get(survivor, "quorum-k")
 	if err != nil || code != http.StatusOK || nr.Value != "clamped" {
 		t.Errorf("final read: code=%d value=%q err=%v, want the clamped write", code, nr.Value, err)
+	}
+}
+
+// Scenario 9: periodic hint delivery closes the asymmetric-partition blind
+// spot. A replica's inbound HTTP is blackholed while its gossip stays up, so it
+// is never declared dead and never presents a dead->alive transition - the
+// edge the event-driven delivery callback keys on. The coordinator is NOT
+// restarted (so no restart-triggered delivery) and anti-entropy is disabled.
+// The only path that can repair the replica is the periodic delivery sweep
+// (runHintDelivery), which delivers buffered hints to any alive target on a
+// timer. Re-buffering of failed deliveries is exercised implicitly: several
+// sweeps fire and fail against the still-blackholed replica before the heal,
+// and the hints must survive all of them.
+func TestFault_PeriodicHintDeliveryAcrossAsymmetricPartition(t *testing.T) {
+	c := newCluster(t, clusterConfig{syncIntervalMS: 600_000, hintDeliveryMS: 1000})
+	coordinator, replica := c.nodes[0], c.nodes[2]
+
+	t.Logf("blackholing HTTP to %s (gossip stays open, so it never looks dead)", replica.id)
+	replica.httpProxy.Blackhole()
+
+	const keys = 10
+	sk := seqKeys{"psweep", "swept"}
+	putSeq(t, c, coordinator, sk, keys)
+
+	// Let several delivery sweeps (1s interval) fire and fail against the still-
+	// blackholed replica. The hints must be re-buffered each time, not dropped.
+	time.Sleep(4 * time.Second)
+
+	// The replica must never have left the coordinator's ring: if it had gone
+	// dead and come back, an alive-transition would deliver hints and this test
+	// would no longer isolate the periodic sweep as the cause.
+	if ids := c.ringIDs(coordinator); !ids[replica.id] {
+		t.Fatalf("%s dropped from %s's ring; test can no longer isolate the periodic sweep (ring=%v)", replica.id, coordinator.id, ids)
+	}
+	// Nothing should have reached the blackholed replica yet. A local read of a
+	// missing key returns 200 with an empty value, so a leak is a matching value.
+	for i := 0; i < keys; i++ {
+		if nr, _, _ := c.directGet(replica, sk.key(i)); nr.Value == sk.val(i) {
+			t.Fatalf("%s reached %s while still blackholed (value=%q); blackhole leaked", sk.key(i), replica.id, nr.Value)
+		}
+	}
+
+	t.Logf("healing HTTP to %s; only the periodic sweep can now deliver (no dead->alive edge, AE off)", replica.id)
+	replica.httpProxy.Heal()
+
+	if missing := c.waitLocalValues(replica, sk, keys, 20*time.Second); missing > 0 {
+		t.Errorf("%d/%d hinted values never reached %s via the periodic delivery sweep", missing, keys, replica.id)
 	}
 }
 
