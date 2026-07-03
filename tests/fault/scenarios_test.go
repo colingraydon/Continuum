@@ -44,6 +44,9 @@ func TestFault_ReplicaCrashRestartUnderLoad(t *testing.T) {
 // after that, a SIGKILL mid-stream must recover everything from SSTables plus
 // the WAL tail. The tiny memtable threshold forces real flushes so recovery
 // exercises tables, manifest, and WAL replay together.
+//
+// Key layout after the fault sequence: 0-4 deleted, 10-19 overwritten with
+// v2, everything else holds its original v1.
 func TestFault_CrashRecoveryFromWALAndTables(t *testing.T) {
 	c := newCluster(t, clusterConfig{
 		nodes: 1, replicationFactor: 1, writeQuorum: 1, readQuorum: 1,
@@ -51,55 +54,56 @@ func TestFault_CrashRecoveryFromWALAndTables(t *testing.T) {
 	})
 	n := c.nodes[0]
 
-	for i := 0; i < 30; i++ {
-		if code, err := c.put(n, fmt.Sprintf("crash-k%02d", i), fmt.Sprintf("v1-%02d", i), nil); err != nil || code != http.StatusNoContent {
-			t.Fatalf("seed put %d: code=%d err=%v", i, code, err)
-		}
-	}
+	putCrashKeys(t, c, n, 0, 30, "v1")
 	for i := 0; i < 5; i++ {
-		if code, err := c.deleteKey(n, fmt.Sprintf("crash-k%02d", i)); err != nil || code != http.StatusNoContent {
-			t.Fatalf("delete %d: code=%d err=%v", i, code, err)
-		}
+		mustDelete(t, c, n, crashKey(i))
 	}
 
 	c.shutdown(n) // clean: flush + meta.json
 	c.restart(n)
 
 	// Second generation of writes lives only in tables + WAL tail.
-	for i := 30; i < 60; i++ {
-		if code, err := c.put(n, fmt.Sprintf("crash-k%02d", i), fmt.Sprintf("v1-%02d", i), nil); err != nil || code != http.StatusNoContent {
-			t.Fatalf("second-gen put %d: code=%d err=%v", i, code, err)
-		}
-	}
-	for i := 10; i < 20; i++ {
-		if code, err := c.put(n, fmt.Sprintf("crash-k%02d", i), fmt.Sprintf("v2-%02d", i), nil); err != nil || code != http.StatusNoContent {
-			t.Fatalf("overwrite put %d: code=%d err=%v", i, code, err)
-		}
-	}
+	putCrashKeys(t, c, n, 30, 60, "v1")
+	putCrashKeys(t, c, n, 10, 20, "v2")
 
 	c.kill(n) // hard crash: recovery must come from disk alone
 	c.restart(n)
 
 	for i := 0; i < 60; i++ {
-		key := fmt.Sprintf("crash-k%02d", i)
-		nr, code, err := c.get(n, key)
-		if err != nil {
-			t.Fatalf("get %s after crash: %v", key, err)
+		assertCrashKeyRecovered(t, c, n, i)
+	}
+}
+
+func crashKey(i int) string { return fmt.Sprintf("crash-k%02d", i) }
+
+func putCrashKeys(t *testing.T, c *cluster, n *node, from, to int, gen string) {
+	t.Helper()
+	for i := from; i < to; i++ {
+		mustPut(t, c, n, crashKey(i), fmt.Sprintf("%s-%02d", gen, i))
+	}
+}
+
+// assertCrashKeyRecovered checks one key against the layout documented on
+// TestFault_CrashRecoveryFromWALAndTables.
+func assertCrashKeyRecovered(t *testing.T, c *cluster, n *node, i int) {
+	t.Helper()
+	key := crashKey(i)
+	nr, code, err := c.get(n, key)
+	if err != nil {
+		t.Fatalf("get %s after crash: %v", key, err)
+	}
+	if i < 5 {
+		if code != http.StatusNotFound {
+			t.Errorf("%s: deleted key returned code=%d value=%q, want 404", key, code, nr.Value)
 		}
-		switch {
-		case i < 5:
-			if code != http.StatusNotFound {
-				t.Errorf("%s: deleted key returned code=%d value=%q, want 404", key, code, nr.Value)
-			}
-		case i >= 10 && i < 20:
-			if want := fmt.Sprintf("v2-%02d", i); nr.Value != want {
-				t.Errorf("%s: got %q, want overwritten %q", key, nr.Value, want)
-			}
-		default:
-			if want := fmt.Sprintf("v1-%02d", i); nr.Value != want {
-				t.Errorf("%s: got %q, want %q", key, nr.Value, want)
-			}
-		}
+		return
+	}
+	want := fmt.Sprintf("v1-%02d", i)
+	if i >= 10 && i < 20 {
+		want = fmt.Sprintf("v2-%02d", i)
+	}
+	if nr.Value != want {
+		t.Errorf("%s: got %q, want %q", key, nr.Value, want)
 	}
 }
 

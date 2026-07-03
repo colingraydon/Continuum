@@ -1,6 +1,10 @@
 package gossip
 
-import "testing"
+import (
+	"net"
+	"testing"
+	"time"
+)
 
 func TestPeerGossipAddrPrefersAdvertised(t *testing.T) {
 	g := &Gossiper{selfID: "self", gossipPort: "9000"}
@@ -65,4 +69,90 @@ func TestMergePropagatesGossipAddr(t *testing.T) {
 	if m.GossipAddr != "10.0.0.5:9555" {
 		t.Errorf("expected gossip addr to survive merge, got %q", m.GossipAddr)
 	}
+}
+
+// newReceiverTransport starts a transport on an ephemeral port and returns it
+// with its loopback address, so senders can target it explicitly.
+func newReceiverTransport(t *testing.T) (*Transport, string) {
+	t.Helper()
+	tr, err := NewTransport("0")
+	if err != nil {
+		t.Fatalf("receiver transport: %v", err)
+	}
+	tr.Start()
+	t.Cleanup(tr.Stop)
+	_, port, err := net.SplitHostPort(tr.conn.LocalAddr().String())
+	if err != nil {
+		t.Fatalf("receiver addr: %v", err)
+	}
+	return tr, "127.0.0.1:" + port
+}
+
+func waitForMessage(t *testing.T, tr *Transport, from string) *GossipMessage {
+	t.Helper()
+	select {
+	case msg := <-tr.Incoming():
+		if msg.From != from {
+			t.Fatalf("expected message from %q, got %q", from, msg.From)
+		}
+		return msg
+	case <-time.After(3 * time.Second):
+		t.Fatal("no gossip message received within 3s")
+		return nil
+	}
+}
+
+// TestGossipRoundSendsToAdvertisedAddr proves a full round delivers datagrams
+// to a peer's advertised gossip address (not the sender's own port), and that
+// a peer with an unresolvable address only logs rather than aborting the round.
+func TestGossipRoundSendsToAdvertisedAddr(t *testing.T) {
+	receiver, receiverAddr := newReceiverTransport(t)
+
+	ml := newTestMemberList()
+	// Bogus HTTP address: only the advertised gossip address can succeed.
+	ml.AddWithGossip("peer-good", "10.255.255.1:1", receiverAddr)
+	// Unresolvable gossip address exercises the send-error branch.
+	ml.AddWithGossip("peer-bad", "10.255.255.2:1", "not-a-valid-address")
+
+	g, transport, err := newTestGossiper("self", ml)
+	if err != nil {
+		t.Fatalf("gossiper: %v", err)
+	}
+	defer transport.Stop()
+
+	g.gossipRound()
+
+	msg := waitForMessage(t, receiver, "self")
+	if msg.Type != MessagePushPull {
+		t.Errorf("expected push-pull message, got %v", msg.Type)
+	}
+}
+
+// TestNotifyDeadSendsToAdvertisedAddr proves the shutdown broadcast reaches
+// peers via their advertised gossip addresses and carries self marked dead.
+func TestNotifyDeadSendsToAdvertisedAddr(t *testing.T) {
+	receiver, receiverAddr := newReceiverTransport(t)
+
+	ml := newTestMemberList()
+	ml.AddWithGossip("peer-good", "10.255.255.1:1", receiverAddr)
+	ml.AddWithGossip("peer-bad", "10.255.255.2:1", "not-a-valid-address")
+
+	g, transport, err := newTestGossiper("self", ml)
+	if err != nil {
+		t.Fatalf("gossiper: %v", err)
+	}
+	defer transport.Stop()
+
+	g.NotifyDead()
+
+	msg := waitForMessage(t, receiver, "self")
+	for _, m := range msg.Members {
+		if m.ID == "self" {
+			if m.Status != MemberDead {
+				t.Errorf("expected self marked dead in broadcast, got %v", m.Status)
+			}
+			return
+		}
+	}
+	t.Error("broadcast did not include self")
 }
