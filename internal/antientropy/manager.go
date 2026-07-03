@@ -29,14 +29,18 @@ const (
 	GCTTL = 24 * time.Hour
 )
 
-// Manager maintains one Merkle tree per primary vnode and drives anti-entropy
-// syncs from primary to replicas (Dynamo-style: primary initiates, replicas are
-// passive). Replicas serve sync state on-the-fly from their local store.
+// Manager maintains one Merkle tree per vnode this node replicates and drives
+// anti-entropy syncs from primary to replicas (Dynamo-style: primary initiates,
+// replicas are passive). It keeps trees for the full replica set — not just the
+// primary ranges it drives sync for — so it can serve sync state (GET /sync,
+// /sync/bucket-keys) straight from a tree instead of rescanning the whole store
+// on every request. The round-robin initiation order stays the primary subset:
+// a node only drives sync for vnodes it is primary for.
 type Manager struct {
 	mu                sync.RWMutex
-	trees             map[uint32]*merkle.Tree    // vnode end hash → tree
-	ranges            map[uint32]ring.VnodeRange // vnode end hash → range
-	order             []uint32                   // sorted vnode end hashes; deterministic sync order
+	trees             map[uint32]*merkle.Tree    // replicated vnode end hash → tree
+	ranges            map[uint32]ring.VnodeRange // replicated vnode end hash → range
+	order             []uint32                   // sorted primary vnode end hashes; deterministic sync order
 	cursor            int                        // next index into order
 	r                 *ring.Ring
 	s                 *store.Store
@@ -55,7 +59,7 @@ func New(r *ring.Ring, s *store.Store, selfID string, replicationFactor int, tim
 		client:            &http.Client{Timeout: timeout},
 		syncEvery:         syncInterval,
 	}
-	m.rebuild(r.GetPrimaryVnodeRanges(selfID))
+	m.rebuild(r.GetReplicaVnodeRanges(selfID, replicationFactor), vnodeEnds(r.GetPrimaryVnodeRanges(selfID)))
 	return m
 }
 
@@ -67,20 +71,20 @@ func (m *Manager) SetSyncInterval(d time.Duration) {
 	}
 }
 
-// rebuild replaces the trees, ranges, and sync order for the given primary
-// ranges and repopulates the trees from the current store state (one full
-// scan). Called at startup and whenever a sync round observes that
-// membership changed the primary range set.
-func (m *Manager) rebuild(ranges []ring.VnodeRange) {
+// rebuild replaces the trees and ranges for the given replicated ranges, sets
+// the sync order to the primary subset, and repopulates the trees from the
+// current store state (one full scan). Called at startup and whenever a sync
+// round observes that membership changed the replicated range set.
+func (m *Manager) rebuild(replicaRanges []ring.VnodeRange, primaryEnds []uint32) {
 	m.mu.Lock()
-	m.trees = make(map[uint32]*merkle.Tree, len(ranges))
-	m.ranges = make(map[uint32]ring.VnodeRange, len(ranges))
-	m.order = make([]uint32, 0, len(ranges))
-	for _, vr := range ranges {
+	m.trees = make(map[uint32]*merkle.Tree, len(replicaRanges))
+	m.ranges = make(map[uint32]ring.VnodeRange, len(replicaRanges))
+	for _, vr := range replicaRanges {
 		m.trees[vr.End] = merkle.New()
 		m.ranges[vr.End] = vr
-		m.order = append(m.order, vr.End)
 	}
+	m.order = make([]uint32, len(primaryEnds))
+	copy(m.order, primaryEnds)
 	sort.Slice(m.order, func(i, j int) bool { return m.order[i] < m.order[j] })
 	m.cursor = 0
 	m.mu.Unlock()
@@ -95,20 +99,64 @@ func (m *Manager) rebuild(ranges []ring.VnodeRange) {
 	}
 }
 
-// maybeRebuild recomputes the primary ranges from the current ring and
+// maybeRebuild recomputes the replicated ranges from the current ring and
 // rebuilds the trees when membership has changed them. Membership events are
 // rare, so the full store scan a rebuild costs is acceptable; every other
-// round this is a cheap comparison.
+// round this is a cheap comparison. The primary subset that drives sync
+// initiation can only change when the replicated set does (a node is primary
+// of a vnode exactly when it owns that vnode, which also puts the vnode in its
+// replica set), so an unchanged range set leaves the order — and its cursor —
+// intact.
 func (m *Manager) maybeRebuild() {
-	ranges := m.r.GetPrimaryVnodeRanges(m.selfID)
+	replicaRanges := m.r.GetReplicaVnodeRanges(m.selfID, m.replicationFactor)
 	m.mu.RLock()
-	same := rangesEqual(m.ranges, ranges)
+	same := rangesEqual(m.ranges, replicaRanges)
 	m.mu.RUnlock()
 	if same {
 		return
 	}
-	log.Printf("antientropy: primary ranges changed (%d vnodes); rebuilding trees", len(ranges))
-	m.rebuild(ranges)
+	log.Printf("antientropy: replicated ranges changed (%d vnodes); rebuilding trees", len(replicaRanges))
+	m.rebuild(replicaRanges, vnodeEnds(m.r.GetPrimaryVnodeRanges(m.selfID)))
+}
+
+// vnodeEnds extracts the End hash of each range.
+func vnodeEnds(ranges []ring.VnodeRange) []uint32 {
+	ends := make([]uint32, len(ranges))
+	for i, vr := range ranges {
+		ends[i] = vr.End
+	}
+	return ends
+}
+
+// SyncState returns the root and per-bucket hashes of the maintained tree for
+// vnodeHash, or ok=false when this node keeps no tree for it (it is not a
+// replica of that vnode, or a membership change has not been observed yet). The
+// root is derived from the returned bucket hashes so the two are always mutually
+// consistent and identical to the on-the-fly scan path.
+func (m *Manager) SyncState(vnodeHash uint32) (root uint32, buckets []uint32, ok bool) {
+	m.mu.RLock()
+	tree, ok := m.trees[vnodeHash]
+	m.mu.RUnlock()
+	if !ok {
+		return 0, nil, false
+	}
+	buckets = make([]uint32, merkle.BucketCount)
+	for i := range buckets {
+		buckets[i] = tree.BucketHash(i)
+	}
+	return merkle.ComputeRootHash(buckets), buckets, true
+}
+
+// BucketKeys returns the sorted keys in bucket of the maintained tree for
+// vnodeHash, or ok=false when this node keeps no tree for it.
+func (m *Manager) BucketKeys(vnodeHash uint32, bucket int) (keys []string, ok bool) {
+	m.mu.RLock()
+	tree, ok := m.trees[vnodeHash]
+	m.mu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	return tree.BucketKeys(bucket), true
 }
 
 // rangesEqual reports whether the current range map matches the freshly

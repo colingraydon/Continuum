@@ -41,12 +41,22 @@ type HandlerConfig struct {
 	ReplicaTimeout    time.Duration
 }
 
+// SyncTreeProvider serves anti-entropy sync state for a vnode from a
+// pre-maintained Merkle tree, letting the sync endpoints skip a full store
+// scan. ok=false means no tree is held for the vnode; the handler then falls
+// back to scanning. Implemented by *antientropy.Manager.
+type SyncTreeProvider interface {
+	SyncState(vnodeHash uint32) (root uint32, buckets []uint32, ok bool)
+	BucketKeys(vnodeHash uint32, bucket int) (keys []string, ok bool)
+}
+
 type Handler struct {
 	ring              *ring.Ring
 	aggregator        *stats.Aggregator
 	memberList        *gossip.MemberList
 	store             *store.Store
 	hintStore         *hintstore.HintStore
+	syncTrees         SyncTreeProvider
 	selfID            string
 	replicationFactor int
 	writeQuorum       int
@@ -69,6 +79,13 @@ func NewHandler(r *ring.Ring, ml *gossip.MemberList, s *store.Store, cfg Handler
 		startTime:         time.Now(),
 		replicaClient:     &http.Client{Timeout: cfg.ReplicaTimeout},
 	}
+}
+
+// SetSyncTreeProvider installs the provider used to serve anti-entropy sync
+// state without a store scan. Wired in main after the anti-entropy manager is
+// built; when unset (e.g. in tests) the sync endpoints fall back to scanning.
+func (h *Handler) SetSyncTreeProvider(p SyncTreeProvider) {
+	h.syncTrees = p
 }
 
 // replicaResult carries the outcome of a single replica fan-out attempt.
@@ -981,12 +998,20 @@ func (h *Handler) GetSyncBucketKeys(w http.ResponseWriter, req *http.Request) {
 	}
 	vnodeHash := uint32(parsedVnode)
 
+	// Fast path: serve from the pre-maintained tree without a store scan.
+	if h.syncTrees != nil {
+		if keys, ok := h.syncTrees.BucketKeys(vnodeHash, parsedBucket); ok {
+			writeBucketKeys(w, keys)
+			return
+		}
+	}
+
+	// Fallback: scan the store for keys in the vnode range and bucket.
 	vr, ok := h.ring.GetVnodeRange(vnodeHash)
 	if !ok {
 		http.Error(w, "unknown vnode", http.StatusNotFound)
 		return
 	}
-
 	hashes, err := h.store.KeyHashes()
 	if err != nil {
 		log.Printf("sync bucket keys scan: %v", err)
@@ -999,6 +1024,12 @@ func (h *Handler) GetSyncBucketKeys(w http.ResponseWriter, req *http.Request) {
 			keys = append(keys, key)
 		}
 	}
+	writeBucketKeys(w, keys)
+}
+
+// writeBucketKeys encodes a bucket-keys response, normalizing a nil slice to an
+// empty array so the JSON is `[]` rather than `null`.
+func writeBucketKeys(w http.ResponseWriter, keys []string) {
 	if keys == nil {
 		keys = []string{}
 	}
@@ -1035,9 +1066,10 @@ func (h *Handler) PushSyncEntries(w http.ResponseWriter, req *http.Request) {
 }
 
 // GetSyncState returns the root hash and per-bucket hashes for the requested
-// vnode (?vnode=<endHash>). Computes bucket hashes on-the-fly from the local
-// store so that replicas can serve sync state without maintaining their own
-// Merkle trees.
+// vnode (?vnode=<endHash>). It serves from the pre-maintained Merkle tree when
+// available, falling back to an on-the-fly scan of the local store. Both paths
+// produce identical hashes (the tree and the scan share ComputeBucketHash /
+// ComputeRootHash).
 func (h *Handler) GetSyncState(w http.ResponseWriter, req *http.Request) {
 	param := req.URL.Query().Get("vnode")
 	if param == "" {
@@ -1051,12 +1083,20 @@ func (h *Handler) GetSyncState(w http.ResponseWriter, req *http.Request) {
 	}
 	vnodeHash := uint32(parsed)
 
+	// Fast path: serve from the pre-maintained tree without a store scan.
+	if h.syncTrees != nil {
+		if root, buckets, ok := h.syncTrees.SyncState(vnodeHash); ok {
+			writeSyncState(w, root, buckets)
+			return
+		}
+	}
+
+	// Fallback: recompute bucket hashes by scanning the local store.
 	vr, ok := h.ring.GetVnodeRange(vnodeHash)
 	if !ok {
 		http.Error(w, "unknown vnode", http.StatusNotFound)
 		return
 	}
-
 	hashes, err := h.store.KeyHashes()
 	if err != nil {
 		log.Printf("sync state scan: %v", err)
@@ -1073,17 +1113,17 @@ func (h *Handler) GetSyncState(w http.ResponseWriter, req *http.Request) {
 		}
 		buckets[merkle.BucketIndex(key)][key] = hash
 	}
-
 	bucketHashes := make([]uint32, merkle.BucketCount)
 	for i, entries := range buckets {
 		bucketHashes[i] = merkle.ComputeBucketHash(entries)
 	}
+	writeSyncState(w, merkle.ComputeRootHash(bucketHashes), bucketHashes)
+}
 
+// writeSyncState encodes a sync-state response from a root and its bucket hashes.
+func writeSyncState(w http.ResponseWriter, root uint32, buckets []uint32) {
 	w.Header().Set(contentTypeHeader, contentTypeJSON)
-	if err := json.NewEncoder(w).Encode(SyncStateResponse{
-		Root:    merkle.ComputeRootHash(bucketHashes),
-		Buckets: bucketHashes,
-	}); err != nil {
+	if err := json.NewEncoder(w).Encode(SyncStateResponse{Root: root, Buckets: buckets}); err != nil {
 		http.Error(w, errFailedWrite, http.StatusInternalServerError)
 	}
 }

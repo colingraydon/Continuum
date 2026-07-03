@@ -451,6 +451,82 @@ func TestGetPrimaryVnodeRangesPartitionCoverage(t *testing.T) {
 	}
 }
 
+// --- GetReplicaVnodeRanges tests ---
+
+func TestGetReplicaVnodeRangesEmptyRing(t *testing.T) {
+	r := NewRing(10)
+	if ranges := r.GetReplicaVnodeRanges("node1", 3); ranges != nil {
+		t.Fatalf("expected nil for empty ring, got %v", ranges)
+	}
+}
+
+func TestGetReplicaVnodeRangesUnknownNode(t *testing.T) {
+	r := NewRing(10)
+	r.AddNode("node1", "10.0.0.1")
+	if ranges := r.GetReplicaVnodeRanges("ghost", 3); len(ranges) != 0 {
+		t.Fatalf("expected 0 ranges for unknown node, got %d", len(ranges))
+	}
+}
+
+func TestGetReplicaVnodeRangesSingleNodeReplicatesAll(t *testing.T) {
+	const replicas = 5
+	r := NewRing(replicas)
+	r.AddNode("node1", "10.0.0.1")
+
+	// With one node, every vnode's replica set is just that node.
+	ranges := r.GetReplicaVnodeRanges("node1", 3)
+	if len(ranges) != replicas {
+		t.Fatalf("expected the sole node to replicate all %d vnodes, got %d", replicas, len(ranges))
+	}
+}
+
+func TestGetReplicaVnodeRangesSupersetOfPrimary(t *testing.T) {
+	const replicas = 8
+	r := NewRing(replicas)
+	r.AddNode("node1", "10.0.0.1")
+	r.AddNode("node2", "10.0.0.2")
+	r.AddNode("node3", "10.0.0.3")
+
+	for _, id := range []string{"node1", "node2", "node3"} {
+		replicaEnds := endSet(r.GetReplicaVnodeRanges(id, 2))
+		for _, pr := range r.GetPrimaryVnodeRanges(id) {
+			if _, ok := replicaEnds[pr.End]; !ok {
+				t.Errorf("%s: primary vnode %d missing from replica ranges", id, pr.End)
+			}
+		}
+	}
+}
+
+// TestGetReplicaVnodeRangesTotalCount pins the core invariant: every vnode is
+// replicated by exactly min(factor, nodes) distinct nodes, so the replica
+// ranges summed across all nodes equal totalVnodes * min(factor, nodes).
+func TestGetReplicaVnodeRangesTotalCount(t *testing.T) {
+	const replicas = 6
+	r := NewRing(replicas)
+	r.AddNode("node1", "10.0.0.1")
+	r.AddNode("node2", "10.0.0.2")
+	r.AddNode("node3", "10.0.0.3")
+
+	const factor = 2
+	total := len(r.GetReplicaVnodeRanges("node1", factor)) +
+		len(r.GetReplicaVnodeRanges("node2", factor)) +
+		len(r.GetReplicaVnodeRanges("node3", factor))
+
+	totalVnodes := replicas * 3
+	want := totalVnodes * factor // min(factor, nodes) == 2
+	if total != want {
+		t.Errorf("expected %d replica ranges across all nodes (%d vnodes x factor %d), got %d", want, totalVnodes, factor, total)
+	}
+}
+
+func endSet(ranges []VnodeRange) map[uint32]struct{} {
+	ends := make(map[uint32]struct{}, len(ranges))
+	for _, vr := range ranges {
+		ends[vr.End] = struct{}{}
+	}
+	return ends
+}
+
 // --- AddWeightedNode tests ---
 
 func TestAddWeightedNode_DoubleWeight(t *testing.T) {
