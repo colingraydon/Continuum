@@ -23,21 +23,22 @@ import (
 )
 
 type config struct {
-	replicas          int
-	replicationFactor int
-	writeQuorum       int
-	readQuorum        int
-	selfID            string
-	selfAddress       string
-	httpBindPort      string
-	gossipPort        string
-	gossipAdvertise   string
-	seedNodes         []string
-	replicaTimeout    time.Duration
-	syncInterval      time.Duration
-	selfWeight        float64
-	dataDir           string
-	memtableMaxBytes  int64
+	replicas             int
+	replicationFactor    int
+	writeQuorum          int
+	readQuorum           int
+	selfID               string
+	selfAddress          string
+	httpBindPort         string
+	gossipPort           string
+	gossipAdvertise      string
+	seedNodes            []string
+	replicaTimeout       time.Duration
+	syncInterval         time.Duration
+	hintDeliveryInterval time.Duration
+	selfWeight           float64
+	dataDir              string
+	memtableMaxBytes     int64
 }
 
 func getEnvInt(key string, dflt int) int {
@@ -105,21 +106,22 @@ func loadConfig() config {
 	gossipPort := getEnvString("GOSSIP_PORT", "8081")
 
 	return config{
-		replicas:          getEnvInt("REPLICAS", 150),
-		replicationFactor: replicationFactor,
-		writeQuorum:       writeQuorum,
-		readQuorum:        readQuorum,
-		selfID:            getEnvString("SELF_ID", selfAddress),
-		selfAddress:       selfAddress,
-		httpBindPort:      getEnvString("HTTP_BIND_PORT", ""),
-		gossipPort:        gossipPort,
-		gossipAdvertise:   getEnvString("GOSSIP_ADVERTISE_ADDR", net.JoinHostPort(advertiseHost(selfAddress), gossipPort)),
-		seedNodes:         seedNodes,
-		replicaTimeout:    getEnvDurationMs("REPLICA_TIMEOUT_MS", 500*time.Millisecond),
-		syncInterval:      getEnvDurationMs("SYNC_INTERVAL_MS", 30*time.Second),
-		selfWeight:        getEnvFloat64("SELF_WEIGHT", 1.0),
-		dataDir:           getEnvString("DATA_DIR", ""),
-		memtableMaxBytes:  int64(getEnvPositiveInt("MEMTABLE_MAX_BYTES", 16<<20)),
+		replicas:             getEnvInt("REPLICAS", 150),
+		replicationFactor:    replicationFactor,
+		writeQuorum:          writeQuorum,
+		readQuorum:           readQuorum,
+		selfID:               getEnvString("SELF_ID", selfAddress),
+		selfAddress:          selfAddress,
+		httpBindPort:         getEnvString("HTTP_BIND_PORT", ""),
+		gossipPort:           gossipPort,
+		gossipAdvertise:      getEnvString("GOSSIP_ADVERTISE_ADDR", net.JoinHostPort(advertiseHost(selfAddress), gossipPort)),
+		seedNodes:            seedNodes,
+		replicaTimeout:       getEnvDurationMs("REPLICA_TIMEOUT_MS", 500*time.Millisecond),
+		syncInterval:         getEnvDurationMs("SYNC_INTERVAL_MS", 30*time.Second),
+		hintDeliveryInterval: getEnvDurationMs("HINT_DELIVERY_INTERVAL_MS", 30*time.Second),
+		selfWeight:           getEnvFloat64("SELF_WEIGHT", 1.0),
+		dataDir:              getEnvString("DATA_DIR", ""),
+		memtableMaxBytes:     int64(getEnvPositiveInt("MEMTABLE_MAX_BYTES", 16<<20)),
 	}
 }
 
@@ -207,6 +209,27 @@ func runHintExpiry(ctx context.Context, hs *hintstore.HintStore) {
 		select {
 		case <-ticker.C:
 			hs.ExpireOld()
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// runHintDelivery periodically sweeps buffered hints and delivers them to any
+// currently-alive target. The gossip alive-transition callback already delivers
+// on a dead→alive edge; this sweep is the backstop for targets that never
+// present that edge — most importantly an asymmetric partition, where the
+// isolated node keeps gossiping (so it looks alive) while inbound writes are
+// dropped, so its hints would otherwise wait on anti-entropy. Undelivered hints
+// are re-buffered, so a sweep against a still-unreachable target is a no-op
+// beyond the failed delivery attempts. Interval is HINT_DELIVERY_INTERVAL_MS.
+func runHintDelivery(ctx context.Context, h *api.Handler, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			h.DeliverPendingHints()
 		case <-ctx.Done():
 			return
 		}
@@ -332,6 +355,7 @@ func main() {
 	hptr.Store(h)
 
 	go runHintExpiry(ctx, hs)
+	go runHintDelivery(ctx, h, cfg.hintDeliveryInterval)
 
 	// Background compaction only runs when persistence is enabled (otherwise
 	// there are no tables). Joined before finalize so no merge is mid-flight
@@ -380,7 +404,7 @@ func main() {
 	g.NotifyDead()
 
 	log.Printf("shutdown: flushing pending hints to alive nodes")
-	h.FlushHints()
+	h.DeliverPendingHints()
 
 	// Persist remove records from the flush and compact the hint log before exit.
 	if err := hs.Close(); err != nil {

@@ -296,6 +296,72 @@ func TestFault_QuorumLossThenClampedAvailability(t *testing.T) {
 	}
 }
 
+// Scenario 9: periodic hint delivery closes the asymmetric-partition blind
+// spot. A replica's inbound HTTP is blackholed while its gossip stays up, so it
+// is never declared dead and never presents a dead->alive transition - the
+// edge the event-driven delivery callback keys on. The coordinator is NOT
+// restarted (so no restart-triggered delivery) and anti-entropy is disabled.
+// The only path that can repair the replica is the periodic delivery sweep
+// (runHintDelivery), which delivers buffered hints to any alive target on a
+// timer. Re-buffering of failed deliveries is exercised implicitly: several
+// sweeps fire and fail against the still-blackholed replica before the heal,
+// and the hints must survive all of them.
+func TestFault_PeriodicHintDeliveryAcrossAsymmetricPartition(t *testing.T) {
+	c := newCluster(t, clusterConfig{syncIntervalMS: 600_000, hintDeliveryMS: 1000})
+	coordinator, replica := c.nodes[0], c.nodes[2]
+
+	t.Logf("blackholing HTTP to %s (gossip stays open, so it never looks dead)", replica.id)
+	replica.httpProxy.Blackhole()
+
+	const keys = 10
+	for i := 0; i < keys; i++ {
+		code, err := c.put(coordinator, fmt.Sprintf("psweep-k%02d", i), fmt.Sprintf("swept-%02d", i), nil)
+		if err != nil || code != http.StatusNoContent {
+			t.Fatalf("put %d: code=%d err=%v (want 204 via the two reachable replicas)", i, code, err)
+		}
+	}
+
+	// Let several delivery sweeps (1s interval) fire and fail against the still-
+	// blackholed replica. The hints must be re-buffered each time, not dropped.
+	time.Sleep(4 * time.Second)
+
+	// The replica must never have left the coordinator's ring: if it had gone
+	// dead and come back, an alive-transition would deliver hints and this test
+	// would no longer isolate the periodic sweep as the cause.
+	if ids := c.ringIDs(coordinator); !ids[replica.id] {
+		t.Fatalf("%s dropped from %s's ring; test can no longer isolate the periodic sweep (ring=%v)", replica.id, coordinator.id, ids)
+	}
+	// Nothing should have reached the blackholed replica yet. A local read of a
+	// missing key returns 200 with an empty value, so a leak is a matching value.
+	for i := 0; i < keys; i++ {
+		want := fmt.Sprintf("swept-%02d", i)
+		if nr, _, _ := c.directGet(replica, fmt.Sprintf("psweep-k%02d", i)); nr.Value == want {
+			t.Fatalf("psweep-k%02d reached %s while still blackholed (value=%q); blackhole leaked", i, replica.id, nr.Value)
+		}
+	}
+
+	t.Logf("healing HTTP to %s; only the periodic sweep can now deliver (no dead->alive edge, AE off)", replica.id)
+	replica.httpProxy.Heal()
+
+	deadline := time.Now().Add(20 * time.Second)
+	missing := keys
+	for time.Now().Before(deadline) && missing > 0 {
+		missing = 0
+		for i := 0; i < keys; i++ {
+			nr, code, err := c.directGet(replica, fmt.Sprintf("psweep-k%02d", i))
+			if err != nil || code != http.StatusOK || nr.Value != fmt.Sprintf("swept-%02d", i) {
+				missing++
+			}
+		}
+		if missing > 0 {
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
+	if missing > 0 {
+		t.Errorf("%d/%d hinted values never reached %s via the periodic delivery sweep", missing, keys, replica.id)
+	}
+}
+
 // Scenario 8: lossy gossip. With 40% of gossip datagrams dropped, membership
 // must stay stable (gossip is designed to tolerate loss: fanout 3, 1s
 // interval, 5s suspect threshold) and the data path must be unaffected.

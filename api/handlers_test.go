@@ -1436,12 +1436,12 @@ func TestRepairReplicas_HTTPRepairSiblings(t *testing.T) {
 	}
 }
 
-func TestFlushHints_NilHintStore(t *testing.T) {
-	h := newTestHandler(t) // hintStore is nil
-	h.FlushHints()         // must not panic
+func TestDeliverPendingHints_NilHintStore(t *testing.T) {
+	h := newTestHandler(t)  // hintStore is nil
+	h.DeliverPendingHints() // must not panic
 }
 
-func TestFlushHints_NodeNotInMemberList(t *testing.T) {
+func TestDeliverPendingHints_NodeNotInMemberList(t *testing.T) {
 	r := ring.NewRing(10)
 	ml := newTestMemberList(r)
 	s := store.New()
@@ -1455,14 +1455,14 @@ func TestFlushHints_NodeNotInMemberList(t *testing.T) {
 		At:     time.Now(),
 	})
 
-	h.FlushHints()
+	h.DeliverPendingHints()
 
 	if nodes := hs.PendingNodes(); len(nodes) != 1 || nodes[0] != "unknown-node" {
 		t.Errorf("hint for unknown-node should remain, pending=%v", nodes)
 	}
 }
 
-func TestFlushHints_NodeDeadInMemberList(t *testing.T) {
+func TestDeliverPendingHints_NodeDeadInMemberList(t *testing.T) {
 	r := ring.NewRing(10)
 	ml := newTestMemberList(r)
 	s := store.New()
@@ -1479,7 +1479,7 @@ func TestFlushHints_NodeDeadInMemberList(t *testing.T) {
 		At:     time.Now(),
 	})
 
-	h.FlushHints()
+	h.DeliverPendingHints()
 
 	if nodes := hs.PendingNodes(); len(nodes) != 1 || nodes[0] != "dead-node" {
 		t.Errorf("hint for dead-node should remain, pending=%v", nodes)
@@ -1509,14 +1509,54 @@ func TestDeliverHints_DeletedHint(t *testing.T) {
 		At:      time.Now(),
 	})
 
-	h.FlushHints()
+	h.DeliverPendingHints()
 
 	if nodes := hs.PendingNodes(); len(nodes) != 0 {
 		t.Errorf("deleted hint should be drained after delivery, pending=%v", nodes)
 	}
 }
 
-func TestFlushHints_AliveNodeDeliversHints(t *testing.T) {
+// TestDeliverHints_ReBuffersUndelivered pins the behavior that makes periodic
+// delivery safe against a still-unreachable target (e.g. an asymmetric
+// partition): a hint that fails to deliver is put back rather than dropped,
+// and its original timestamp is preserved so its TTL is not reset by the retry.
+func TestDeliverHints_ReBuffersUndelivered(t *testing.T) {
+	// A server that is immediately closed yields connection-refused on delivery.
+	deadSrv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	deadAddr := deadSrv.Listener.Addr().String()
+	deadSrv.Close()
+
+	r := ring.NewRing(10)
+	ml := newTestMemberList(r)
+	s := store.New()
+	hs := hintstore.New(100, time.Hour)
+	h := NewHandler(r, ml, s, HandlerConfig{SelfID: "self", ReplicationFactor: 3, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, hs)
+
+	ml.Add("target-node", deadAddr)
+
+	originalAt := time.Now().Add(-30 * time.Minute)
+	hs.Store("target-node", hintstore.Hint{
+		Key:    "hint-key",
+		Value:  "hint-value",
+		Clocks: map[string]uint64{"self": 1},
+		At:     originalAt,
+	})
+
+	h.DeliverPendingHints() // delivery fails; hint must be re-buffered
+
+	if nodes := hs.PendingNodes(); len(nodes) != 1 || nodes[0] != "target-node" {
+		t.Fatalf("undelivered hint should remain buffered, pending=%v", nodes)
+	}
+	remaining := hs.Drain("target-node")
+	if len(remaining) != 1 {
+		t.Fatalf("expected 1 re-buffered hint, got %d", len(remaining))
+	}
+	if !remaining[0].At.Equal(originalAt) {
+		t.Errorf("re-buffered hint timestamp reset: got %v, want %v (TTL must count from original write)", remaining[0].At, originalAt)
+	}
+}
+
+func TestDeliverPendingHints_AliveNodeDeliversHints(t *testing.T) {
 	targetRing := ring.NewRing(10)
 	targetML := gossip.NewMemberList("target", "localhost", nil)
 	targetStore := store.New()
@@ -1539,7 +1579,7 @@ func TestFlushHints_AliveNodeDeliversHints(t *testing.T) {
 		At:     time.Now(),
 	})
 
-	h.FlushHints()
+	h.DeliverPendingHints()
 
 	if nodes := hs.PendingNodes(); len(nodes) != 0 {
 		t.Errorf("hints should be drained after successful delivery, pending=%v", nodes)

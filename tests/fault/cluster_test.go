@@ -55,6 +55,7 @@ type clusterConfig struct {
 	readQuorum        int // default 2
 	replicaTimeoutMS  int // default 750
 	syncIntervalMS    int // default 2000 (fast anti-entropy so tests converge quickly)
+	hintDeliveryMS    int // default 1000 (fast hint-delivery sweep so tests observe it)
 	memtableMaxBytes  int // default 8192 (tiny, to force flush/compaction churn under load)
 }
 
@@ -76,6 +77,9 @@ func (c clusterConfig) withDefaults() clusterConfig {
 	}
 	if c.syncIntervalMS == 0 {
 		c.syncIntervalMS = 2000
+	}
+	if c.hintDeliveryMS == 0 {
+		c.hintDeliveryMS = 1000
 	}
 	if c.memtableMaxBytes == 0 {
 		c.memtableMaxBytes = 8192
@@ -172,6 +176,7 @@ func (c *cluster) start(n *node) {
 		fmt.Sprintf("READ_QUORUM=%d", c.cfg.readQuorum),
 		fmt.Sprintf("REPLICA_TIMEOUT_MS=%d", c.cfg.replicaTimeoutMS),
 		fmt.Sprintf("SYNC_INTERVAL_MS=%d", c.cfg.syncIntervalMS),
+		fmt.Sprintf("HINT_DELIVERY_INTERVAL_MS=%d", c.cfg.hintDeliveryMS),
 		fmt.Sprintf("MEMTABLE_MAX_BYTES=%d", c.cfg.memtableMaxBytes),
 	)
 	cmd := exec.Command(binaryPath)

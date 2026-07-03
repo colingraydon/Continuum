@@ -76,6 +76,7 @@ acknowledged with 204. Single-writer keys make verification exact:
 | `DecommissionPushesKeysToSuccessors` | SIGTERM | Push-on-leave moves solely-held keys to successors, no anti-entropy needed |
 | `QuorumLossThenClampedAvailability` | SIGKILL 2 of 3 | Writes 503 while dead nodes hold ring seats, then resume once the ring shrinks |
 | `GossipPacketLossStability` | 40% gossip drop | No false death verdicts; data path unaffected |
+| `PeriodicHintDeliveryAcrossAsymmetricPartition` | inbound HTTP blackhole, gossip up, AE off | Periodic sweep delivers buffered hints with no dead→alive edge and no coordinator restart; failed sweeps re-buffer |
 
 ## Findings the harness surfaced
 
@@ -111,11 +112,17 @@ system behaviors, not test artifacts:
    two nodes acknowledges single-copy writes. W is a consistency knob against
    the *current* ring, not a hard durability floor. `QuorumLossThenClampedAvailability`
    pins this behavior so any future change to it is a conscious one.
-5. **Hints are only delivered on an alive *transition*.** During an
-   asymmetric partition the isolated node never looks dead to its peers (its
-   outbound gossip still flows), so hints buffered for it are never
-   triggered for delivery; repair falls to anti-entropy. Delivery on a
-   periodic timer, or on failed-then-succeeded probes, would close this.
+5. **Hints were only delivered on an alive *transition*** — *fixed by a
+   periodic delivery sweep.* During an asymmetric partition the isolated node
+   never looks dead to its peers (its outbound gossip still flows), so hints
+   buffered for it were never triggered for delivery and repair fell to
+   anti-entropy. A background sweep (`runHintDelivery`, 30s tick) now also
+   delivers buffered hints to any currently-alive target, independent of any
+   membership edge. To make retrying against a still-unreachable target safe,
+   `DeliverHints` re-buffers any hint that fails to deliver instead of dropping
+   it, preserving its original timestamp so its TTL keeps counting from the
+   original write; anti-entropy remains the backstop for hints that age out
+   before the target becomes reachable.
 6. **Merkle hashes were clock-blind** — *fixed by folding vector clocks into
    entry hashes.* Two replicas holding the same value at different clocks
    (e.g. one received an earlier write attempt via a hint, the other holds
