@@ -1,4 +1,4 @@
-.PHONY: build run test test-race e2e e2e-integration bench lint docker clean
+.PHONY: build run test test-race e2e e2e-integration fault bench lint docker clean
 
 build:
 	go build -o bin/continuum ./cmd/continuum
@@ -17,6 +17,9 @@ e2e:
 
 e2e-integration:
 	go test -v -tags e2e -timeout 120s ./tests/e2e/...
+
+fault:
+	go test -v -tags fault -timeout 900s ./tests/fault/...
 
 bench:
 	go test -bench=. -benchmem ./benchmarks/

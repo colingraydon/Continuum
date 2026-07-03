@@ -7,13 +7,16 @@
 | Variable | Default | Description |
 | -------- | ------- | ----------- |
 | `SELF_ID` | value of `SELF_ADDRESS` | Node identifier used in vector clocks, gossip, and logs |
-| `SELF_ADDRESS` | `localhost:8080` | HTTP address the node binds to and advertises to peers |
-| `GOSSIP_PORT` | `8081` | UDP port for gossip messages |
+| `SELF_ADDRESS` | `localhost:8080` | HTTP address the node advertises to peers (and binds, unless `HTTP_BIND_PORT` is set) |
+| `HTTP_BIND_PORT` | port of `SELF_ADDRESS` | Port the HTTP listener actually binds. Set when the advertised address differs from the local listener (NAT, port mapping, fault-injection proxies) |
+| `GOSSIP_PORT` | `8081` | UDP port the gossip listener binds |
+| `GOSSIP_ADVERTISE_ADDR` | host of `SELF_ADDRESS` + `GOSSIP_PORT` | UDP address peers send gossip to. Set when nodes use heterogeneous gossip ports (local multi-process clusters) or sit behind port mapping |
 | `REPLICAS` | `150` | Virtual nodes per physical node |
 | `REPLICATION_FACTOR` | `3` | Number of replicas per key |
 | `WRITE_QUORUM` | majority (`RF/2 + 1`) | Replica acks required before returning 204 |
 | `READ_QUORUM` | majority (`RF/2 + 1`) | Replica responses required for a consistent read |
 | `REPLICA_TIMEOUT_MS` | `500` | Timeout in milliseconds for inter-node replication and read calls |
+| `SYNC_INTERVAL_MS` | `30000` | Interval between anti-entropy sync rounds |
 | `SEED_NODES` | (none) | Comma-separated HTTP addresses to bootstrap from on first join |
 | `SELF_WEIGHT` | `1.0` | Capacity weight for vnode allocation; `2.0` gives twice the vnodes |
 | `DATA_DIR` | (none) | Directory for WAL + SSTable persistence. Empty disables persistence (memory-only) |
@@ -60,7 +63,10 @@ In Grafana, add `http://prometheus:9090` as a Prometheus data source.
 | `make run` | Build and run a single node with default config |
 | `make docker-run` | Start the 3-node Docker Compose cluster |
 | `make test` | Run all unit and integration tests |
-| `make e2e` | Run end-to-end tests (spawns real processes) |
+| `make test-race` | Run all tests under the race detector |
+| `make e2e` | Run in-process cluster tests (`TestE2E*` in `api`) |
+| `make e2e-integration` | Run process-based end-to-end tests (spawns real binaries) |
+| `make fault` | Run the fault-injection suite (kills, hangs, partitions, packet loss) |
 | `make bench` | Run benchmarks |
 | `make lint` | Run golangci-lint |
 | `make coverage` | Generate HTML coverage report |
@@ -118,13 +124,14 @@ Step 5 is what makes the downtime gate work: the gate compares `last_clean_shutd
 
 ## CI Pipeline
 
-Three jobs run on every push and pull request to `main`:
+Four jobs run on every push and pull request to `main` (see [docs/testing.md](testing.md) for what each layer covers):
 
 - **test** - `go vet` + `go test` with coverage upload to Codecov
 - **e2e-integration** - process-based end-to-end tests with a 120-second timeout
+- **fault-injection** - the fault-injection suite with a 900-second timeout
 - **lint** - golangci-lint
 
-**docker** runs after all three pass and verifies the image builds successfully.
+**docker** runs after all of the above pass and verifies the image builds successfully.
 
 **CodeQL** runs as a separate workflow on push, PR, and a weekly schedule (Mondays at 8am UTC). Results appear in the Security tab under Code scanning.
 

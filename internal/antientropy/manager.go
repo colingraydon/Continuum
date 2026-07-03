@@ -41,6 +41,7 @@ type Manager struct {
 	selfID            string
 	replicationFactor int
 	client            *http.Client
+	syncEvery         time.Duration
 }
 
 func New(r *ring.Ring, s *store.Store, selfID string, replicationFactor int, timeout time.Duration) *Manager {
@@ -50,9 +51,18 @@ func New(r *ring.Ring, s *store.Store, selfID string, replicationFactor int, tim
 		selfID:            selfID,
 		replicationFactor: replicationFactor,
 		client:            &http.Client{Timeout: timeout},
+		syncEvery:         syncInterval,
 	}
 	m.rebuild()
 	return m
+}
+
+// SetSyncInterval overrides how often the primary-driven sync round runs.
+// Non-positive values are ignored. Call before Start.
+func (m *Manager) SetSyncInterval(d time.Duration) {
+	if d > 0 {
+		m.syncEvery = d
+	}
 }
 
 // rebuild initializes trees for all primary vnode ranges and populates them
@@ -100,7 +110,7 @@ func (m *Manager) Start(ctx context.Context) {
 }
 
 func (m *Manager) syncLoop(ctx context.Context) {
-	syncTicker := time.NewTicker(syncInterval)
+	syncTicker := time.NewTicker(m.syncEvery)
 	gcTicker := time.NewTicker(gcInterval)
 	defer syncTicker.Stop()
 	defer gcTicker.Stop()

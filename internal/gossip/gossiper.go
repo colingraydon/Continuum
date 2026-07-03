@@ -71,11 +71,21 @@ func (g *Gossiper) gossipRound() {
 	}
 
 	for _, peer := range peers {
-		addr := fmt.Sprintf("%s:%s", gossipHost(peer.Address), g.gossipPort)
-		if err := g.transport.Send(addr, msg); err != nil {
+		if err := g.transport.Send(g.peerGossipAddr(peer), msg); err != nil {
 			log.Printf("failed to gossip to peer %s: %v", peer.ID, err)
 		}
 	}
+}
+
+// peerGossipAddr returns the UDP address a gossip datagram for m should be
+// sent to: the member's advertised gossip address when known, otherwise the
+// member's host on this node's own gossip port (the legacy assumption that
+// every node shares one gossip port).
+func (g *Gossiper) peerGossipAddr(m *Member) string {
+	if m.GossipAddr != "" {
+		return m.GossipAddr
+	}
+	return fmt.Sprintf("%s:%s", gossipHost(m.Address), g.gossipPort)
 }
 
 func (g *Gossiper) receiveLoop(ctx context.Context) {
@@ -165,8 +175,7 @@ func (g *Gossiper) NotifyDead() {
 	}
 
 	for _, peer := range peers {
-		addr := fmt.Sprintf("%s:%s", gossipHost(peer.Address), g.gossipPort)
-		if err := g.transport.Send(addr, msg); err != nil {
+		if err := g.transport.Send(g.peerGossipAddr(peer), msg); err != nil {
 			log.Printf("shutdown: failed to notify peer %s: %v", peer.ID, err)
 		}
 	}

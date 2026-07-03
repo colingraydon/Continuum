@@ -29,9 +29,12 @@ type config struct {
 	readQuorum        int
 	selfID            string
 	selfAddress       string
+	httpBindPort      string
 	gossipPort        string
+	gossipAdvertise   string
 	seedNodes         []string
 	replicaTimeout    time.Duration
+	syncInterval      time.Duration
 	selfWeight        float64
 	dataDir           string
 	memtableMaxBytes  int64
@@ -99,6 +102,8 @@ func loadConfig() config {
 		seedNodes = strings.Split(val, ",")
 	}
 
+	gossipPort := getEnvString("GOSSIP_PORT", "8081")
+
 	return config{
 		replicas:          getEnvInt("REPLICAS", 150),
 		replicationFactor: replicationFactor,
@@ -106,13 +111,26 @@ func loadConfig() config {
 		readQuorum:        readQuorum,
 		selfID:            getEnvString("SELF_ID", selfAddress),
 		selfAddress:       selfAddress,
-		gossipPort:        getEnvString("GOSSIP_PORT", "8081"),
+		httpBindPort:      getEnvString("HTTP_BIND_PORT", ""),
+		gossipPort:        gossipPort,
+		gossipAdvertise:   getEnvString("GOSSIP_ADVERTISE_ADDR", net.JoinHostPort(advertiseHost(selfAddress), gossipPort)),
 		seedNodes:         seedNodes,
 		replicaTimeout:    getEnvDurationMs("REPLICA_TIMEOUT_MS", 500*time.Millisecond),
+		syncInterval:      getEnvDurationMs("SYNC_INTERVAL_MS", 30*time.Second),
 		selfWeight:        getEnvFloat64("SELF_WEIGHT", 1.0),
 		dataDir:           getEnvString("DATA_DIR", ""),
 		memtableMaxBytes:  int64(getEnvPositiveInt("MEMTABLE_MAX_BYTES", 16<<20)),
 	}
+}
+
+// advertiseHost extracts the host part of SELF_ADDRESS for building the
+// default gossip advertise address; an address without a port is used as-is.
+func advertiseHost(address string) string {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return address
+	}
+	return host
 }
 
 // makeMemberChangeCallback returns the gossip onChange handler. hptr is an
@@ -238,6 +256,7 @@ func main() {
 
 	ml := gossip.NewMemberList(cfg.selfID, cfg.selfAddress, makeMemberChangeCallback(r, &hptr))
 	ml.SetSelfWeight(cfg.selfWeight)
+	ml.SetSelfGossipAddr(cfg.gossipAdvertise)
 
 	r.SetHealthFilter(func(id string) bool {
 		m, ok := ml.Get(id)
@@ -273,6 +292,7 @@ func main() {
 	}
 
 	ae := antientropy.New(r, s, cfg.selfID, cfg.replicationFactor, cfg.replicaTimeout)
+	ae.SetSyncInterval(cfg.syncInterval)
 	s.SetOnUpdate(ae.Update)
 	s.SetOnEvict(ae.RemoveFromTrees)
 	ae.Start(ctx)
@@ -300,11 +320,19 @@ func main() {
 		}()
 	}
 
+	// HTTP_BIND_PORT lets the listener bind a different port from the one in
+	// the advertised SELF_ADDRESS (e.g. behind NAT, port mapping, or a fault-
+	// injection proxy). Defaults to the advertised port.
+	bindPort := cfg.httpBindPort
+	if bindPort == "" {
+		bindPort = httpPort
+	}
+
 	mux := api.BuildMux(h)
-	srv := &http.Server{Addr: ":" + httpPort, Handler: mux}
+	srv := &http.Server{Addr: ":" + bindPort, Handler: mux}
 
 	go func() {
-		log.Printf("starting server on :%s (gossip on :%s) as %s", httpPort, cfg.gossipPort, cfg.selfID)
+		log.Printf("starting server on :%s (gossip on :%s) as %s", bindPort, cfg.gossipPort, cfg.selfID)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server error: %v", err)
 		}
