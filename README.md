@@ -129,6 +129,7 @@ make coverage  # HTML coverage report
 | [Read Repair](docs/read-repair.md) | Async repair, always-repair-on-conflict, X-Proxied-From path reuse |
 | [Data Migration](docs/data-migration.md) | Pull on join, push on leave, bootstrapping state machine |
 | [Fault Injection](docs/fault-injection.md) | Process-level fault harness: proxies, kill/hang/partition scenarios, durability and convergence invariants |
+| [Testing](docs/testing.md) | The full test pyramid: unit and fault-seam tests, randomized store model, in-process clusters, process E2E, fault injection |
 | [API Reference](docs/api.md) | All endpoints with request/response examples and internal headers |
 | [Operations](docs/operations.md) | Env vars, Docker setup, Makefile targets, Prometheus metrics |
 | [Benchmarks](docs/benchmarks.md) | Hash ring throughput and latency measurements |

@@ -63,7 +63,10 @@ In Grafana, add `http://prometheus:9090` as a Prometheus data source.
 | `make run` | Build and run a single node with default config |
 | `make docker-run` | Start the 3-node Docker Compose cluster |
 | `make test` | Run all unit and integration tests |
-| `make e2e` | Run end-to-end tests (spawns real processes) |
+| `make test-race` | Run all tests under the race detector |
+| `make e2e` | Run in-process cluster tests (`TestE2E*` in `api`) |
+| `make e2e-integration` | Run process-based end-to-end tests (spawns real binaries) |
+| `make fault` | Run the fault-injection suite (kills, hangs, partitions, packet loss) |
 | `make bench` | Run benchmarks |
 | `make lint` | Run golangci-lint |
 | `make coverage` | Generate HTML coverage report |
@@ -121,13 +124,14 @@ Step 5 is what makes the downtime gate work: the gate compares `last_clean_shutd
 
 ## CI Pipeline
 
-Three jobs run on every push and pull request to `main`:
+Four jobs run on every push and pull request to `main` (see [docs/testing.md](testing.md) for what each layer covers):
 
 - **test** - `go vet` + `go test` with coverage upload to Codecov
 - **e2e-integration** - process-based end-to-end tests with a 120-second timeout
+- **fault-injection** - the fault-injection suite with a 900-second timeout
 - **lint** - golangci-lint
 
-**docker** runs after all three pass and verifies the image builds successfully.
+**docker** runs after all of the above pass and verifies the image builds successfully.
 
 **CodeQL** runs as a separate workflow on push, PR, and a weekly schedule (Mondays at 8am UTC). Results appear in the Security tab under Code scanning.
 
