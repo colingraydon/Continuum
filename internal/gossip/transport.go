@@ -17,9 +17,14 @@ const (
 )
 
 type GossipMessage struct {
-	Type    MessageType `json:"type"`
-	From    string      `json:"from"`
-	Members []*Member   `json:"members"`
+	Type MessageType `json:"type"`
+	From string      `json:"from"`
+	// WantReply asks the receiver to send its own member list straight back to
+	// From. Bootstrap sets it so a rejoining node — which peers may have marked
+	// dead and so stopped gossiping to — still receives the cluster view (and
+	// its own stale entry) needed to refute. Replies clear it to avoid a loop.
+	WantReply bool      `json:"wantReply,omitempty"`
+	Members   []*Member `json:"members"`
 }
 
 type Transport struct {
