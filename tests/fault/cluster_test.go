@@ -453,6 +453,22 @@ func (c *cluster) put(n *node, key, value string, clocks map[string]uint64) (int
 	return resp.StatusCode, nil
 }
 
+// mustPut writes through n as coordinator and fails the test on anything but 204.
+func mustPut(t *testing.T, c *cluster, n *node, key, value string) {
+	t.Helper()
+	if code, err := c.put(n, key, value, nil); err != nil || code != http.StatusNoContent {
+		t.Fatalf("put %s=%s via %s: code=%d err=%v", key, value, n.id, code, err)
+	}
+}
+
+// mustDelete deletes through n as coordinator and fails the test on anything but 204.
+func mustDelete(t *testing.T, c *cluster, n *node, key string) {
+	t.Helper()
+	if code, err := c.deleteKey(n, key); err != nil || code != http.StatusNoContent {
+		t.Fatalf("delete %s via %s: code=%d err=%v", key, n.id, code, err)
+	}
+}
+
 // putReplica writes directly to n's local store via X-Proxied-From, bypassing
 // coordinator fan-out. Used to seed state onto a specific replica.
 func (c *cluster) putReplica(n *node, key, value string, clocks map[string]uint64) {
