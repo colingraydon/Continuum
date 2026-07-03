@@ -6,7 +6,7 @@
 
 Anti-entropy is the durable safety net beneath hinted handoff and read repair. Hinted handoff closes the gap for replicas that missed writes while briefly down. Read repair fixes stale replicas inline on reads. Anti-entropy covers everything else - replicas that diverged while hints were lost, nodes that restarted and lost in-memory hints, or any divergence that slipped through the other two layers.
 
-The primary node for each vnode range owns an in-memory Merkle tree for that range. Every sync tick (`SYNC_INTERVAL_MS`, default 30 seconds), the next vnode range in a deterministic round-robin order is compared against each of its replicas. Divergent buckets are reconciled bidirectionally. When ring membership changes the set of ranges this node is primary for, the manager detects it at the next tick and rebuilds its trees from a store scan.
+Every node keeps an in-memory Merkle tree for each vnode range it replicates. The primary for a range *drives* sync: every sync tick (`SYNC_INTERVAL_MS`, default 30 seconds), the next vnode range in a deterministic round-robin order over the node's **primary** ranges is compared against each of its replicas. Divergent buckets are reconciled bidirectionally. Replicas *serve* sync state from the same maintained trees, so a comparison reads precomputed hashes rather than rescanning the store. When ring membership changes the set of ranges this node replicates, the manager detects it at the next tick and rebuilds its trees from a store scan.
 
 ## How It Works
 
@@ -24,9 +24,9 @@ Each store entry carries a `Hash uint32` - a murmur3 hash of the value computed 
 
 ### Sync Cycle
 
-Every sync tick, the manager first re-derives its primary ranges from the ring and rebuilds its trees if membership changed them (a cheap comparison otherwise), then advances a round-robin cursor over the sorted vnode ends and runs `syncWithReplica` against each replica in that range's replica set. Cycling guarantees every primary range is synced exactly once per `N` ticks, where `N` is the number of primary vnodes; random selection had an unbounded worst case.
+Every sync tick, the manager first re-derives its replicated ranges from the ring and rebuilds its trees if membership changed them (a cheap comparison otherwise), then advances a round-robin cursor over its sorted **primary** vnode ends and runs `syncWithReplica` against each replica in that range's replica set. Cycling guarantees every primary range is synced exactly once per `N` ticks, where `N` is the number of primary vnodes; random selection had an unbounded worst case.
 
-`syncWithReplica` fetches the replica's Merkle state (`GET /sync?vnode=<endHash>`) - the replica computes its bucket hashes on-the-fly from its store. It then compares each bucket hash against the primary's local tree. For each divergent bucket, `syncBucket` is called.
+`syncWithReplica` fetches the replica's Merkle state (`GET /sync?vnode=<endHash>`) - the replica serves its bucket hashes from the tree it maintains for that range (falling back to a store scan only if it has no tree for the vnode yet). It then compares each bucket hash against the primary's local tree. For each divergent bucket, `syncBucket` is called.
 
 ### Bidirectional Sync
 
@@ -65,15 +65,15 @@ The alternative is gossip-driven sync where any node can initiate repair with an
 
 **Tradeoff:** If the primary is down, anti-entropy for that vnode range does not run until the primary recovers or a successor is elected. Read repair and hinted handoff are the fallbacks during that window. In the current design there is no automatic failover of the primary role - it is determined by ring position, which changes only when nodes join or leave.
 
-### On-the-Fly Replica Trees over Persistent Replica Trees
+### Maintained Replica Trees over On-the-Fly Computation
 
-**Choice:** Replicas compute their bucket hashes on-the-fly from their store when queried. They do not maintain persistent Merkle trees.
+**Choice:** Every node maintains an incremental Merkle tree for each vnode range it replicates - not just the ranges it is primary for - and serves sync state (`GET /sync`, `/sync/bucket-keys`) straight from those trees. A store scan is retained only as a fallback for a vnode whose tree is not present yet (a membership-change race).
 
-The alternative is for every node to maintain a full Merkle tree for every vnode range it holds, whether it is the primary or a replica. This would halve the sync work per round (no need to fetch and compute bucket hashes on demand) but triples the total memory used for Merkle trees in a 3-node cluster.
+Replicas originally computed bucket hashes on-the-fly, scanning the store for keys in the requested range on every sync request. That was cheap when the store was in-memory, but once the LSM engine made the dataset disk-resident, `KeyHashes` became a full read of every SSTable - so each sync request cost **O(total data)**, paid repeatedly under steady-state gossip. Maintaining trees turns each request back into an O(buckets) read of precomputed hashes.
 
-On-the-fly computation keeps the replica code path simple - a replica just scans its store for keys in the requested range and XORs their hashes. This computation is O(keys in range) but is done lazily and only when the primary asks. In practice the computation is fast enough that it does not noticeably affect the sync cycle duration.
+The trees are kept current by the same `onUpdate` / `onEvict` callbacks the primary already uses, so replica sub-writes (from `/replicate`) update the tree with no extra machinery. The tree's `BucketHash`/`RootHash` are byte-identical to the scan path's `ComputeBucketHash`/`ComputeRootHash`, so nodes still agree on hashes exactly - the change is pure cost reduction, no protocol change.
 
-**Tradeoff:** On-the-fly computation means the replica is doing O(n) work per sync request rather than O(1) (lookup precomputed hash). For large vnode ranges with many keys, this could be slow. The current design is appropriate for clusters where key counts per vnode range are in the thousands, not millions.
+**Tradeoff:** A node now trees every local key rather than only its primary-range keys, ~RF× more tree metadata (one `uint32` per key). This is the same order as the store's own key set and is the inherent cost of not scanning. Trees are in-memory, rebuilt from one store scan at startup and on membership change; persisting them to disk to avoid even that startup scan is a deferred refinement.
 
 ### TTL-Based Tombstone GC over Per-Replica Confirmation Tracking
 
@@ -93,9 +93,9 @@ A shorter interval would detect divergence faster but add more background HTTP t
 
 **Tradeoff:** A full pass still scales linearly with vnode count: a node primary for 150 vnodes at the default interval takes 75 minutes per pass. Tune `SYNC_INTERVAL_MS` or `REPLICAS` when faster convergence matters; prioritizing ranges with known divergence or syncing several vnodes per tick are the next steps if that isn't enough.
 
-### Primary Ranges Rebuilt on Membership Change
+### Replicated Ranges Rebuilt on Membership Change
 
-**Choice:** Each sync tick re-derives the primary ranges from the ring and, only when they changed, rebuilds the Merkle trees with one `KeyHashes` scan.
+**Choice:** Each sync tick re-derives the ranges this node replicates from the ring and, only when they changed, rebuilds the Merkle trees with one `KeyHashes` scan. The primary subset that drives sync initiation can only change when the replicated set does (a node is primary of a vnode exactly when it owns that vnode, which also puts the vnode in its replica set), so the round-robin order and its cursor are left intact whenever the range set is unchanged.
 
 Ranges were previously computed once at startup, so a node that started alone considered itself primary for the whole keyspace forever (another fault-harness finding). Comparing the range set is cheap enough to do every tick; the expensive scan only runs on actual membership events, which are rare.
 

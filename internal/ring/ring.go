@@ -304,3 +304,48 @@ func (r *Ring) GetPrimaryVnodeRanges(nodeID string) []VnodeRange {
 	}
 	return ranges
 }
+
+// GetReplicaVnodeRanges returns the hash ranges for every vnode that nodeID
+// replicates — i.e. nodeID is among the first factor distinct owners walking
+// clockwise from the vnode. This is a superset of GetPrimaryVnodeRanges (the
+// vnodes where nodeID is the first owner). Anti-entropy uses it so a node can
+// maintain a Merkle tree for every range it may be asked to serve sync state
+// for, not just the ranges it drives sync for.
+func (r *Ring) GetReplicaVnodeRanges(nodeID string, factor int) []VnodeRange {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if r.tree.Tree.Size() == 0 {
+		return nil
+	}
+	if factor > len(r.nodes) {
+		factor = len(r.nodes)
+	}
+
+	var vnodes []*VNode
+	it := r.tree.Tree.Iterator()
+	for it.Next() {
+		vnodes = append(vnodes, it.Value().(*VNode))
+	}
+
+	n := len(vnodes)
+	var ranges []VnodeRange
+	for i, vn := range vnodes {
+		if !nodeInSet(r.walkRing(vn.Hash, factor), nodeID) {
+			continue
+		}
+		start := vnodes[(i-1+n)%n].Hash
+		ranges = append(ranges, VnodeRange{Start: start, End: vn.Hash})
+	}
+	return ranges
+}
+
+// nodeInSet reports whether any node in nodes has the given ID.
+func nodeInSet(nodes []*Node, id string) bool {
+	for _, n := range nodes {
+		if n.ID == id {
+			return true
+		}
+	}
+	return false
+}

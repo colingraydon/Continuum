@@ -352,6 +352,9 @@ func main() {
 		ReadQuorum:        cfg.readQuorum,
 		ReplicaTimeout:    cfg.replicaTimeout,
 	}, hs)
+	// Serve anti-entropy sync state from the manager's incrementally-maintained
+	// Merkle trees instead of rescanning the store on every sync request.
+	h.SetSyncTreeProvider(ae)
 	hptr.Store(h)
 
 	go runHintExpiry(ctx, hs)

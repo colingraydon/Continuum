@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/colingraydon/continuum/internal/antientropy"
 	"github.com/colingraydon/continuum/internal/gossip"
 	"github.com/colingraydon/continuum/internal/hintstore"
 	"github.com/colingraydon/continuum/internal/merkle"
@@ -851,6 +852,60 @@ func TestGetSyncKeysInvalidBody(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", w.Code)
 	}
+}
+
+// TestSyncHandlersProviderMatchesScanFallback proves the tree-served fast path
+// and the store-scan fallback return byte-identical JSON, so installing the
+// provider changes only cost, not behavior.
+func TestSyncHandlersProviderMatchesScanFallback(t *testing.T) {
+	r := ring.NewRing(16)
+	r.AddNode("self", "localhost:8080")
+	r.AddNode("node2", "10.0.0.2")
+	r.AddNode("node3", "10.0.0.3")
+	s := store.New()
+	for i := 0; i < 40; i++ {
+		key := fmt.Sprintf("sk%03d", i)
+		if err := s.Put(key, fmt.Sprintf("v%03d", i), store.VectorClockVersion{Clocks: map[string]uint64{"w": 1}}); err != nil {
+			t.Fatalf("put %s: %v", key, err)
+		}
+	}
+	ml := gossip.NewMemberList("self", "localhost", nil)
+	h := NewHandler(r, ml, s, HandlerConfig{SelfID: "self", ReplicationFactor: 2, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, nil)
+
+	ranges := r.GetReplicaVnodeRanges("self", 2)
+	if len(ranges) == 0 {
+		t.Fatal("expected self to replicate vnodes")
+	}
+	vnode := ranges[0].End
+	stateURL := fmt.Sprintf("/sync?vnode=%d", vnode)
+	bucketURL := fmt.Sprintf("/sync/bucket-keys?vnode=%d&bucket=3", vnode)
+
+	// Scan fallback (no provider installed).
+	scanState := recordGet(t, h.GetSyncState, stateURL)
+	scanBucket := recordGet(t, h.GetSyncBucketKeys, bucketURL)
+
+	// Fast path via the real manager's maintained trees.
+	h.SetSyncTreeProvider(antientropy.New(r, s, "self", 2, time.Second))
+	provState := recordGet(t, h.GetSyncState, stateURL)
+	provBucket := recordGet(t, h.GetSyncBucketKeys, bucketURL)
+
+	if provState != scanState {
+		t.Errorf("sync-state JSON differs:\n provider: %s scan:     %s", provState, scanState)
+	}
+	if provBucket != scanBucket {
+		t.Errorf("bucket-keys JSON differs:\n provider: %s scan:     %s", provBucket, scanBucket)
+	}
+}
+
+func recordGet(t *testing.T, handler func(http.ResponseWriter, *http.Request), url string) string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	w := httptest.NewRecorder()
+	handler(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET %s: got %d: %s", url, w.Code, w.Body.String())
+	}
+	return w.Body.String()
 }
 
 // --- GetSyncBucketKeys tests ---

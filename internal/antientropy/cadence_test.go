@@ -80,7 +80,7 @@ func TestRangesEqual(t *testing.T) {
 }
 
 // TestMaybeRebuildOnMembershipChange proves the manager adapts to ring
-// changes: primary ranges computed at startup are replaced when a node
+// changes: the replicated ranges computed at startup are replaced when a node
 // joins, and the rebuilt trees track exactly the keys in the new ranges.
 func TestMaybeRebuildOnMembershipChange(t *testing.T) {
 	m, r, s := newCadenceManager(t, 8)
@@ -93,15 +93,15 @@ func TestMaybeRebuildOnMembershipChange(t *testing.T) {
 		m.Update(key, 1)
 	}
 
-	// Alone in the ring, self is primary for everything.
+	// Alone in the ring, self replicates everything.
 	if got := treeKeyCount(m); got != 20 {
 		t.Fatalf("expected all 20 keys tracked before membership change, got %d", got)
 	}
 
 	r.AddNode("other", "127.0.0.1:2")
-	fresh := r.GetPrimaryVnodeRanges("self")
+	fresh := r.GetReplicaVnodeRanges("self", 2)
 	if rangesEqual(m.ranges, fresh) {
-		t.Fatal("test setup: adding a node did not change self's primary ranges")
+		t.Fatal("test setup: adding a node did not change self's replicated ranges")
 	}
 
 	m.maybeRebuild()
@@ -114,7 +114,7 @@ func TestMaybeRebuildOnMembershipChange(t *testing.T) {
 	}
 	want := keysInRanges(fresh, 20)
 	if got := treeKeyCount(m); got != want {
-		t.Errorf("rebuilt trees track %d keys, want %d (keys inside the new primary ranges)", got, want)
+		t.Errorf("rebuilt trees track %d keys, want %d (keys inside the new replicated ranges)", got, want)
 	}
 
 	// A second call with an unchanged ring must be a no-op comparison.
