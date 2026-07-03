@@ -103,7 +103,46 @@ func (g *Gossiper) handleMessage(msg *GossipMessage) {
 	switch msg.Type {
 	case MessagePushPull:
 		g.memberList.Merge(msg.Members)
+		if msg.WantReply {
+			g.replyTo(msg)
+		}
 	}
+}
+
+// replyTo answers a WantReply message (a bootstrap) by pushing our full member
+// list back to the sender. The reply itself carries WantReply=false, so it
+// never triggers a reply of its own — a bootstrap is at most two datagrams per
+// seed. The sender needs this because peers that marked it dead have stopped
+// gossiping to it; the reply is how it relearns the cluster and sees the stale
+// entry it must refute.
+func (g *Gossiper) replyTo(msg *GossipMessage) {
+	addr := g.senderGossipAddr(msg)
+	if addr == "" {
+		return
+	}
+	reply := &GossipMessage{
+		Type:    MessagePushPull,
+		From:    g.selfID,
+		Members: g.memberList.GetAll(),
+	}
+	if err := g.transport.Send(addr, reply); err != nil {
+		log.Printf("failed to reply to bootstrap from %s: %v", msg.From, err)
+	}
+}
+
+// senderGossipAddr resolves the UDP address to reply to. The sender knows its
+// own gossip address best, so prefer its self-entry in the message; fall back
+// to whatever we have recorded for it, and give up if we know neither.
+func (g *Gossiper) senderGossipAddr(msg *GossipMessage) string {
+	for _, m := range msg.Members {
+		if m.ID == msg.From {
+			return g.peerGossipAddr(m)
+		}
+	}
+	if m, ok := g.memberList.Get(msg.From); ok {
+		return g.peerGossipAddr(m)
+	}
+	return ""
 }
 
 func (g *Gossiper) staleLoop(ctx context.Context) {
@@ -184,9 +223,10 @@ func (g *Gossiper) NotifyDead() {
 func (g *Gossiper) Bootstrap(seedNodes []string) {
 	members := g.memberList.GetAll()
 	msg := &GossipMessage{
-		Type:    MessagePushPull,
-		From:    g.selfID,
-		Members: members,
+		Type:      MessagePushPull,
+		From:      g.selfID,
+		WantReply: true,
+		Members:   members,
 	}
 
 	for _, addr := range seedNodes {

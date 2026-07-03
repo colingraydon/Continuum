@@ -33,13 +33,20 @@ func (s MemberStatus) String() string {
 }
 
 type Member struct {
-	ID            string
-	Address       string
+	ID      string
+	Address string
 	// GossipAddr is the UDP address this member receives gossip on. Empty for
 	// members that predate the field or were registered without one; senders
 	// fall back to the member's host on their own gossip port (the legacy
 	// same-port-everywhere assumption, which holds in the Docker setup).
-	GossipAddr    string
+	GossipAddr string
+	// Incarnation is the node's epoch, advanced only by the node itself — on a
+	// restart via refutation, or to refute a suspect/dead claim (see
+	// refuteSelf). It is the primary precedence key in Merge; Heartbeat only
+	// breaks ties within the same incarnation. This is what lets a
+	// crash-restarted node, whose heartbeat resets to zero, reclaim its
+	// identity without waiting to out-count its pre-crash heartbeat.
+	Incarnation   uint64
 	Heartbeat     uint64
 	UpdatedAt     time.Time
 	Status        MemberStatus
@@ -48,10 +55,14 @@ type Member struct {
 }
 
 type MemberList struct {
-	mu      sync.RWMutex
-	members map[string]*Member
-	self    *Member
+	mu       sync.RWMutex
+	members  map[string]*Member
+	self     *Member
 	onChange func(member *Member, status MemberStatus)
+	// persistIncarnation, if set, is called (outside mu) whenever this node
+	// advances its own incarnation, so the new epoch can be durably recorded
+	// before it is gossiped onward. See SetIncarnationSink.
+	persistIncarnation func(uint64)
 }
 
 func NewMemberList(selfID, selfAddress string, onChange func(member *Member, status MemberStatus)) *MemberList {
@@ -101,6 +112,30 @@ func (ml *MemberList) IncrementHeartbeat() {
 	ml.self.UpdatedAt = time.Now()
 }
 
+// SetSelfIncarnation sets this node's incarnation (epoch). Used at startup to
+// restore a persisted incarnation so a crash-restarted node's gossip
+// immediately supersedes the stale entry peers remember, rather than depending
+// on receiving an inbound refutation trigger. Advancing the incarnation is by
+// itself enough for peers to accept the update; no heartbeat bump is needed.
+func (ml *MemberList) SetSelfIncarnation(v uint64) {
+	ml.mu.Lock()
+	defer ml.mu.Unlock()
+	ml.self.Incarnation = v
+	ml.self.UpdatedAt = time.Now()
+}
+
+// SetIncarnationSink registers a callback invoked, outside the member lock,
+// whenever this node advances its own incarnation via refutation — so the new
+// epoch can be persisted before it is gossiped onward. Persisting outside the
+// lock keeps a slow fsync off the gossip path; the small window where the
+// advance is in memory but not yet on disk falls back to refutation, since a
+// value that was never gossiped cannot have been remembered by any peer.
+func (ml *MemberList) SetIncarnationSink(fn func(uint64)) {
+	ml.mu.Lock()
+	defer ml.mu.Unlock()
+	ml.persistIncarnation = fn
+}
+
 func (ml *MemberList) notifyMemberChange(m *Member, ok bool, prevStatus MemberStatus, wasBootstrapping bool) {
 	if ml.onChange == nil {
 		return
@@ -112,16 +147,49 @@ func (ml *MemberList) notifyMemberChange(m *Member, ok bool, prevStatus MemberSt
 	}
 }
 
+// supersedes reports whether the incoming view of a member should replace the
+// one we currently hold. Incarnation dominates; heartbeat only breaks ties
+// within the same incarnation. Heartbeat advances once per gossip round and
+// signals liveness, but it resets to zero on restart, so it cannot be the
+// primary key — otherwise a rejoined node's fresh state would lose to the stale
+// entry peers remember until it counted all the way back up.
+func supersedes(incoming, existing *Member) bool {
+	if incoming.Incarnation != existing.Incarnation {
+		return incoming.Incarnation > existing.Incarnation
+	}
+	return incoming.Heartbeat > existing.Heartbeat
+}
+
+// refuteSelf reacts to gossip that carries this node's own state. After a
+// crash-restart the node's incarnation is back at zero while peers still hold
+// its pre-crash (higher) incarnation, and peers may be spreading a suspect or
+// dead claim about it. In either case the node advances its incarnation just
+// past the stale value and keeps asserting Alive, so its next gossip round
+// supersedes the stale entry within a round or two instead of waiting to
+// out-count a pre-crash heartbeat. Must be called with ml.mu held.
+func (ml *MemberList) refuteSelf(incoming *Member) {
+	switch {
+	case incoming.Incarnation > ml.self.Incarnation:
+		ml.self.Incarnation = incoming.Incarnation + 1
+	case incoming.Incarnation == ml.self.Incarnation && incoming.Status != MemberAlive:
+		ml.self.Incarnation++
+	default:
+		return
+	}
+	ml.self.UpdatedAt = time.Now()
+}
+
 func (ml *MemberList) Merge(incoming []*Member) {
 	ml.mu.Lock()
-	defer ml.mu.Unlock()
 
+	beforeInc := ml.self.Incarnation
 	for _, m := range incoming {
 		if m.ID == ml.self.ID {
+			ml.refuteSelf(m)
 			continue
 		}
 		existing, ok := ml.members[m.ID]
-		if !ok || m.Heartbeat > existing.Heartbeat {
+		if !ok || supersedes(m, existing) {
 			wasBootstrapping := ok && existing.Bootstrapping
 			prevStatus := MemberAlive
 			if ok {
@@ -133,6 +201,15 @@ func (ml *MemberList) Merge(incoming []*Member) {
 			ml.members[m.ID] = m
 			ml.notifyMemberChange(m, ok, prevStatus, wasBootstrapping)
 		}
+	}
+	afterInc := ml.self.Incarnation
+	sink := ml.persistIncarnation
+	ml.mu.Unlock()
+
+	// Persist a refutation-driven advance before it propagates. Done outside
+	// the lock so the fsync does not stall concurrent membership reads.
+	if sink != nil && afterInc != beforeInc {
+		sink(afterInc)
 	}
 }
 

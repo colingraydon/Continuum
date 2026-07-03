@@ -95,12 +95,16 @@ system behaviors, not test artifacts:
    primary for the whole keyspace forever; ranges do not adapt when nodes
    join or leave. Today this only over-syncs, but it will matter for any
    feature that relies on accurate primary ownership.
-3. **A rejoining node's heartbeat restarts at zero**, so peers that remember
-   its pre-crash heartbeat ignore its gossip until the counter catches up
-   (roughly its previous uptime in seconds). The harness re-registers
-   restarted nodes via `POST /nodes` to reset the stored entry; production
-   rejoin after crash relies on the same catch-up or on re-registration.
-   SWIM-style incarnation numbers would remove the wedge.
+3. **A rejoining node's heartbeat restarts at zero** — *fixed by SWIM-style
+   incarnation numbers.* Previously peers that remembered a node's pre-crash
+   heartbeat ignored its gossip until the counter caught up (roughly its
+   previous uptime in seconds). Now each node carries an incarnation epoch that
+   dominates heartbeat when merging; on restart the node refutes its stale
+   entry by advancing its incarnation past what peers remember, and a seed
+   bootstrap reply guarantees a node buried as `dead` still receives the gossip
+   it needs to refute. See [Incarnation Numbers](gossip.md#incarnation-numbers).
+   The harness still re-registers restarted nodes via `POST /nodes`, which now
+   only speeds up an already-correct convergence.
 4. **Write quorum clamps to the live replica set** (`min(W, len(replicas))`).
    Once gossip removes dead members from the ring, a 3-node cluster that lost
    two nodes acknowledges single-copy writes. W is a consistency knob against

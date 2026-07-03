@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/colingraydon/continuum/internal/store"
@@ -18,6 +20,7 @@ import (
 // On-disk layout under DATA_DIR:
 //
 //   meta.json               identity + last_clean_shutdown + latest_seq
+//   incarnation             this node's gossip epoch, advanced on each restart
 //   tables/NNNNNNNN.sst     immutable SSTables, named by the WAL sequence
 //                           they cover (highest = replay skip threshold)
 //   tables/NNNNNNNN.sst.tmp in-flight flush (cleaned at startup)
@@ -29,12 +32,13 @@ import (
 // recoverStore() runs on startup. finalize() runs on graceful shutdown.
 
 const (
-	metaFile      = "meta.json"
-	snapDirName   = "snap"
-	walDirName    = "wal"
-	tablesDirName = "tables"
-	snapSuffix    = ".snap"
-	snapTmpSuffix = ".snap.tmp"
+	metaFile        = "meta.json"
+	snapDirName     = "snap"
+	walDirName      = "wal"
+	tablesDirName   = "tables"
+	snapSuffix      = ".snap"
+	snapTmpSuffix   = ".snap.tmp"
+	incarnationFile = "incarnation"
 )
 
 type persistMeta struct {
@@ -291,6 +295,65 @@ func fsyncDir(path string) error {
 	}
 	defer func() { _ = f.Close() }()
 	return f.Sync()
+}
+
+// incarnationStore persists this node's gossip incarnation (epoch) across
+// restarts, Cassandra-generation style. Refutation lets a crash-restarted node
+// relearn its epoch from what peers remember, but that needs an inbound gossip
+// a node buried as dead might never receive. A persisted incarnation makes the
+// node self-sufficient: on restart it loads the last value, advances past it,
+// and its very first gossip already dominates any stale entry — no peer round
+// trip required. The file holds a single decimal uint64.
+type incarnationStore struct {
+	path string
+	mu   sync.Mutex
+}
+
+func newIncarnationStore(dataDir string) *incarnationStore {
+	return &incarnationStore{path: filepath.Join(dataDir, incarnationFile)}
+}
+
+// load returns the last persisted incarnation, or 0 if none is stored yet or
+// the file is missing/unreadable/corrupt — all treated as a fresh start, which
+// is safe because a lower-than-remembered value simply falls back to refutation.
+func (s *incarnationStore) load() uint64 {
+	data, err := os.ReadFile(s.path)
+	if err != nil {
+		return 0
+	}
+	v, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+// store atomically persists v (temp + fsync + rename + dir fsync) so a crash
+// mid-write cannot leave a torn value.
+func (s *incarnationStore) store(v uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tmp := s.path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString(strconv.FormatUint(v, 10)); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, s.path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return fsyncDir(filepath.Dir(s.path))
 }
 
 func findLatestSnapshot(snapDir string) (string, error) {
