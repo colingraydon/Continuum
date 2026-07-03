@@ -45,6 +45,20 @@ jobs:
       - name: E2E (process-based)
         run: go test -v -tags e2e -timeout 120s ./tests/e2e/...
 
+  fault-injection:
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+      - name: Download dependencies
+        run: go mod download
+      - name: Fault injection (process-based)
+        run: go test -v -tags fault -timeout 900s ./tests/fault/...
+
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -59,7 +73,7 @@ jobs:
 
   docker:
     runs-on: ubuntu-latest
-    needs: [test, e2e-integration, lint]
+    needs: [test, e2e-integration, fault-injection, lint]
     steps:
       - uses: actions/checkout@v7
       - name: Build Docker image

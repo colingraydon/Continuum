@@ -1,10 +1,11 @@
 # SSTable
 
-> **Status: wired in (phases 1–3).** `internal/sstable` is the on-disk table
-> format; the store flushes its memtable to tables on a size threshold and
+> **Status: complete (phases 1–4).** `internal/sstable` is the on-disk table
+> format; the store flushes its memtable to tables on a size threshold,
 > serves merged reads across memtable + tables (see
-> [docs/persistence.md](persistence.md) for the flush/recovery flows).
-> Compaction (phase 4) is next. See [Roadmap](#roadmap).
+> [docs/persistence.md](persistence.md) for the flush/recovery flows), and
+> runs size-tiered compaction with a manifest for atomic table swaps. See
+> [Roadmap](#roadmap).
 
 ## Why
 
@@ -139,6 +140,6 @@ guess.
    memtable without table-aware reads would lose data)* — `Get` walks
    generations newest-first; `KeyHashes` and Merkle rebuild scan tables;
    evict markers shadow migrated-away keys.
-4. **Compaction** — size-tiered (Cassandra's default), folding in
+4. **Compaction** *(done)* — size-tiered (Cassandra's default), folding in
    tombstone GC and evict-marker purge; introduces a manifest for the
    atomic N-tables-to-one swap.

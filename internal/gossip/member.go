@@ -35,6 +35,11 @@ func (s MemberStatus) String() string {
 type Member struct {
 	ID            string
 	Address       string
+	// GossipAddr is the UDP address this member receives gossip on. Empty for
+	// members that predate the field or were registered without one; senders
+	// fall back to the member's host on their own gossip port (the legacy
+	// same-port-everywhere assumption, which holds in the Docker setup).
+	GossipAddr    string
 	Heartbeat     uint64
 	UpdatedAt     time.Time
 	Status        MemberStatus
@@ -65,6 +70,17 @@ func NewMemberList(selfID, selfAddress string, onChange func(member *Member, sta
 	}
 	ml.members[selfID] = self
 	return ml
+}
+
+// SetSelfGossipAddr sets the UDP address this node advertises for gossip and
+// increments its heartbeat so the change propagates to peers. Without it,
+// peers assume this node listens on the same gossip port they do.
+func (ml *MemberList) SetSelfGossipAddr(addr string) {
+	ml.mu.Lock()
+	defer ml.mu.Unlock()
+	ml.self.GossipAddr = addr
+	ml.self.Heartbeat++
+	ml.self.UpdatedAt = time.Now()
 }
 
 // SetSelfWeight sets this node's capacity weight and increments its heartbeat so
@@ -195,13 +211,21 @@ func (ml *MemberList) MarkDead(id string) {
 }
 
 func (ml *MemberList) Add(id, address string) {
+	ml.AddWithGossip(id, address, "")
+}
+
+// AddWithGossip registers a member along with the UDP address it receives
+// gossip on. An empty gossipAddr leaves senders on the legacy assumption that
+// the member shares their gossip port.
+func (ml *MemberList) AddWithGossip(id, address, gossipAddr string) {
 	ml.mu.Lock()
 	m := &Member{
-		ID:        id,
-		Address:   address,
-		Heartbeat: 0,
-		UpdatedAt: time.Now(),
-		Status:    MemberAlive,
+		ID:         id,
+		Address:    address,
+		GossipAddr: gossipAddr,
+		Heartbeat:  0,
+		UpdatedAt:  time.Now(),
+		Status:     MemberAlive,
 	}
 	ml.members[id] = m
 	onChange := ml.onChange

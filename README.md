@@ -106,6 +106,7 @@ curl http://localhost:8080/keys/user:123
 ```bash
 make test      # unit and integration tests
 make e2e       # end-to-end tests (spawns real processes)
+make fault     # fault-injection suite (kills, hangs, partitions, packet loss)
 make bench     # benchmarks
 make lint      # golangci-lint
 make coverage  # HTML coverage report
@@ -127,6 +128,7 @@ make coverage  # HTML coverage report
 | [SSTable](docs/sstable.md) | Immutable sorted table format: data blocks, sparse index, bloom filter, LSM roadmap |
 | [Read Repair](docs/read-repair.md) | Async repair, always-repair-on-conflict, X-Proxied-From path reuse |
 | [Data Migration](docs/data-migration.md) | Pull on join, push on leave, bootstrapping state machine |
+| [Fault Injection](docs/fault-injection.md) | Process-level fault harness: proxies, kill/hang/partition scenarios, durability and convergence invariants |
 | [API Reference](docs/api.md) | All endpoints with request/response examples and internal headers |
 | [Operations](docs/operations.md) | Env vars, Docker setup, Makefile targets, Prometheus metrics |
 | [Benchmarks](docs/benchmarks.md) | Hash ring throughput and latency measurements |
@@ -136,5 +138,12 @@ make coverage  # HTML coverage report
 ## What's Next
 
 - **Benchmark coverage** - store, anti-entropy, gossip, and end-to-end latency benchmarks, including before/after numbers for group commit
-- **Fault-injection harness** - drive the cluster under partitions and node kills, asserting quorum durability and convergence invariants
 - **Sharded store** - split the single store mutex into 256 shards to unlock parallel replay and parallel snapshot iteration
+- **Anti-entropy cadence** - the sync loop repairs one random vnode per round, so keyspace repair time scales with vnode count; cycle deterministically and rebuild primary ranges on membership change (found by the [fault harness](docs/fault-injection.md#findings-the-harness-surfaced))
+- **Gossip incarnation numbers** - a rejoining node's heartbeat restarts at zero, so peers ignore its gossip until it outruns its pre-crash counter; SWIM-style incarnations would fix crash rejoin (also a fault-harness finding)
+- **Incremental Merkle state** - replicas currently recompute sync-state bucket hashes with a full `KeyHashes` scan on every anti-entropy request, which is O(total data) per sync now that the dataset is disk-resident; maintain persistent, incrementally updated per-vnode Merkle trees on all nodes instead
+- **Streaming bootstrap and decommission** - node join pulls keys as one JSON batch per bucket and graceful shutdown materializes the entire dataset in memory for a single push per successor; replace both with chunked, resumable streaming so migration survives datasets larger than RAM
+- **Sloppy quorum** - writes fan out only to the strict replica set, so a write is rejected when W of them are down even if healthy nodes exist; walk past failed replicas to the next healthy nodes on the ring, with hints marking the intended owner (the Dynamo "always writable" property)
+- **Range scans** - SSTables are sorted and a k-way merge already exists in compaction, but nothing exposes ordered iteration; add a merged range iterator across memtable and tables, then a scatter-gather `GET /keys?prefix=` across vnodes
+- **Per-request consistency levels** - R and W are fixed at process start; let clients pick ONE / QUORUM / ALL per request
+- **SSTable block compression and block cache** - reads past the bloom filter hit the filesystem on every probe

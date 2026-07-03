@@ -159,6 +159,9 @@ func (h *Handler) FlushHints() {
 type AddNodeRequest struct {
 	ID      string `json:"id"`
 	Address string `json:"address"`
+	// GossipAddress is the UDP address the node receives gossip on. Optional;
+	// when empty, peers assume the node shares their gossip port.
+	GossipAddress string `json:"gossip_address,omitempty"`
 }
 
 // SiblingResponse is a single causally-distinct value returned when concurrent
@@ -387,7 +390,7 @@ func (h *Handler) AddNode(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "id and address are required", http.StatusBadRequest)
 		return
 	}
-	h.memberList.Add(body.ID, body.Address)
+	h.memberList.AddWithGossip(body.ID, body.Address, body.GossipAddress)
 	w.WriteHeader(http.StatusCreated)
 	node := NodeResponse{ID: body.ID, Address: body.Address, Status: "alive"}
 	if err := json.NewEncoder(w).Encode(node); err != nil {

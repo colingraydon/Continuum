@@ -46,11 +46,11 @@ On `SIGINT` or `SIGTERM`, before draining in-flight HTTP requests, the coordinat
 | Hint TTL | 1 hour | Anti-entropy repairs anything missed within 2 sync cycles |
 | Expiry check | Every 5 minutes | Runs in a background goroutine alongside the main server loop |
 
-The hint store is entirely in-memory. If the coordinator restarts before delivering hints, those hints are lost. The residual risk is a node that recovers after the coordinator that held its hints has restarted. In that case, the replica relies on anti-entropy for repair - the same guarantee that existed before hinted handoff was added.
+With `DATA_DIR` set, the hint store is backed by its own append-only log (layered on the shared segmented WAL: CRC framing, torn-tail recovery, group commit). Every stored hint is logged before it is buffered, drains and evictions append REMOVE records, and the log is periodically compacted to one STORE record per live hint. On restart the log is replayed to rebuild the buffer, dropping hints already older than the TTL. Without `DATA_DIR` the store is memory-only and hints are lost on restart, falling back to anti-entropy - the same guarantee that existed before hinted handoff was added.
 
 > **Failure Mode - Coordinator Restart**
 >
-> In-memory hints are lost on coordinator restart. Any key whose hint was lost will be repaired by anti-entropy within the next sync cycle (up to 30 seconds). The window of inconsistency is bounded by the anti-entropy interval, not the hint TTL. For persistent durability of hints, a write-ahead log would be needed.
+> With persistence enabled, buffered hints survive a coordinator crash: the hint log is replayed on startup and delivery resumes when the target node is next seen alive. In memory-only mode, hints are lost on restart and any affected key is repaired by anti-entropy within the next sync cycle (up to 30 seconds), so the window of inconsistency is bounded by the anti-entropy interval, not the hint TTL.
 
 > **Failure Mode - Hint Buffer Full**
 >

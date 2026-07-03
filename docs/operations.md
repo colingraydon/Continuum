@@ -7,13 +7,16 @@
 | Variable | Default | Description |
 | -------- | ------- | ----------- |
 | `SELF_ID` | value of `SELF_ADDRESS` | Node identifier used in vector clocks, gossip, and logs |
-| `SELF_ADDRESS` | `localhost:8080` | HTTP address the node binds to and advertises to peers |
-| `GOSSIP_PORT` | `8081` | UDP port for gossip messages |
+| `SELF_ADDRESS` | `localhost:8080` | HTTP address the node advertises to peers (and binds, unless `HTTP_BIND_PORT` is set) |
+| `HTTP_BIND_PORT` | port of `SELF_ADDRESS` | Port the HTTP listener actually binds. Set when the advertised address differs from the local listener (NAT, port mapping, fault-injection proxies) |
+| `GOSSIP_PORT` | `8081` | UDP port the gossip listener binds |
+| `GOSSIP_ADVERTISE_ADDR` | host of `SELF_ADDRESS` + `GOSSIP_PORT` | UDP address peers send gossip to. Set when nodes use heterogeneous gossip ports (local multi-process clusters) or sit behind port mapping |
 | `REPLICAS` | `150` | Virtual nodes per physical node |
 | `REPLICATION_FACTOR` | `3` | Number of replicas per key |
 | `WRITE_QUORUM` | majority (`RF/2 + 1`) | Replica acks required before returning 204 |
 | `READ_QUORUM` | majority (`RF/2 + 1`) | Replica responses required for a consistent read |
 | `REPLICA_TIMEOUT_MS` | `500` | Timeout in milliseconds for inter-node replication and read calls |
+| `SYNC_INTERVAL_MS` | `30000` | Interval between anti-entropy sync rounds |
 | `SEED_NODES` | (none) | Comma-separated HTTP addresses to bootstrap from on first join |
 | `SELF_WEIGHT` | `1.0` | Capacity weight for vnode allocation; `2.0` gives twice the vnodes |
 | `DATA_DIR` | (none) | Directory for WAL + SSTable persistence. Empty disables persistence (memory-only) |
