@@ -101,6 +101,14 @@ Ranges were previously computed once at startup, so a node that started alone co
 
 **Tradeoff:** A rebuild discards incremental tree state and rescans the store, which is O(total data). A future refinement could diff the old and new range sets and move only the affected keys.
 
+### Tree Snapshots on Clean Shutdown
+
+**Choice:** With `DATA_DIR` set, graceful shutdown writes the trees to `merkle.json` (atomically, the same temp-fsync-rename commit the table manifest uses), stamped with the store's applied WAL sequence and the range set they cover. Startup restores the snapshot instead of scanning every table - but only when its sequence matches the store's recovered `LastSeq` exactly. Any mismatch, corruption, or absence falls back to the full rebuild.
+
+The sequence check is the safety argument: WAL-tail replay deliberately suppresses the `onUpdate` callbacks that keep trees current, so a snapshot taken before a crash would silently miss whatever the tail replayed. Matching sequences mean the store state is byte-identical to what the trees were built against. The snapshot also carries the topology (ranges and sync order) it was built under; once gossip re-converges to the same membership, the per-tick range comparison passes and nothing rescans, while a genuinely changed topology triggers the usual rebuild.
+
+**Tradeoff:** Only clean restarts get the O(load) fast path - crash recovery rebuilds exactly as before (correct, just not faster). Startup restore cost is proportional to key count (~120 ns per key to replay pairs into trees), not to table bytes.
+
 ## See Also
 
 - [Ring](ring.md) - provides vnode ranges and replica sets

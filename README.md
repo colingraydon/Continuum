@@ -143,7 +143,6 @@ make coverage  # HTML coverage report
 
 - **SSTable block compression and block cache** - reads past the bloom filter hit the filesystem on every probe (~2.7 µs/read baseline, see [benchmarks](docs/benchmarks.md))
 - **Skiplist memtable** - the memtable is a hash map, so scans sort matching keys per call; a skiplist makes writes ordered and scans cheap
-- **Merkle tree persistence** - trees rebuild from a full store scan on startup; persisting them alongside the tables would make restart cost O(1)
 - **Sharded store** - split the single store mutex into 256 shards; partially superseded by the LSM engine, so benchmark first to see whether it still pays
 - **Streaming bootstrap and decommission** - node join pulls keys as one JSON batch per bucket and graceful shutdown materializes the entire dataset in memory for a single push per successor; replace both with chunked, resumable streaming so migration survives datasets larger than RAM
 
