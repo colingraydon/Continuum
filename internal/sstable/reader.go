@@ -167,6 +167,25 @@ func (r *Reader) Iter() *Iterator {
 	return &Iterator{r: r}
 }
 
+// IterFrom returns an iterator positioned before the first entry with
+// key >= start, using the block index to skip earlier blocks (the same
+// binary search Get uses). A nil or empty start behaves like Iter.
+func (r *Reader) IterFrom(start []byte) *Iterator {
+	if len(start) == 0 {
+		return r.Iter()
+	}
+	// Find the last block whose first key is <= start; earlier blocks cannot
+	// contain entries >= start unless start precedes the whole table, in
+	// which case the scan begins at block 0 and the seek skip is a no-op.
+	i := sort.Search(len(r.index), func(i int) bool {
+		return bytes.Compare(r.index[i].firstKey, start) > 0
+	}) - 1
+	if i < 0 {
+		i = 0
+	}
+	return &Iterator{r: r, blockIdx: i, seek: start}
+}
+
 // Iterator walks a table's entries in key order:
 //
 //	it := r.Iter()
@@ -182,6 +201,7 @@ type Iterator struct {
 	block    []byte
 	pos      int
 	key, val []byte
+	seek     []byte // skip entries with key < seek; cleared once reached
 	err      error
 }
 
@@ -215,6 +235,12 @@ func (it *Iterator) Next() bool {
 			return false
 		}
 		it.pos += n
+		if it.seek != nil {
+			if bytes.Compare(k, it.seek) < 0 {
+				continue
+			}
+			it.seek = nil
+		}
 		it.key, it.val = k, v
 		return true
 	}
