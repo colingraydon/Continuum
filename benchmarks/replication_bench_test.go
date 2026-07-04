@@ -73,18 +73,14 @@ func (c *benchCluster) put(b *testing.B, key, consistency string) {
 	if err != nil {
 		b.Fatalf("PUT: %v", err)
 	}
-	drainClose(resp)
+	defer resp.Body.Close()
+	// Drain before close so the connection returns to the keep-alive pool;
+	// otherwise every request opens a fresh socket and the benchmark exhausts
+	// ephemeral ports.
+	_, _ = io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode != http.StatusNoContent {
 		b.Fatalf("PUT %s: got %d", key, resp.StatusCode)
 	}
-}
-
-// drainClose consumes the response body before closing so the underlying
-// connection returns to the keep-alive pool. Without this, every request
-// opens a fresh socket and the benchmark exhausts ephemeral ports.
-func drainClose(resp *http.Response) {
-	_, _ = io.Copy(io.Discard, resp.Body)
-	_ = resp.Body.Close()
 }
 
 func (c *benchCluster) get(b *testing.B, key, consistency string) {
@@ -94,7 +90,8 @@ func (c *benchCluster) get(b *testing.B, key, consistency string) {
 	if err != nil {
 		b.Fatalf("GET: %v", err)
 	}
-	drainClose(resp)
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body) // drain: see put
 	if resp.StatusCode != http.StatusOK {
 		b.Fatalf("GET %s: got %d", key, resp.StatusCode)
 	}
@@ -141,13 +138,21 @@ func BenchmarkClusterScanPage(b *testing.B) {
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		resp, err := http.Get(c.servers[0].URL + "/keys?prefix=skey-&limit=100")
-		if err != nil {
-			b.Fatalf("scan: %v", err)
-		}
-		drainClose(resp)
-		if resp.StatusCode != http.StatusOK {
-			b.Fatalf("scan: got %d", resp.StatusCode)
-		}
+		c.scanPage(b)
+	}
+}
+
+// scanPage fetches one coordinator scan page. Separate from the loop so the
+// deferred body close runs per call rather than accumulating across b.N.
+func (c *benchCluster) scanPage(b *testing.B) {
+	b.Helper()
+	resp, err := http.Get(c.servers[0].URL + "/keys?prefix=skey-&limit=100")
+	if err != nil {
+		b.Fatalf("scan: %v", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body) // drain: see put
+	if resp.StatusCode != http.StatusOK {
+		b.Fatalf("scan: got %d", resp.StatusCode)
 	}
 }
