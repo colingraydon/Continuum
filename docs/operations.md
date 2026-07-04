@@ -13,10 +13,11 @@
 | `GOSSIP_ADVERTISE_ADDR` | host of `SELF_ADDRESS` + `GOSSIP_PORT` | UDP address peers send gossip to. Set when nodes use heterogeneous gossip ports (local multi-process clusters) or sit behind port mapping |
 | `REPLICAS` | `150` | Virtual nodes per physical node |
 | `REPLICATION_FACTOR` | `3` | Number of replicas per key |
-| `WRITE_QUORUM` | majority (`RF/2 + 1`) | Replica acks required before returning 204 |
-| `READ_QUORUM` | majority (`RF/2 + 1`) | Replica responses required for a consistent read |
+| `WRITE_QUORUM` | majority (`RF/2 + 1`) | Replica acks required before returning 204; overridable per request with `?consistency=` |
+| `READ_QUORUM` | majority (`RF/2 + 1`) | Replica responses required for a consistent read; overridable per request with `?consistency=` |
 | `REPLICA_TIMEOUT_MS` | `500` | Timeout in milliseconds for inter-node replication and read calls |
 | `SYNC_INTERVAL_MS` | `30000` | Interval between anti-entropy sync rounds |
+| `HINT_DELIVERY_INTERVAL_MS` | `30000` | Interval between hint delivery sweeps to alive targets (backstops event-driven delivery) |
 | `SEED_NODES` | (none) | Comma-separated HTTP addresses to bootstrap from on first join |
 | `SELF_WEIGHT` | `1.0` | Capacity weight for vnode allocation; `2.0` gives twice the vnodes |
 | `DATA_DIR` | (none) | Directory for WAL + SSTable persistence. Empty disables persistence (memory-only) |

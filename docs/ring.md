@@ -42,6 +42,8 @@ A node with `SELF_WEIGHT=2.0` gets twice as many vnodes as a default node and ha
 
 `GetReplicationNodes(key, n)` returns N distinct physical nodes clockwise from a key's ring position. It walks forward through vnodes, collecting physical nodes, skipping vnodes that belong to already-collected nodes, until N distinct nodes are found or the ring is exhausted.
 
+`GetHealthyReplicationNodes(key, n)` is the sloppy-quorum variant the coordinator read/write paths use: the same walk, but nodes failing the health filter are skipped in favor of the next healthy nodes, and the skipped nodes are returned separately as the intended owners to hint. With no health filter installed it behaves identically to `GetReplicationNodes`.
+
 ### Key Counters
 
 Each physical node carries an atomic `int64` key counter. It increments on each successful single-node lookup (`GetNode`); the replica-set walk (`GetReplicationNodes`) does not touch it. The counter is discarded along with the node when it is removed from the ring. These feed the `/stats` load distribution report and the Prometheus variance gauge.
@@ -91,6 +93,6 @@ The ring receives a callback at construction time. On every topology change, it 
 ## See Also
 
 - [Gossip](gossip.md) - fires `AddWeightedNode` and `RemoveNode` on membership changes
-- [Replication](replication.md) - calls `GetReplicationNodes` to build replica sets for reads and writes
+- [Replication](replication.md) - calls `GetHealthyReplicationNodes` to build replica sets for reads and writes
 - [Anti-Entropy](antientropy.md) - queries the ring for vnode ranges to sync
 - [Operations](operations.md) - `REPLICAS` and `SELF_WEIGHT` env vars
