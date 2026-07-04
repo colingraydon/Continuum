@@ -596,3 +596,87 @@ func TestProcessGracefulShutdown(t *testing.T) {
 		t.Error("expected connection refused after shutdown, but got a response")
 	}
 }
+
+// scanPage fetches one page of GET /keys?prefix= from n as coordinator.
+func (n *testNode) scanPage(t *testing.T, prefix, after string, limit int) (keys []string, next string) {
+	t.Helper()
+	url := fmt.Sprintf("%s/keys?prefix=%s&after=%s&limit=%d", n.baseURL, prefix, after, limit)
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("GET /keys scan on %s: %v", n.id, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("scan on %s: got %d", n.id, resp.StatusCode)
+	}
+	var body struct {
+		Items []struct {
+			Key string `json:"key"`
+		} `json:"items"`
+		Next string `json:"next"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode scan response: %v", err)
+	}
+	for _, it := range body.Items {
+		keys = append(keys, it.Key)
+	}
+	return keys, body.Next
+}
+
+// scanAll pages through the prefix until the cursor is exhausted.
+func (n *testNode) scanAll(t *testing.T, prefix string, limit int) []string {
+	t.Helper()
+	var all []string
+	after := ""
+	for {
+		keys, next := n.scanPage(t, prefix, after, limit)
+		all = append(all, keys...)
+		if next == "" {
+			return all
+		}
+		after = next
+	}
+}
+
+// TestProcessPrefixScan drives the scatter-gather scan end to end: keys
+// written through different coordinators, one deleted, then paginated
+// GET /keys?prefix= from two different coordinators must agree on the sorted
+// live key set.
+func TestProcessPrefixScan(t *testing.T) {
+	rf := "REPLICATION_FACTOR=3"
+	wq := "WRITE_QUORUM=3" // all nodes ack, so scans see every key immediately
+	rq := "READ_QUORUM=1"
+
+	n1 := startNode(t, rf, wq, rq)
+	n2 := startNode(t, rf, wq, rq)
+	n3 := startNode(t, rf, wq, rq)
+	mesh(t, n1, n2, n3)
+
+	coordinators := []*testNode{n1, n2, n3}
+	for i := 0; i < 6; i++ {
+		key := fmt.Sprintf("scan-k%02d", i)
+		if code := coordinators[i%3].put(t, key, "v"); code != http.StatusNoContent {
+			t.Fatalf("put %s: got %d", key, code)
+		}
+	}
+	if code := coordinators[0].put(t, "unrelated", "v"); code != http.StatusNoContent {
+		t.Fatalf("put unrelated: got %d", code)
+	}
+	if code := n2.delete(t, "scan-k03"); code != http.StatusNoContent {
+		t.Fatalf("delete scan-k03: got %d", code)
+	}
+
+	want := []string{"scan-k00", "scan-k01", "scan-k02", "scan-k04", "scan-k05"}
+	for _, coordinator := range []*testNode{n1, n3} {
+		got := coordinator.scanAll(t, "scan-", 2) // small pages exercise the cursor
+		if len(got) != len(want) {
+			t.Fatalf("scan via %s = %v, want %v", coordinator.id, got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("scan via %s = %v, want %v", coordinator.id, got, want)
+			}
+		}
+	}
+}

@@ -127,6 +127,7 @@ make coverage  # HTML coverage report
 | [Persistence](docs/persistence.md) | WAL framing, snapshot format, recovery flow, downtime gate |
 | [SSTable](docs/sstable.md) | Immutable sorted table format: data blocks, sparse index, bloom filter, LSM roadmap |
 | [Read Repair](docs/read-repair.md) | Async repair, always-repair-on-conflict, X-Proxied-From path reuse |
+| [Range Scans](docs/range-scans.md) | Merged LSM prefix scan per node, scatter-gather coordinator, pagination horizon |
 | [Data Migration](docs/data-migration.md) | Pull on join, push on leave, bootstrapping state machine |
 | [Fault Injection](docs/fault-injection.md) | Process-level fault harness: proxies, kill/hang/partition scenarios, durability and convergence invariants |
 | [Testing](docs/testing.md) | The full test pyramid: unit and fault-seam tests, randomized store model, in-process clusters, process E2E, fault injection |
@@ -141,5 +142,4 @@ make coverage  # HTML coverage report
 - **Benchmark coverage** - store, anti-entropy, gossip, and end-to-end latency benchmarks, including before/after numbers for group commit
 - **Sharded store** - split the single store mutex into 256 shards to unlock parallel replay and parallel snapshot iteration
 - **Streaming bootstrap and decommission** - node join pulls keys as one JSON batch per bucket and graceful shutdown materializes the entire dataset in memory for a single push per successor; replace both with chunked, resumable streaming so migration survives datasets larger than RAM
-- **Range scans** - SSTables are sorted and a k-way merge already exists in compaction, but nothing exposes ordered iteration; add a merged range iterator across memtable and tables, then a scatter-gather `GET /keys?prefix=` across vnodes
 - **SSTable block compression and block cache** - reads past the bloom filter hit the filesystem on every probe
