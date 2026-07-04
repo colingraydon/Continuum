@@ -177,7 +177,7 @@ These endpoints are used by the anti-entropy manager during background sync. The
 ```
 GET /sync?vnode=<endHash>
 ```
-Returns the Merkle tree state for the vnode range ending at `endHash`, computed on-the-fly:
+Returns the Merkle tree state for the vnode range ending at `endHash`, served from the incrementally maintained tree for that range (falling back to a store scan when no tree is held yet):
 ```json
 {
   "root": 3829104721,
@@ -211,7 +211,7 @@ Applies a batch of entries to the local store. The replica merges each entry thr
 
 ### Hinted Handoff
 
-Hint delivery has no HTTP endpoint. It is triggered internally by the gossip `onChange` callback when a node transitions to alive: the coordinator drains its buffered hints for that node and replays them as replica sub-writes (`PUT`/`DELETE /keys/:key` with `X-Proxied-From` set).
+Hint delivery has no HTTP endpoint. It is triggered internally - by the gossip `onChange` callback when a node transitions to alive, and by a periodic sweep (`HINT_DELIVERY_INTERVAL_MS`) that delivers to any currently-alive target: the coordinator drains its buffered hints for that node and replays them as replica sub-writes (`PUT`/`DELETE /keys/:key` with `X-Proxied-From` set). Hints that fail to deliver are re-buffered with their original TTL.
 
 ## Prometheus Metrics
 
