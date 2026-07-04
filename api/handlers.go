@@ -126,6 +126,15 @@ type replicaResult struct {
 	err    error
 }
 
+// nodeIDs extracts the IDs of a node slice.
+func nodeIDs(nodes []*ring.Node) []string {
+	ids := make([]string, len(nodes))
+	for i, n := range nodes {
+		ids[i] = n.ID
+	}
+	return ids
+}
+
 func cloneClocks(clocks map[string]uint64) map[string]uint64 {
 	c := make(map[string]uint64, len(clocks))
 	for k, v := range clocks {
@@ -615,7 +624,9 @@ func (h *Handler) GetNode(w http.ResponseWriter, req *http.Request) {
 
 	// Consistent read: fan out to the replica set, merge sibling sets, and
 	// return the canonical result - either a single value or a siblings list.
-	nodes := h.ring.GetReplicationNodes(key, h.replicationFactor)
+	// Reads use the same healthy walk as writes so a fallback node that took a
+	// sloppy write is included in the read set.
+	nodes, _ := h.ring.GetHealthyReplicationNodes(key, h.replicationFactor)
 	if len(nodes) == 0 {
 		http.Error(w, errNoNodes, http.StatusServiceUnavailable)
 		return
@@ -738,10 +749,13 @@ func (h *Handler) PutKey(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Quorum write: fan out to all replica nodes and wait for W acks. The
+	// Sloppy quorum write: fan out to the first RF *healthy* nodes on the ring
+	// and wait for W acks. Unhealthy replicas are skipped in favor of the next
+	// healthy nodes (so the write stays available while any W healthy nodes
+	// exist) and each skipped intended owner gets a hint for later replay. The
 	// fan-out happens even when self's ack already satisfies quorum (W=1) so
 	// replicas still receive the write without waiting on anti-entropy.
-	nodes := h.ring.GetReplicationNodes(key, h.replicationFactor)
+	nodes, skipped := h.ring.GetHealthyReplicationNodes(key, h.replicationFactor)
 	quorum := min(writeQuorum, len(nodes))
 	acks, remaining, failed, resultCh := h.quorumFanOut(nodes, quorum, func(n *ring.Node) replicaResult {
 		return replicaResult{n.ID, h.replicateToSync(n.Address, key, body.Value, version.Clocks)}
@@ -750,7 +764,7 @@ func (h *Handler) PutKey(w http.ResponseWriter, req *http.Request) {
 	if h.hintStore != nil {
 		h.bufferHints(
 			hintstore.Hint{Key: key, Value: body.Value, Clocks: version.Clocks},
-			failed, remaining, resultCh,
+			append(failed, nodeIDs(skipped)...), remaining, resultCh,
 		)
 	}
 
@@ -839,7 +853,9 @@ func (h *Handler) DeleteKey(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	nodes := h.ring.GetReplicationNodes(key, h.replicationFactor)
+	// Sloppy quorum delete: same healthy-walk semantics as PutKey, with hints
+	// for the skipped intended owners carrying the tombstone.
+	nodes, skipped := h.ring.GetHealthyReplicationNodes(key, h.replicationFactor)
 	quorum := min(writeQuorum, len(nodes))
 	acks, remaining, failed, resultCh := h.quorumFanOut(nodes, quorum, func(n *ring.Node) replicaResult {
 		return replicaResult{n.ID, h.replicateDeleteToSync(n.Address, key, version.Clocks)}
@@ -848,7 +864,7 @@ func (h *Handler) DeleteKey(w http.ResponseWriter, req *http.Request) {
 	if h.hintStore != nil {
 		h.bufferHints(
 			hintstore.Hint{Key: key, Deleted: true, Clocks: version.Clocks},
-			failed, remaining, resultCh,
+			append(failed, nodeIDs(skipped)...), remaining, resultCh,
 		)
 	}
 

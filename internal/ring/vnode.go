@@ -17,7 +17,7 @@ type VNode struct {
 }
 
 func NewTree() *Tree {
-	return &Tree {
+	return &Tree{
 		Tree: redblacktree.NewWithIntComparator(),
 	}
 }

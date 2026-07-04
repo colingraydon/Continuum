@@ -13,5 +13,5 @@ func TestNewNode(t *testing.T) {
 	// Assert
 	if node.Address != address || node.ID != id {
 		t.Errorf("Expected node %q with %q, got node with %q, %q", address, id, node.Address, node.ID)
-	} 
+	}
 }

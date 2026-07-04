@@ -399,6 +399,7 @@ func (c *cluster) heal(n *node) {
 // nodeResponse mirrors the subset of api.NodeResponse the harness asserts on.
 type nodeResponse struct {
 	ID       string            `json:"id"`
+	Status   string            `json:"status"`
 	Value    string            `json:"value"`
 	Clocks   map[string]uint64 `json:"clocks"`
 	Deleted  bool              `json:"deleted"`
@@ -456,6 +457,48 @@ func (c *cluster) put(n *node, key, value string, clocks map[string]uint64) (int
 	}
 	resp.Body.Close()
 	return resp.StatusCode, nil
+}
+
+// putConsistency is put with a per-request ?consistency= level.
+func (c *cluster) putConsistency(n *node, key, value, consistency string) (int, error) {
+	body, err := json.Marshal(struct {
+		Value string `json:"value"`
+	}{Value: value})
+	if err != nil {
+		return 0, err
+	}
+	url := n.baseURL() + "/keys/" + key + "?consistency=" + consistency
+	req, err := http.NewRequest(http.MethodPut, url, strings.NewReader(string(body)))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	resp.Body.Close()
+	return resp.StatusCode, nil
+}
+
+// memberStatus returns id's gossip status ("alive", "suspect", "dead") as seen
+// by n, or "" when n does not list it.
+func (c *cluster) memberStatus(n *node, id string) string {
+	resp, err := c.client.Get(n.baseURL() + "/nodes")
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	var nodes []nodeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&nodes); err != nil {
+		return ""
+	}
+	for _, nr := range nodes {
+		if nr.ID == id {
+			return nr.Status
+		}
+	}
+	return ""
 }
 
 // mustPut writes through n as coordinator and fails the test on anything but 204.

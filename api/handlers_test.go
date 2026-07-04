@@ -989,6 +989,69 @@ func TestGetKeyPerRequestConsistency(t *testing.T) {
 	}
 }
 
+// --- Sloppy quorum tests ---
+
+// TestPutKeySloppyQuorumSkipsUnhealthyAndHints proves the always-writable
+// property: with one strict-set replica unhealthy, the write meets W via the
+// next healthy node on the ring, and the skipped intended owner gets a hint
+// for later replay.
+func TestPutKeySloppyQuorumSkipsUnhealthyAndHints(t *testing.T) {
+	okSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer okSrv.Close()
+	okAddr := okSrv.Listener.Addr().String()
+
+	r := ring.NewRing(10)
+	ml := newTestMemberList(r)
+	s := store.New()
+	hs := hintstore.New(100, time.Hour)
+	h := NewHandler(r, ml, s, HandlerConfig{SelfID: "self", ReplicationFactor: 3, WriteQuorum: 3, ReadQuorum: 1, ReplicaTimeout: time.Second}, hs)
+
+	r.AddNode("self", "localhost:8080")
+	r.AddNode("healthy1", okAddr)
+	r.AddNode("healthy2", okAddr)
+	r.AddNode("down", "10.255.255.1:1") // never contacted: skipped by the health walk
+
+	// Find a key whose strict replica set includes the down node, so the
+	// healthy walk must actually skip it and pull in a substitute.
+	var key string
+	for i := 0; i < 1000 && key == ""; i++ {
+		candidate := fmt.Sprintf("sloppy-%d", i)
+		for _, n := range r.GetReplicationNodes(candidate, 3) {
+			if n.ID == "down" {
+				key = candidate
+				break
+			}
+		}
+	}
+	if key == "" {
+		t.Fatal("no key found with down in its replica set")
+	}
+	r.SetHealthFilter(func(id string) bool { return id != "down" })
+
+	req := httptest.NewRequest(http.MethodPut, "/keys/"+key, bytes.NewBufferString(`{"value":"v"}`))
+	w := httptest.NewRecorder()
+	h.PutKey(w, req)
+
+	// W=3 must be met by healthy nodes alone despite a down strict replica.
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("sloppy write got %d, want 204", w.Code)
+	}
+
+	// The skipped owner must be hinted (may be buffered asynchronously).
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, id := range hs.PendingNodes() {
+			if id == "down" {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Errorf("no hint buffered for skipped owner; pending=%v", hs.PendingNodes())
+}
+
 // TestSyncHandlersProviderMatchesScanFallback proves the tree-served fast path
 // and the store-scan fallback return byte-identical JSON, so installing the
 // provider changes only cost, not behavior.

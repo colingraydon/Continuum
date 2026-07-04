@@ -141,6 +141,5 @@ make coverage  # HTML coverage report
 - **Benchmark coverage** - store, anti-entropy, gossip, and end-to-end latency benchmarks, including before/after numbers for group commit
 - **Sharded store** - split the single store mutex into 256 shards to unlock parallel replay and parallel snapshot iteration
 - **Streaming bootstrap and decommission** - node join pulls keys as one JSON batch per bucket and graceful shutdown materializes the entire dataset in memory for a single push per successor; replace both with chunked, resumable streaming so migration survives datasets larger than RAM
-- **Sloppy quorum** - writes fan out only to the strict replica set, so a write is rejected when W of them are down even if healthy nodes exist; walk past failed replicas to the next healthy nodes on the ring, with hints marking the intended owner (the Dynamo "always writable" property)
 - **Range scans** - SSTables are sorted and a k-way merge already exists in compaction, but nothing exposes ordered iteration; add a merged range iterator across memtable and tables, then a scatter-gather `GET /keys?prefix=` across vnodes
 - **SSTable block compression and block cache** - reads past the bloom filter hit the filesystem on every probe

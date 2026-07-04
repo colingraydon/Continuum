@@ -161,7 +161,6 @@ func TestGetStatsVarianceIsZeroForSingleNode(t *testing.T) {
 	}
 }
 
-
 func TestGetStatsVarianceIsLowWithManyReplicas(t *testing.T) {
 	// Arrange
 	r := NewRing(150)

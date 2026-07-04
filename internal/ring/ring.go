@@ -199,6 +199,61 @@ func (r *Ring) GetReplicationNodes(key string, factor int) []*Node {
 	return r.walkRing(computeHash(key), factor)
 }
 
+// GetHealthyReplicationNodes walks the ring clockwise from key's hash,
+// collecting the first factor distinct nodes that pass the health filter, and
+// separately returns the distinct unhealthy nodes passed over before the
+// healthy set filled — the intended owners whose slots the trailing healthy
+// nodes take over (sloppy quorum: the coordinator writes to the substitutes
+// and buffers a hint per skipped owner). With no health filter, or a fully
+// healthy replica set, the result is identical to GetReplicationNodes with an
+// empty skipped list.
+func (r *Ring) GetHealthyReplicationNodes(key string, factor int) (nodes, skipped []*Node) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if r.tree.Tree.Size() == 0 {
+		return nil, nil
+	}
+	if factor > len(r.nodes) {
+		factor = len(r.nodes)
+	}
+
+	hash := computeHash(key)
+	seen := make(map[string]bool)
+	consider := func(n *Node) {
+		if seen[n.ID] {
+			return
+		}
+		seen[n.ID] = true
+		if r.healthFilter == nil || r.healthFilter(n.ID) {
+			nodes = append(nodes, n)
+		} else {
+			skipped = append(skipped, n)
+		}
+	}
+
+	it := r.tree.Tree.Iterator()
+	// Advance to the ceiling vnode (first hash >= target).
+	for it.Next() {
+		vnode := it.Value().(*VNode)
+		if vnode.Hash < hash {
+			continue
+		}
+		consider(vnode.Node)
+		break
+	}
+	// Continue clockwise, wrapping around, until factor healthy nodes are
+	// collected or every node has been considered.
+	for len(nodes) < factor && len(seen) < len(r.nodes) {
+		if !it.Next() {
+			// First() positions the iterator ON the lowest-hash vnode.
+			it.First()
+		}
+		consider(it.Value().(*VNode).Node)
+	}
+	return nodes, skipped
+}
+
 func (r *Ring) NodeCount() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
