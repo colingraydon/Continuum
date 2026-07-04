@@ -68,7 +68,8 @@ In Grafana, add `http://prometheus:9090` as a Prometheus data source.
 | `make e2e` | Run in-process cluster tests (`TestE2E*` in `api`) |
 | `make e2e-integration` | Run process-based end-to-end tests (spawns real binaries) |
 | `make fault` | Run the fault-injection suite (kills, hangs, partitions, packet loss) |
-| `make bench` | Run benchmarks |
+| `make bench` | Run all benchmarks with memory stats |
+| `make bench-ci` | Run the CPU-bound benchmark subset used by the CI regression gate |
 | `make lint` | Run golangci-lint |
 | `make coverage` | Generate HTML coverage report |
 
@@ -131,6 +132,7 @@ Four jobs run on every push and pull request to `main` (see [docs/testing.md](te
 - **e2e-integration** - process-based end-to-end tests with a 120-second timeout
 - **fault-injection** - the fault-injection suite with a 900-second timeout
 - **lint** - golangci-lint
+- **bench-regression** (pull requests only) - runs the CPU-bound benchmark subset (`make bench-ci`) on the PR's base commit and then on its head **on the same runner**, compares with `benchstat`, and fails on statistically significant time regressions above 20% (`scripts/benchguard.sh`, threshold via `BENCH_REGRESSION_THRESHOLD`). Same-runner A/B cancels most shared-VM variance and benchstat's significance test filters the rest; insignificant deltas (`~`) never fail the gate. fsync-bound, cluster-setup, and multi-millisecond benchmarks are excluded as too noisy or slow for CI - run `make bench` locally for those.
 
 **docker** runs after all of the above pass and verifies the image builds successfully.
 

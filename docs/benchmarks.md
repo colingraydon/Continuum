@@ -22,6 +22,17 @@ All numbers below are from one run of `make bench` on an Apple M1 (8 cores,
 Numbers are hardware- and load-dependent; treat them as one machine's
 snapshot and the *ratios* as the durable findings.
 
+## Regression gate in CI
+
+Every pull request runs the CPU-bound subset (`make bench-ci`) twice on the
+same runner - once at the PR's base commit, once at its head - and compares
+with `benchstat`. A statistically significant time regression above 20% fails
+the build (`scripts/benchguard.sh`). Same-runner A/B comparison cancels most
+shared-VM variance; the significance test filters the rest, so a noisy run
+shows up as `~` and never fails the gate. The fsync-bound, cluster-setup, and
+multi-millisecond benchmarks are excluded from the gate as too noisy or slow
+for CI - they remain in `make bench` for local measurement.
+
 ## Hash ring
 
 | Operation | Latency |
