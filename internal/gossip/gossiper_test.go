@@ -141,7 +141,6 @@ func TestHandleMessageMergesMembers(t *testing.T) {
 	}
 }
 
-
 func TestCheckStaleMarksSuspect(t *testing.T) {
 	// Arrange
 	ml := newTestMemberList()

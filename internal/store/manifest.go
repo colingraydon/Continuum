@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/colingraydon/continuum/internal/fsutil"
 )
 
 // manifestFile names the table set's source of truth inside the tables
@@ -41,38 +43,17 @@ func readManifest(dir string) (manifest, bool, error) {
 	return m, true, nil
 }
 
-// writeManifest atomically replaces the manifest in dir: write a temp file,
-// fsync it, rename over the old manifest, then fsync the directory so the
-// rename is durable. A crash leaves either the old or the new manifest, never
-// a partial one — this is the atomic commit point for both flush and
-// compaction.
+// writeManifest atomically replaces the manifest in dir (temp file, fsync,
+// rename, directory fsync via fsutil.WriteFileAtomic). A crash leaves either
+// the old or the new manifest, never a partial one — this is the atomic
+// commit point for both flush and compaction.
 func writeManifest(dir string, m manifest) error {
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return fmt.Errorf("store: encode manifest: %w", err)
 	}
-	tmp := filepath.Join(dir, manifestFile+".tmp")
-	f, err := os.Create(tmp)
-	if err != nil {
-		return fmt.Errorf("store: create manifest tmp: %w", err)
+	if err := fsutil.WriteFileAtomic(filepath.Join(dir, manifestFile), data); err != nil {
+		return fmt.Errorf("store: write manifest: %w", err)
 	}
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("store: write manifest tmp: %w", err)
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("store: sync manifest tmp: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("store: close manifest tmp: %w", err)
-	}
-	if err := os.Rename(tmp, filepath.Join(dir, manifestFile)); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("store: rename manifest: %w", err)
-	}
-	return fsyncDir(dir)
+	return nil
 }

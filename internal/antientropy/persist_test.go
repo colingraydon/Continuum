@@ -1,6 +1,7 @@
 package antientropy
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -206,5 +207,45 @@ func TestSnapshotThenMembershipChange(t *testing.T) {
 	restored.mu.RUnlock()
 	if !matches {
 		t.Error("maybeRebuild did not adapt restored trees to membership change")
+	}
+}
+
+func TestSaveSnapshotWriteError(t *testing.T) {
+	m, _, _ := newSnapshotFixture(t, 5)
+	// Parent directory does not exist: the atomic write must fail cleanly.
+	if err := m.SaveSnapshot(filepath.Join(t.TempDir(), "no-such-dir", "merkle.json")); err == nil {
+		t.Fatal("expected error saving into a missing directory")
+	}
+}
+
+// TestSnapshotMissingTreeForRange: a snapshot whose ranges reference a tree
+// that is not in the file is internally inconsistent and must be rejected.
+func TestSnapshotMissingTreeForRange(t *testing.T) {
+	m, r, s := newSnapshotFixture(t, 5)
+	path := snapshotPath(t)
+	if err := m.SaveSnapshot(path); err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+
+	// Strip the trees map but keep the ranges.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var snap treeSnapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	snap.Trees = map[string]map[string]uint32{}
+	mangled, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := os.WriteFile(path, mangled, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if newBare(r, s, "self", 2, time.Second).RestoreSnapshot(path) {
+		t.Fatal("snapshot with ranges but no trees was accepted")
 	}
 }

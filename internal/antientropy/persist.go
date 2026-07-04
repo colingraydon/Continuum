@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 	"strconv"
 	"time"
 
+	"github.com/colingraydon/continuum/internal/fsutil"
 	"github.com/colingraydon/continuum/internal/merkle"
 	"github.com/colingraydon/continuum/internal/ring"
 	"github.com/colingraydon/continuum/internal/store"
@@ -62,7 +62,7 @@ func (m *Manager) SaveSnapshot(path string) error {
 	if err != nil {
 		return fmt.Errorf("antientropy: encode snapshot: %w", err)
 	}
-	return atomicWrite(path, data)
+	return fsutil.WriteFileAtomic(path, data)
 }
 
 // RestoreSnapshot installs the trees, ranges, and sync order from the
@@ -109,42 +109,4 @@ func (m *Manager) RestoreSnapshot(path string) bool {
 	m.cursor = 0
 	m.mu.Unlock()
 	return true
-}
-
-// atomicWrite replaces path with data crash-safely: temp file, fsync, rename,
-// directory fsync — the same commit shape the store manifest uses. A crash
-// leaves either the old snapshot or the new one, never a partial file.
-func atomicWrite(path string, data []byte) error {
-	tmp := path + ".tmp"
-	f, err := os.Create(tmp)
-	if err != nil {
-		return fmt.Errorf("antientropy: create snapshot tmp: %w", err)
-	}
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("antientropy: write snapshot tmp: %w", err)
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("antientropy: sync snapshot tmp: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("antientropy: close snapshot tmp: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("antientropy: rename snapshot: %w", err)
-	}
-	dir, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return fmt.Errorf("antientropy: open snapshot dir: %w", err)
-	}
-	defer func() { _ = dir.Close() }()
-	if err := dir.Sync(); err != nil {
-		return fmt.Errorf("antientropy: sync snapshot dir: %w", err)
-	}
-	return nil
 }

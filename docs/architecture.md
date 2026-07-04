@@ -97,10 +97,10 @@ Two more hint loops run per node: **hint expiry** checks every 5 minutes for hin
 
 ## Dependency Rules
 
-- `internal/ring`, `internal/gossip`, `internal/hintstore`, `internal/merkle` have no imports from other internal packages
+- `internal/ring`, `internal/gossip`, `internal/hintstore`, `internal/merkle`, `internal/fsutil` have no imports from other internal packages
 - `internal/wal` has no imports from other internal packages
-- `internal/store` imports `internal/wal`
-- `internal/antientropy` imports `ring`, `store`, and `merkle`
+- `internal/store` imports `internal/wal` and `internal/fsutil`
+- `internal/antientropy` imports `ring`, `store`, `merkle`, and `fsutil`
 - `internal/stats` imports `ring` and `gossip`
 - `api` imports all internal packages
 - Wiring and configuration live entirely in `cmd/continuum/main.go`
