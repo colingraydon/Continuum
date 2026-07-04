@@ -133,13 +133,34 @@ make coverage  # HTML coverage report
 | [Testing](docs/testing.md) | The full test pyramid: unit and fault-seam tests, randomized store model, in-process clusters, process E2E, fault injection |
 | [API Reference](docs/api.md) | All endpoints with request/response examples and internal headers |
 | [Operations](docs/operations.md) | Env vars, Docker setup, Makefile targets, Prometheus metrics |
-| [Benchmarks](docs/benchmarks.md) | Hash ring throughput and latency measurements |
+| [Benchmarks](docs/benchmarks.md) | Full-stack measurements: ring, LSM store, group commit, Merkle sync, gossip codec, quorum round trips |
 
 ---
 
 ## What's Next
 
-- **Benchmark coverage** - store, anti-entropy, gossip, and end-to-end latency benchmarks, including before/after numbers for group commit
-- **Sharded store** - split the single store mutex into 256 shards to unlock parallel replay and parallel snapshot iteration
+**Performance and storage**
+
+- **SSTable block compression and block cache** - reads past the bloom filter hit the filesystem on every probe (~2.7 µs/read baseline, see [benchmarks](docs/benchmarks.md))
+- **Skiplist memtable** - the memtable is a hash map, so scans sort matching keys per call; a skiplist makes writes ordered and scans cheap
+- **Merkle tree persistence** - trees rebuild from a full store scan on startup; persisting them alongside the tables would make restart cost O(1)
+- **Sharded store** - split the single store mutex into 256 shards; partially superseded by the LSM engine, so benchmark first to see whether it still pays
 - **Streaming bootstrap and decommission** - node join pulls keys as one JSON batch per bucket and graceful shutdown materializes the entire dataset in memory for a single push per successor; replace both with chunked, resumable streaming so migration survives datasets larger than RAM
-- **SSTable block compression and block cache** - reads past the bloom filter hit the filesystem on every probe
+
+**Correctness and verification**
+
+- **History checking on the fault harness** - the fault workload already records acknowledged-write histories; feed them through a consistency checker (porcupine-style) to upgrade durability assertions into formal history verification
+- **Session guarantees** - read-your-writes and monotonic reads: the client carries its last-seen vector clock and the coordinator ensures the read result dominates it, closing the sloppy-quorum visibility window
+
+**Data model**
+
+- **CRDT sibling auto-merge** - Riak-style server-side data types (counter, set, LWW-register) so clients can opt out of manual sibling resolution
+- **Key TTL** - per-key expiry; interacts with tombstones, compaction, and replica clock skew
+- **Conditional writes (CAS)** - reject on clock mismatch instead of creating a sibling, for clients that want lock-like semantics
+- **Secondary indexes** - local per-node index maintained on write plus a scatter-gather query path, building on the range-scan machinery
+
+**Cluster and operations**
+
+- **Backup and restore** - immutable SSTables plus the manifest make point-in-time snapshots nearly free: hard-link the tables, record the WAL position, restore through the existing recovery path
+- **Rack/DC-aware placement** - spread each key's replica set across failure domains instead of taking the next N distinct nodes on the ring
+- **Token-aware Go client** - a client library that hashes keys locally and talks directly to a replica, skipping the coordinator hop

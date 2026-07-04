@@ -1,4 +1,4 @@
-.PHONY: build run test test-race e2e e2e-integration fault bench lint docker clean
+.PHONY: build run test test-race e2e e2e-integration fault bench bench-ci lint docker clean
 
 build:
 	go build -o bin/continuum ./cmd/continuum
@@ -23,6 +23,14 @@ fault:
 
 bench:
 	go test -bench=. -benchmem ./benchmarks/
+
+# CPU-bound benchmark subset for regression gating: excludes fsync-bound,
+# cluster-setup, and multi-millisecond benchmarks whose wall time is dominated
+# by IO or fixture setup and therefore too noisy for CI comparison.
+bench-ci:
+	go test ./benchmarks/ -run 'XXX' -bench . \
+		-skip 'Durable|Cluster|StoreScan100|TombstoneGC|ManagerRebuild' \
+		-count=8 -benchtime=0.3s
 
 lint:
 	golangci-lint run ./...
