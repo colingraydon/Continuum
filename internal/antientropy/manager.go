@@ -51,7 +51,13 @@ type Manager struct {
 }
 
 func New(r *ring.Ring, s *store.Store, selfID string, replicationFactor int, timeout time.Duration) *Manager {
-	m := &Manager{
+	return NewWithSnapshot(r, s, selfID, replicationFactor, timeout, "")
+}
+
+// newBare constructs a Manager without building any trees; callers must
+// follow with RestoreSnapshot or rebuild.
+func newBare(r *ring.Ring, s *store.Store, selfID string, replicationFactor int, timeout time.Duration) *Manager {
+	return &Manager{
 		r:                 r,
 		s:                 s,
 		selfID:            selfID,
@@ -59,8 +65,6 @@ func New(r *ring.Ring, s *store.Store, selfID string, replicationFactor int, tim
 		client:            &http.Client{Timeout: timeout},
 		syncEvery:         syncInterval,
 	}
-	m.rebuild(r.GetReplicaVnodeRanges(selfID, replicationFactor), vnodeEnds(r.GetPrimaryVnodeRanges(selfID)))
-	return m
 }
 
 // SetSyncInterval overrides how often the primary-driven sync round runs.

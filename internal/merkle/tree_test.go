@@ -275,3 +275,36 @@ func TestComputeRootHash(t *testing.T) {
 		t.Error("ComputeRootHash(bucket hashes) should equal tree.RootHash()")
 	}
 }
+
+// TestDumpRoundTrip: a tree rebuilt from Dump's pairs is indistinguishable
+// from the original - identical root and per-bucket hashes.
+func TestDumpRoundTrip(t *testing.T) {
+	orig := New()
+	for i := 0; i < 500; i++ {
+		orig.Update(fmt.Sprintf("dump-k%03d", i), uint32(i*31+7))
+	}
+
+	dump := orig.Dump()
+	if len(dump) != 500 {
+		t.Fatalf("Dump returned %d entries, want 500", len(dump))
+	}
+	rebuilt := New()
+	for k, h := range dump {
+		rebuilt.Update(k, h)
+	}
+
+	if rebuilt.RootHash() != orig.RootHash() {
+		t.Error("rebuilt root hash differs from original")
+	}
+	for i := 0; i < BucketCount; i++ {
+		if rebuilt.BucketHash(i) != orig.BucketHash(i) {
+			t.Errorf("bucket %d hash differs after round trip", i)
+		}
+	}
+}
+
+func TestDumpEmptyTree(t *testing.T) {
+	if dump := New().Dump(); len(dump) != 0 {
+		t.Errorf("empty tree dumped %d entries", len(dump))
+	}
+}

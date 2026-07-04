@@ -339,7 +339,14 @@ func main() {
 		log.Fatalf("invalid SELF_ADDRESS %q: %v", cfg.selfAddress, err)
 	}
 
-	ae := antientropy.New(r, s, cfg.selfID, cfg.replicationFactor, cfg.replicaTimeout)
+	// With persistence enabled, a clean restart restores the Merkle trees from
+	// the shutdown snapshot instead of rescanning every table; a crash (WAL
+	// tail replayed past the snapshot) or missing snapshot rebuilds as before.
+	merklePath := ""
+	if cfg.dataDir != "" {
+		merklePath = filepath.Join(cfg.dataDir, "merkle.json")
+	}
+	ae := antientropy.NewWithSnapshot(r, s, cfg.selfID, cfg.replicationFactor, cfg.replicaTimeout, merklePath)
 	ae.SetSyncInterval(cfg.syncInterval)
 	s.SetOnUpdate(ae.Update)
 	s.SetOnEvict(ae.RemoveFromTrees)
@@ -429,6 +436,15 @@ func main() {
 	log.Printf("shutdown: finalizing persistence")
 	if err := persist.finalize(); err != nil {
 		log.Printf("shutdown: finalize error: %v", err)
+	}
+
+	// Snapshot the Merkle trees so the next clean start skips the full store
+	// scan. Requests are drained, so the trees and the store's LastSeq are
+	// final. Best-effort: a failure just means the next start rebuilds.
+	if merklePath != "" {
+		if err := ae.SaveSnapshot(merklePath); err != nil {
+			log.Printf("shutdown: merkle snapshot error: %v", err)
+		}
 	}
 
 	g.Stop()

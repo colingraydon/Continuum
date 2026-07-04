@@ -101,6 +101,22 @@ func (t *Tree) RootHash() uint32 {
 	return h.Sum32()
 }
 
+// Dump returns every key→entryHash pair in the tree. Bucket placement is
+// derivable from the key (murmur3 % BucketCount), so this is a complete,
+// layout-free representation: a tree rebuilt by feeding the pairs back
+// through Update is identical. Used for snapshot persistence.
+func (t *Tree) Dump() map[string]uint32 {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	out := make(map[string]uint32)
+	for i := range t.buckets {
+		for k, h := range t.buckets[i].entries {
+			out[k] = h
+		}
+	}
+	return out
+}
+
 // BucketKeys returns the sorted keys in bucket i.
 func (t *Tree) BucketKeys(i int) []string {
 	t.mu.RLock()

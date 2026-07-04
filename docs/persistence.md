@@ -14,7 +14,7 @@ Today every layer holds state in memory only. A graceful single-node restart sur
 | `internal/hintstore` | **Yes (v2)** | Currently lost on crash. Anti-entropy backstops it for keys that achieved quorum elsewhere. Deferred to a follow-up PR. |
 | `internal/gossip` | No | MemberList reconstructs by gossiping with seed nodes. |
 | `internal/ring` | No | Derived from gossip membership + config. |
-| `internal/antientropy` | No | `rebuild()` repopulates Merkle trees from `store.KeyHashes()` at startup. |
+| `internal/antientropy` | Yes (snapshot) | Merkle trees snapshot to `merkle.json` at clean shutdown and restore at startup when the WAL sequence matches; otherwise `rebuild()` repopulates from `store.KeyHashes()`. |
 
 ## On-disk layout
 
@@ -22,6 +22,8 @@ Today every layer holds state in memory only. A graceful single-node restart sur
 DATA_DIR/
   meta.json                  node_id, last_clean_shutdown, latest_seq
   incarnation                gossip epoch (decimal uint64); advanced each restart
+  merkle.json                Merkle tree snapshot from the last clean shutdown,
+                             stamped with the WAL sequence it covers
   tables/NNNNNNNN.sst        immutable SSTable covering WAL sequences ≤ NNNNNNNN
   tables/NNNNNNNN.sst.tmp    in-flight flush; cleaned up at startup
   wal/NNNNNNNN.wal           segment starting at sequence NNNNNNNN
@@ -108,7 +110,7 @@ return nil
    - `EVICT` → eviction path: leaves an evict marker if the key is still visible in a table.
    - `GC` → remove keys + `tombstoneAges` directly.
    - `CHECKPOINT` → legacy v1 record, decoded and ignored.
-6. Open the next WAL segment for writes; install the flush policy. After recovery: `ae.rebuild()` populates Merkle trees from `store.KeyHashes()` (a merged scan across memtable + tables). Only now does startup proceed — gossip stays in bootstrapping until recovery is done. (`meta.json` is rewritten only at the next clean shutdown.)
+6. Open the next WAL segment for writes; install the flush policy. After recovery: the Merkle trees restore from `merkle.json` when its stamped WAL sequence matches the recovered `LastSeq` (a clean restart); otherwise `ae.rebuild()` repopulates them from `store.KeyHashes()` (a merged scan across memtable + tables — the crash-recovery path, since WAL replay suppresses tree callbacks). Only now does startup proceed — gossip stays in bootstrapping until recovery is done. (`meta.json` is rewritten only at the next clean shutdown.)
 
 ## Flush flow
 
