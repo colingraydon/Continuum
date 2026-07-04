@@ -1,4 +1,4 @@
-.PHONY: build run test test-race e2e e2e-integration fault bench bench-ci lint docker clean
+.PHONY: build run test test-race e2e e2e-integration fault bench bench-ci bench-report lint docker clean
 
 build:
 	go build -o bin/continuum ./cmd/continuum
@@ -23,6 +23,12 @@ fault:
 
 bench:
 	go test -bench=. -benchmem ./benchmarks/
+
+# Regenerate the published benchmark dataset (docs/data/): per-operation
+# latency percentiles with provenance, for the frontend to consume. Run on a
+# known machine, not shared CI - the numbers are meant to be citable.
+bench-report:
+	go run ./cmd/benchreport -out docs/data
 
 # CPU-bound benchmark subset for regression gating: excludes fsync-bound,
 # cluster-setup, and multi-millisecond benchmarks whose wall time is dominated
