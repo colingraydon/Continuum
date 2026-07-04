@@ -144,31 +144,44 @@ func TestIterFrom(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			it := r.IterFrom(tc.start)
-			i := tc.wantIdx
-			for it.Next() {
-				if i < 0 || i >= len(entries) {
-					t.Fatalf("unexpected entry %q", it.Key())
-				}
-				if !bytes.Equal(it.Key(), entries[i].key) {
-					t.Fatalf("key = %q, want %q", it.Key(), entries[i].key)
-				}
-				if !bytes.Equal(it.Value(), entries[i].value) {
-					t.Fatalf("value for %q = %q, want %q", it.Key(), it.Value(), entries[i].value)
-				}
-				i++
-			}
-			if err := it.Err(); err != nil {
-				t.Fatalf("Err: %v", err)
-			}
-			want := len(entries)
-			if tc.wantIdx == -1 {
-				want = -1
-			}
-			if i != want {
-				t.Fatalf("stopped at entry index %d, want %d", i, want)
-			}
+			assertIterFrom(t, r, entries, tc.start, tc.wantIdx)
 		})
+	}
+}
+
+// assertIterFrom checks that IterFrom(start) yields entries[wantIdx:] exactly,
+// in order; wantIdx == -1 asserts an empty iteration.
+func assertIterFrom(t *testing.T, r *Reader, entries []kv, start []byte, wantIdx int) {
+	t.Helper()
+	it := r.IterFrom(start)
+	i := wantIdx
+	for it.Next() {
+		if i < 0 || i >= len(entries) {
+			t.Fatalf("unexpected entry %q", it.Key())
+		}
+		assertEntryAt(t, it, entries, i)
+		i++
+	}
+	if err := it.Err(); err != nil {
+		t.Fatalf("Err: %v", err)
+	}
+	want := len(entries)
+	if wantIdx == -1 {
+		want = -1
+	}
+	if i != want {
+		t.Fatalf("stopped at entry index %d, want %d", i, want)
+	}
+}
+
+// assertEntryAt checks the iterator's current entry against entries[i].
+func assertEntryAt(t *testing.T, it *Iterator, entries []kv, i int) {
+	t.Helper()
+	if !bytes.Equal(it.Key(), entries[i].key) {
+		t.Fatalf("key = %q, want %q", it.Key(), entries[i].key)
+	}
+	if !bytes.Equal(it.Value(), entries[i].value) {
+		t.Fatalf("value for %q = %q, want %q", it.Key(), it.Value(), entries[i].value)
 	}
 }
 

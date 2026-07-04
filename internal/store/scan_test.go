@@ -2,6 +2,8 @@ package store
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -197,6 +199,35 @@ func TestScanSiblingConflicts(t *testing.T) {
 	assertKeys(t, items, "cf-a")
 	if len(items[0].Entry.Siblings) != 2 {
 		t.Errorf("expected 2 concurrent siblings, got %d", len(items[0].Entry.Siblings))
+	}
+}
+
+// TestScanTableReadError proves a corrupted table surfaces as a scan error
+// instead of silently missing keys: the reader's in-memory index still points
+// at the old block offsets, so the scan's block read fails its CRC check.
+func TestScanTableReadError(t *testing.T) {
+	s, _, tablesDir := newFlushStore(t, 0)
+	if err := s.Put("cr-a", "v", vclock("w", 1)); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	files, err := filepath.Glob(filepath.Join(tablesDir, "*.sst"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no table files found: %v", err)
+	}
+	info, err := os.Stat(files[0])
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if err := os.WriteFile(files[0], make([]byte, info.Size()), 0o644); err != nil {
+		t.Fatalf("corrupt table: %v", err)
+	}
+
+	if _, err := s.Scan("cr-", "", 10); err == nil {
+		t.Fatal("expected scan error from corrupted table, got nil")
 	}
 }
 

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/colingraydon/continuum/internal/sstable"
 )
 
 // KeyItem is one key's complete visible entry, as returned by Scan.
@@ -73,39 +75,47 @@ func (s *Store) Scan(prefix, after string, limit int) ([]KeyItem, error) {
 
 // scanTables folds every table's prefix-matching entries into a key→entry
 // map, oldest to newest so later generations overwrite earlier ones and evict
-// markers remove the key entirely. Each table is seeked to start and left as
-// soon as keys stop matching (keys are sorted, and start >= prefix, so the
-// first non-matching key ends the range). The caller holds s.tablesRW for the
+// markers remove the key entirely. The caller holds s.tablesRW for the
 // duration.
 func scanTables(tables []liveTable, prefix, start string) (map[string]Entry, error) {
 	out := make(map[string]Entry)
 	startB := []byte(start)
 	for i := len(tables) - 1; i >= 0; i-- {
-		r := tables[i].r
-		if lg := r.Largest(); lg == nil || bytes.Compare(lg, startB) < 0 {
-			continue // empty table, or entirely before the scan range
-		}
-		it := r.IterFrom(startB)
-		for it.Next() {
-			key := string(it.Key())
-			if !strings.HasPrefix(key, prefix) {
-				break
-			}
-			e, evicted, err := decodeTableEntry(it.Value())
-			if err != nil {
-				return nil, fmt.Errorf("store: decode table entry %q: %w", key, err)
-			}
-			if evicted {
-				delete(out, key)
-				continue
-			}
-			out[key] = e
-		}
-		if err := it.Err(); err != nil {
-			return nil, fmt.Errorf("store: table scan: %w", err)
+		if err := scanOneTable(tables[i].r, prefix, startB, out); err != nil {
+			return nil, err
 		}
 	}
 	return out, nil
+}
+
+// scanOneTable folds one table's range-matching entries into out. The table
+// is seeked to start and left as soon as keys stop matching the prefix (keys
+// are sorted, and start >= prefix, so the first non-matching key ends the
+// range). Tables entirely before the range are skipped without IO.
+func scanOneTable(r *sstable.Reader, prefix string, start []byte, out map[string]Entry) error {
+	if lg := r.Largest(); lg == nil || bytes.Compare(lg, start) < 0 {
+		return nil // empty table, or entirely before the scan range
+	}
+	it := r.IterFrom(start)
+	for it.Next() {
+		key := string(it.Key())
+		if !strings.HasPrefix(key, prefix) {
+			break
+		}
+		e, evicted, err := decodeTableEntry(it.Value())
+		if err != nil {
+			return fmt.Errorf("store: decode table entry %q: %w", key, err)
+		}
+		if evicted {
+			delete(out, key)
+			continue
+		}
+		out[key] = e
+	}
+	if err := it.Err(); err != nil {
+		return fmt.Errorf("store: table scan: %w", err)
+	}
+	return nil
 }
 
 // overlayEntries applies one memtable generation on top of the accumulated

@@ -173,11 +173,16 @@ func (h *Handler) scanTargets() []*gossip.Member {
 	return out
 }
 
-// remoteScan runs a local-mode scan on a peer.
+// remoteScan runs a local-mode scan on a peer. The URL is built structurally:
+// the host comes from cluster membership (never from the client) and the
+// client-provided prefix/after travel only as encoded query values.
 func (h *Handler) remoteScan(address string, params scanParams) ([]ScanItem, error) {
-	u := fmt.Sprintf("%s%s/keys?prefix=%s&after=%s&limit=%d",
-		schemeHTTP, address, url.QueryEscape(params.prefix), url.QueryEscape(params.after), params.limit)
-	req, err := http.NewRequest(http.MethodGet, u, nil)
+	q := url.Values{}
+	q.Set("prefix", params.prefix)
+	q.Set("after", params.after)
+	q.Set("limit", strconv.Itoa(params.limit))
+	u := url.URL{Scheme: "http", Host: address, Path: "/keys", RawQuery: q.Encode()}
+	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, err
 	}

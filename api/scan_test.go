@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -184,6 +186,103 @@ func TestScanKeysHorizon(t *testing.T) {
 	}
 	if resp.Next != "h-2" {
 		t.Errorf("Next = %q, want h-2 (resume at the horizon)", resp.Next)
+	}
+}
+
+// TestScanKeysPeerErrorResponses: a peer answering non-200 or malformed JSON
+// fails the scan closed, same as an unreachable peer.
+func TestScanKeysPeerErrorResponses(t *testing.T) {
+	cases := []struct {
+		name    string
+		handler http.HandlerFunc
+	}{
+		{"peer 500", func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "boom", http.StatusInternalServerError)
+		}},
+		{"peer garbage body", func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte("not json"))
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, ml := newScanHandler(t)
+			srv := httptest.NewServer(tc.handler)
+			defer srv.Close()
+			ml.Add("badPeer", srv.Listener.Addr().String())
+
+			if w, _ := doScan(t, h, "prefix=m-&limit=10", false); w.Code != http.StatusServiceUnavailable {
+				t.Errorf("got %d, want 503", w.Code)
+			}
+		})
+	}
+}
+
+func TestScanKeysCoordinatorBootstrapping(t *testing.T) {
+	h, ml := newScanHandler(t)
+	ml.SetBootstrapping("self", true)
+	if w, _ := doScan(t, h, "prefix=m-&limit=10", false); w.Code != http.StatusServiceUnavailable {
+		t.Errorf("bootstrapping coordinator: got %d, want 503", w.Code)
+	}
+}
+
+// TestScanKeysPageFullCut: more live in-horizon keys than limit cuts the page
+// and resumes at the last emitted key.
+func TestScanKeysPageFullCut(t *testing.T) {
+	h, ml := newScanHandler(t)
+	ml.Add("nodeA", fakeScanNode(t, []ScanItem{
+		{Key: "pf-1", Siblings: []SiblingResponse{{Value: "a", Clocks: clk("w", 1)}}},
+		{Key: "pf-2", Siblings: []SiblingResponse{{Value: "b", Clocks: clk("w", 1)}}},
+		{Key: "pf-3", Siblings: []SiblingResponse{{Value: "c", Clocks: clk("w", 1)}}},
+	}))
+
+	// nodeA is exhausted (3 < limit 100? no - use limit 2: page cut at 2).
+	w, resp := doScan(t, h, "prefix=pf-&limit=2", false)
+	if w.Code != http.StatusOK {
+		t.Fatalf("scan: got %d: %s", w.Code, w.Body.String())
+	}
+	if len(resp.Items) != 2 || resp.Items[1].Key != "pf-2" {
+		t.Fatalf("items = %+v, want [pf-1 pf-2]", resp.Items)
+	}
+	if resp.Next != "pf-2" {
+		t.Errorf("Next = %q, want pf-2 (page cut at limit)", resp.Next)
+	}
+}
+
+// TestScanKeysLocalModeStoreError: a failing store read surfaces as 500 from
+// the local scan endpoint (and thus fails a coordinator's scatter closed).
+func TestScanKeysLocalModeStoreError(t *testing.T) {
+	dir := t.TempDir()
+	s := store.New()
+	s.SetFlushPolicy(dir, 0)
+	t.Cleanup(func() { _ = s.CloseTables() })
+	if err := s.Put("le-a", "v", store.VectorClockVersion{Clocks: clk("w", 1)}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	files, err := filepath.Glob(filepath.Join(dir, "*.sst"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no table files: %v", err)
+	}
+	info, err := os.Stat(files[0])
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if err := os.WriteFile(files[0], make([]byte, info.Size()), 0o644); err != nil {
+		t.Fatalf("corrupt: %v", err)
+	}
+
+	r := ring.NewRing(10)
+	ml := gossip.NewMemberList("self", "localhost", nil)
+	h := NewHandler(r, ml, s, HandlerConfig{SelfID: "self", ReplicationFactor: 3, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/keys?prefix=le-", nil)
+	req.Header.Set(headerXProxiedFrom, "test-peer")
+	w := httptest.NewRecorder()
+	h.ScanKeys(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("local scan over corrupted table: got %d, want 500", w.Code)
 	}
 }
 
