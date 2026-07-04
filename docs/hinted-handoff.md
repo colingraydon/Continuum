@@ -10,7 +10,7 @@ With RF=3 and W=2, a write returns 204 once two replicas acknowledge it. If the 
 
 ### What Gets Buffered
 
-When the coordinator fans a write to its replica set and a replica call fails, the write is buffered as a hint in the coordinator's local hint store:
+Hints are buffered in the coordinator's local hint store in two cases: a replica call in the fan-out fails, or the sloppy-quorum walk skipped an unhealthy home replica upfront and wrote to a substitute instead (see [Replication](replication.md#sloppy-quorum-over-strict)) - the skipped node is the intended owner and its hint carries the full write:
 
 ```
 hint {

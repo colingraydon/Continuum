@@ -74,9 +74,10 @@ acknowledged with 204. Single-writer keys make verification exact:
 | `AsymmetricPartitionHeals` | inbound blackhole 14s | Both sides keep writing; membership self-heals; siblings from the split merge everywhere |
 | `HintLogSurvivesCoordinatorCrash` | blackhole replica, SIGKILL coordinator | Persistent hint log replays after crash and repairs the replica with anti-entropy disabled |
 | `DecommissionPushesKeysToSuccessors` | SIGTERM | Push-on-leave moves solely-held keys to successors, no anti-entropy needed |
-| `QuorumLossThenClampedAvailability` | SIGKILL 2 of 3 | Writes 503 while dead nodes hold ring seats, then resume once the ring shrinks |
+| `QuorumLossThenClampedAvailability` | SIGKILL 2 of 3 | Writes 503 while gossip still believes the dead nodes alive, then resume once the healthy set shrinks (suspect verdict) |
 | `GossipPacketLossStability` | 40% gossip drop | No false death verdicts; data path unaffected |
 | `PeriodicHintDeliveryAcrossAsymmetricPartition` | inbound HTTP blackhole, gossip up, AE off | Periodic sweep delivers buffered hints with no dead→alive edge and no coordinator restart; failed sweeps re-buffer |
+| `SloppyQuorumAlwaysWritable` | SIGKILL 1 of 4, RF=3, AE off | Once the victim is suspect, a `consistency=all` write succeeds via the next healthy node; the skipped owner's hint repairs it after restart |
 
 ## Findings the harness surfaced
 
@@ -108,10 +109,12 @@ system behaviors, not test artifacts:
    The harness still re-registers restarted nodes via `POST /nodes`, which now
    only speeds up an already-correct convergence.
 4. **Write quorum clamps to the live replica set** (`min(W, len(replicas))`).
-   Once gossip removes dead members from the ring, a 3-node cluster that lost
-   two nodes acknowledges single-copy writes. W is a consistency knob against
-   the *current* ring, not a hard durability floor. `QuorumLossThenClampedAvailability`
-   pins this behavior so any future change to it is a conscious one.
+   A 3-node cluster that lost two nodes acknowledges single-copy writes. W is
+   a consistency knob against the *current* ring, not a hard durability floor.
+   `QuorumLossThenClampedAvailability` pins this behavior so any future change
+   to it is a conscious one. Since sloppy quorum, the clamp engages at the
+   suspect verdict (the healthy walk excludes suspects from the fan-out set)
+   rather than waiting for the dead verdict to remove the node from the ring.
 5. **Hints were only delivered on an alive *transition*** — *fixed by a
    periodic delivery sweep.* During an asymmetric partition the isolated node
    never looks dead to its peers (its outbound gossip still flows), so hints

@@ -1,6 +1,9 @@
 package ring
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestNewRing(t *testing.T) {
 	// Arrange + Act
@@ -525,6 +528,102 @@ func endSet(ranges []VnodeRange) map[uint32]struct{} {
 		ends[vr.End] = struct{}{}
 	}
 	return ends
+}
+
+// --- GetHealthyReplicationNodes tests ---
+
+func TestGetHealthyReplicationNodesNoFilterMatchesStrict(t *testing.T) {
+	r := NewRing(8)
+	r.AddNode("node1", "10.0.0.1")
+	r.AddNode("node2", "10.0.0.2")
+	r.AddNode("node3", "10.0.0.3")
+
+	for _, key := range []string{"alpha", "beta", "gamma", "delta"} {
+		strict := r.GetReplicationNodes(key, 2)
+		healthy, skipped := r.GetHealthyReplicationNodes(key, 2)
+		if len(skipped) != 0 {
+			t.Errorf("key %q: skipped %d nodes with no health filter", key, len(skipped))
+		}
+		if len(healthy) != len(strict) {
+			t.Fatalf("key %q: healthy %d nodes, strict %d", key, len(healthy), len(strict))
+		}
+		for i := range strict {
+			if healthy[i].ID != strict[i].ID {
+				t.Errorf("key %q: position %d differs: healthy %s, strict %s", key, i, healthy[i].ID, strict[i].ID)
+			}
+		}
+	}
+}
+
+// keyWithReplica finds a key whose strict replica set includes nodeID.
+func keyWithReplica(t *testing.T, r *Ring, nodeID string, factor int) string {
+	t.Helper()
+	for i := 0; i < 1000; i++ {
+		key := fmt.Sprintf("probe-%d", i)
+		for _, n := range r.GetReplicationNodes(key, factor) {
+			if n.ID == nodeID {
+				return key
+			}
+		}
+	}
+	t.Fatalf("no key found with %s in its replica set", nodeID)
+	return ""
+}
+
+func TestGetHealthyReplicationNodesSkipsUnhealthy(t *testing.T) {
+	r := NewRing(8)
+	r.AddNode("node1", "10.0.0.1")
+	r.AddNode("node2", "10.0.0.2")
+	r.AddNode("node3", "10.0.0.3")
+	r.AddNode("node4", "10.0.0.4")
+
+	key := keyWithReplica(t, r, "node3", 3)
+	r.SetHealthFilter(func(id string) bool { return id != "node3" })
+
+	healthy, skipped := r.GetHealthyReplicationNodes(key, 3)
+	if len(healthy) != 3 {
+		t.Fatalf("expected 3 healthy nodes (substitute fills in), got %d", len(healthy))
+	}
+	for _, n := range healthy {
+		if n.ID == "node3" {
+			t.Error("unhealthy node3 present in healthy set")
+		}
+	}
+	if len(skipped) != 1 || skipped[0].ID != "node3" {
+		t.Errorf("expected skipped=[node3], got %v", nodeIDsOf(skipped))
+	}
+}
+
+func TestGetHealthyReplicationNodesFewerHealthyThanFactor(t *testing.T) {
+	r := NewRing(8)
+	r.AddNode("node1", "10.0.0.1")
+	r.AddNode("node2", "10.0.0.2")
+	r.AddNode("node3", "10.0.0.3")
+	r.SetHealthFilter(func(id string) bool { return id == "node1" })
+
+	healthy, skipped := r.GetHealthyReplicationNodes("some-key", 3)
+	if len(healthy) != 1 || healthy[0].ID != "node1" {
+		t.Errorf("expected healthy=[node1], got %v", nodeIDsOf(healthy))
+	}
+	if len(skipped) != 2 {
+		t.Errorf("expected both unhealthy nodes skipped, got %v", nodeIDsOf(skipped))
+	}
+}
+
+func TestGetHealthyReplicationNodesEmptyRing(t *testing.T) {
+	r := NewRing(8)
+	healthy, skipped := r.GetHealthyReplicationNodes("k", 3)
+	if healthy != nil || skipped != nil {
+		t.Errorf("expected nil results for empty ring, got %v / %v", healthy, skipped)
+	}
+}
+
+func nodeIDsOf(nodes []*Node) []string {
+	ids := make([]string, len(nodes))
+	for i, n := range nodes {
+		ids[i] = n.ID
+	}
+	return ids
 }
 
 // --- AddWeightedNode tests ---

@@ -60,6 +60,23 @@ Content-Type: application/json
 ```
 Returns 204. Writes a tombstone sibling at an incremented clock. The tombstone participates in conflict resolution identically to a value write.
 
+**Per-request consistency**
+
+All three key endpoints accept an optional `?consistency=` query parameter that overrides the process-configured quorum (`WRITE_QUORUM` for PUT/DELETE, `READ_QUORUM` for GET) for that request:
+
+| Level | Quorum | Meaning |
+| ----- | ------ | ------- |
+| `one` | 1 | Fastest; the coordinator's own copy suffices |
+| `quorum` | RF/2 + 1 | Majority of the replication factor |
+| `all` | RF | Every current replica must respond |
+
+```
+PUT /keys/session-token?consistency=all
+GET /keys/profile?consistency=one
+```
+
+An unrecognized level returns 400 without any side effect. Absent, the process default applies. Like the configured W/R, the level is clamped to the currently available replica set, so `all` means "all current replicas", not a hard durability floor — see [Replication](replication.md).
+
 ### Nodes
 
 **Add a node**

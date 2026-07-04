@@ -45,11 +45,11 @@ func valueFor(key string, seq uint64) string {
 // tolerated and recorded; the verifier later checks that every acknowledged
 // write survived.
 type workload struct {
-	c        *cluster
-	keys     []*keyState
+	c         *cluster
+	keys      []*keyState
 	perWorker int
-	interval time.Duration
-	targets  func() []*node
+	interval  time.Duration
+	targets   func() []*node
 
 	stop chan struct{}
 	wg   sync.WaitGroup

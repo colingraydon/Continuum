@@ -53,7 +53,7 @@ func (r *Ring) GetStats() RingStats {
 			NodeID:     id,
 			Address:    node.Address,
 			VNodeCount: count,
-			KeyCount: keyCount,
+			KeyCount:   keyCount,
 			Percentage: percentage,
 		})
 	}

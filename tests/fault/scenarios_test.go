@@ -116,6 +116,63 @@ func (c *cluster) waitLocalValues(target *node, sk seqKeys, n int, timeout time.
 	return missing
 }
 
+// keyReplicatedOn probes for a key whose strict replica set includes every
+// required node, returning the key and its full strict set.
+func (c *cluster) keyReplicatedOn(t *testing.T, required ...*node) (string, []*node) {
+	t.Helper()
+	for i := 0; i < 1000; i++ {
+		key := fmt.Sprintf("sloppy-k%03d", i)
+		set := c.replicaSet(key)
+		if containsAllNodes(set, required) {
+			return key, set
+		}
+	}
+	t.Fatal("no key found whose replica set includes all required nodes")
+	return "", nil
+}
+
+func containsAllNodes(set, required []*node) bool {
+	ids := make(map[string]bool, len(set))
+	for _, n := range set {
+		ids[n.id] = true
+	}
+	for _, r := range required {
+		if !ids[r.id] {
+			return false
+		}
+	}
+	return true
+}
+
+// nodeOutside returns a cluster node that is not in set.
+func (c *cluster) nodeOutside(t *testing.T, set []*node) *node {
+	t.Helper()
+	ids := make(map[string]bool, len(set))
+	for _, n := range set {
+		ids[n.id] = true
+	}
+	for _, n := range c.nodes {
+		if !ids[n.id] {
+			return n
+		}
+	}
+	t.Fatal("test setup: expected a node outside the given replica set")
+	return nil
+}
+
+// waitLocalValue polls target's local store until key holds want or timeout
+// elapses, reporting whether it converged.
+func (c *cluster) waitLocalValue(target *node, key, want string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if nr, code, err := c.directGet(target, key); err == nil && code == http.StatusOK && nr.Value == want {
+			return true
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return false
+}
+
 func crashKey(i int) string { return fmt.Sprintf("crash-k%02d", i) }
 
 func putCrashKeys(t *testing.T, c *cluster, n *node, from, to int, gen string) {
@@ -268,11 +325,11 @@ func TestFault_DecommissionPushesKeysToSuccessors(t *testing.T) {
 }
 
 // Scenario 7: quorum loss and the quorum-clamping semantic. With two of
-// three nodes dead, writes 503 while the dead nodes are still in the ring
-// (fan-out fails, acks < W). Once gossip declares them dead and the ring
-// shrinks, the write quorum clamps to the surviving replica set
-// (min(W, len(replicas))) and single-copy writes are acknowledged. This test
-// documents that behavior: W is not a hard durability floor under
+// three nodes dead, writes 503 while gossip still believes them alive
+// (fan-out fails, acks < W). Once the suspect verdict lands, the sloppy
+// healthy walk excludes them and the write quorum clamps to the surviving
+// replica set (min(W, len(healthy))) and single-copy writes are acknowledged.
+// This test documents that behavior: W is not a hard durability floor under
 // membership churn. After the nodes return, everything must converge.
 func TestFault_QuorumLossThenClampedAvailability(t *testing.T) {
 	c := newCluster(t, clusterConfig{})
@@ -286,14 +343,17 @@ func TestFault_QuorumLossThenClampedAvailability(t *testing.T) {
 	c.kill(c.nodes[1])
 	c.kill(c.nodes[2])
 
-	// While the dead nodes are still ring members, quorum cannot be met.
+	// While gossip still believes the dead nodes alive, the healthy walk
+	// includes them, their connections are refused, and quorum cannot be met.
 	code, err := c.put(survivor, "quorum-k", "during-outage", nil)
 	if err == nil && code == http.StatusNoContent {
 		t.Errorf("write acknowledged immediately after killing 2/3 nodes; expected quorum failure, got %d", code)
 	}
 
-	// After the stale threshold the ring drops the dead nodes and the quorum
-	// clamps to the survivor: writes are accepted again (single copy).
+	// Once the suspect verdict lands, the sloppy walk excludes the dead nodes
+	// and the quorum clamps to the survivor: writes are accepted again
+	// (single copy). Before sloppy quorum this waited for the dead verdict to
+	// remove them from the ring.
 	deadline := time.Now().Add(30 * time.Second)
 	clamped := false
 	for time.Now().Before(deadline) {
@@ -364,6 +424,57 @@ func TestFault_PeriodicHintDeliveryAcrossAsymmetricPartition(t *testing.T) {
 
 	if missing := c.waitLocalValues(replica, sk, keys, 20*time.Second); missing > 0 {
 		t.Errorf("%d/%d hinted values never reached %s via the periodic delivery sweep", missing, keys, replica.id)
+	}
+}
+
+// Scenario 10: sloppy quorum. A 4-node cluster with RF=3: one strict-set
+// replica of a probed key is killed, and once gossip marks it suspect the
+// health-aware replica walk must skip it and pull in the 4th node as a
+// substitute, so a consistency=all write (3 acks) succeeds where a strict
+// quorum would 503 - Dynamo's "always writable" property. The skipped owner
+// gets a hint; after the victim restarts, hint delivery (anti-entropy is off)
+// must land the value on the intended owner. The per-request ?consistency=all
+// override is exercised end-to-end in the same flow.
+func TestFault_SloppyQuorumAlwaysWritable(t *testing.T) {
+	c := newCluster(t, clusterConfig{nodes: 4, replicationFactor: 3, syncIntervalMS: 600_000})
+	coordinator := c.nodes[0]
+	victim := c.nodes[2]
+
+	// A key replicated on the victim (so the walk must skip it) and the
+	// coordinator (so self's ack cannot mask the victim's failure: acks stay
+	// at 2 of 3 until a substitute fills in). The substitute the sloppy walk
+	// must fall through to is the one node outside the strict set.
+	key, strict := c.keyReplicatedOn(t, victim, coordinator)
+	substitute := c.nodeOutside(t, strict)
+
+	t.Logf("killing strict replica %s (key %s, substitute %s)", victim.id, key, substitute.id)
+	c.kill(victim)
+
+	// While gossip still believes the victim is alive, the walk includes it,
+	// its connection is refused, and consistency=all cannot be met.
+	if code, err := c.putConsistency(coordinator, key, "v-strict", "all"); err != nil || code != http.StatusServiceUnavailable {
+		t.Fatalf("consistency=all with an in-view dead replica: code=%d err=%v, want 503", code, err)
+	}
+
+	// Wait for the suspect verdict, then write inside the suspect window
+	// (before the dead verdict removes the victim from the ring entirely).
+	c.waitMemberStatus(t, coordinator, victim.id, "suspect", 10*time.Second)
+	if code, err := c.putConsistency(coordinator, key, "v-sloppy", "all"); err != nil || code != http.StatusNoContent {
+		t.Fatalf("sloppy consistency=all write: code=%d err=%v, want 204 via substitute", code, err)
+	}
+
+	// The substitute must hold the value (it was needed for the 3rd ack).
+	if nr, code, err := c.directGet(substitute, key); err != nil || code != http.StatusOK || nr.Value != "v-sloppy" {
+		t.Errorf("substitute %s: code=%d value=%q err=%v, want v-sloppy", substitute.id, code, nr.Value, err)
+	}
+
+	// Restart the intended owner: with anti-entropy off, only hint delivery
+	// can land the value there.
+	t.Logf("restarting %s; hint replay must repair the intended owner", victim.id)
+	c.restart(victim)
+	if !c.waitLocalValue(victim, key, "v-sloppy", 25*time.Second) {
+		nr, code, err := c.directGet(victim, key)
+		t.Fatalf("hinted value never reached intended owner %s: code=%d value=%q err=%v", victim.id, code, nr.Value, err)
 	}
 }
 
