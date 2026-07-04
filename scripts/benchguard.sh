@@ -13,7 +13,7 @@
 # gate on its own.
 set -euo pipefail
 
-if [ $# -ne 2 ]; then
+if [[ $# -ne 2 ]]; then
     echo "usage: $0 <base-bench.txt> <head-bench.txt>" >&2
     exit 2
 fi
@@ -33,7 +33,7 @@ regressions="$(echo "$out" | awk -v t="$threshold" '
         }
     }')"
 
-if [ -n "$regressions" ]; then
+if [[ -n "$regressions" ]]; then
     echo ""
     echo "FAIL: significant benchmark regressions above ${threshold}%:"
     echo "$regressions"
