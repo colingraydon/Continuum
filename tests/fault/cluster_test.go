@@ -501,6 +501,19 @@ func (c *cluster) memberStatus(n *node, id string) string {
 	return ""
 }
 
+// waitMemberStatus polls until observer sees id with the given gossip status,
+// failing the test if it never happens within timeout.
+func (c *cluster) waitMemberStatus(t *testing.T, observer *node, id, status string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for c.memberStatus(observer, id) != status {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s never reached status %q on %s", id, status, observer.id)
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+}
+
 // mustPut writes through n as coordinator and fails the test on anything but 204.
 func mustPut(t *testing.T, c *cluster, n *node, key, value string) {
 	t.Helper()

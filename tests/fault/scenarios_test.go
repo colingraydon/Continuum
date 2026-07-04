@@ -116,6 +116,63 @@ func (c *cluster) waitLocalValues(target *node, sk seqKeys, n int, timeout time.
 	return missing
 }
 
+// keyReplicatedOn probes for a key whose strict replica set includes every
+// required node, returning the key and its full strict set.
+func (c *cluster) keyReplicatedOn(t *testing.T, required ...*node) (string, []*node) {
+	t.Helper()
+	for i := 0; i < 1000; i++ {
+		key := fmt.Sprintf("sloppy-k%03d", i)
+		set := c.replicaSet(key)
+		if containsAllNodes(set, required) {
+			return key, set
+		}
+	}
+	t.Fatal("no key found whose replica set includes all required nodes")
+	return "", nil
+}
+
+func containsAllNodes(set []*node, required []*node) bool {
+	ids := make(map[string]bool, len(set))
+	for _, n := range set {
+		ids[n.id] = true
+	}
+	for _, r := range required {
+		if !ids[r.id] {
+			return false
+		}
+	}
+	return true
+}
+
+// nodeOutside returns a cluster node that is not in set.
+func (c *cluster) nodeOutside(t *testing.T, set []*node) *node {
+	t.Helper()
+	ids := make(map[string]bool, len(set))
+	for _, n := range set {
+		ids[n.id] = true
+	}
+	for _, n := range c.nodes {
+		if !ids[n.id] {
+			return n
+		}
+	}
+	t.Fatal("test setup: expected a node outside the given replica set")
+	return nil
+}
+
+// waitLocalValue polls target's local store until key holds want or timeout
+// elapses, reporting whether it converged.
+func (c *cluster) waitLocalValue(target *node, key, want string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if nr, code, err := c.directGet(target, key); err == nil && code == http.StatusOK && nr.Value == want {
+			return true
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return false
+}
+
 func crashKey(i int) string { return fmt.Sprintf("crash-k%02d", i) }
 
 func putCrashKeys(t *testing.T, c *cluster, n *node, from, to int, gen string) {
@@ -383,41 +440,12 @@ func TestFault_SloppyQuorumAlwaysWritable(t *testing.T) {
 	coordinator := c.nodes[0]
 	victim := c.nodes[2]
 
-	// Probe for a key whose strict replica set includes both the victim (so
-	// the walk must skip it) and the coordinator (so self's ack cannot mask the
-	// victim's failure: acks stay at 2 of 3 until a substitute fills in).
-	var key string
-	var strict []*node
-	for i := 0; i < 1000 && key == ""; i++ {
-		candidate := fmt.Sprintf("sloppy-k%03d", i)
-		set := c.replicaSet(candidate)
-		hasVictim, hasCoordinator := false, false
-		for _, n := range set {
-			hasVictim = hasVictim || n.id == victim.id
-			hasCoordinator = hasCoordinator || n.id == coordinator.id
-		}
-		if hasVictim && hasCoordinator {
-			key, strict = candidate, set
-		}
-	}
-	if key == "" {
-		t.Fatal("no key found with both victim and coordinator in its replica set")
-	}
-	// The substitute the sloppy walk must fall through to: the node outside
-	// the strict set.
-	var substitute *node
-	for _, n := range c.nodes {
-		inStrict := false
-		for _, s := range strict {
-			inStrict = inStrict || s.id == n.id
-		}
-		if !inStrict {
-			substitute = n
-		}
-	}
-	if substitute == nil {
-		t.Fatal("test setup: expected one node outside the RF=3 strict set")
-	}
+	// A key replicated on the victim (so the walk must skip it) and the
+	// coordinator (so self's ack cannot mask the victim's failure: acks stay
+	// at 2 of 3 until a substitute fills in). The substitute the sloppy walk
+	// must fall through to is the one node outside the strict set.
+	key, strict := c.keyReplicatedOn(t, victim, coordinator)
+	substitute := c.nodeOutside(t, strict)
 
 	t.Logf("killing strict replica %s (key %s, substitute %s)", victim.id, key, substitute.id)
 	c.kill(victim)
@@ -430,13 +458,7 @@ func TestFault_SloppyQuorumAlwaysWritable(t *testing.T) {
 
 	// Wait for the suspect verdict, then write inside the suspect window
 	// (before the dead verdict removes the victim from the ring entirely).
-	deadline := time.Now().Add(10 * time.Second)
-	for c.memberStatus(coordinator, victim.id) != "suspect" {
-		if time.Now().After(deadline) {
-			t.Fatalf("%s never became suspect on %s", victim.id, coordinator.id)
-		}
-		time.Sleep(150 * time.Millisecond)
-	}
+	c.waitMemberStatus(t, coordinator, victim.id, "suspect", 10*time.Second)
 	if code, err := c.putConsistency(coordinator, key, "v-sloppy", "all"); err != nil || code != http.StatusNoContent {
 		t.Fatalf("sloppy consistency=all write: code=%d err=%v, want 204 via substitute", code, err)
 	}
@@ -450,17 +472,9 @@ func TestFault_SloppyQuorumAlwaysWritable(t *testing.T) {
 	// can land the value there.
 	t.Logf("restarting %s; hint replay must repair the intended owner", victim.id)
 	c.restart(victim)
-
-	deadline = time.Now().Add(25 * time.Second)
-	for {
-		if nr, code, err := c.directGet(victim, key); err == nil && code == http.StatusOK && nr.Value == "v-sloppy" {
-			break
-		}
-		if time.Now().After(deadline) {
-			nr, code, err := c.directGet(victim, key)
-			t.Fatalf("hinted value never reached intended owner %s: code=%d value=%q err=%v", victim.id, code, nr.Value, err)
-		}
-		time.Sleep(500 * time.Millisecond)
+	if !c.waitLocalValue(victim, key, "v-sloppy", 25*time.Second) {
+		nr, code, err := c.directGet(victim, key)
+		t.Fatalf("hinted value never reached intended owner %s: code=%d value=%q err=%v", victim.id, code, nr.Value, err)
 	}
 }
 
