@@ -112,7 +112,7 @@ func (c *cluster) request(method, path string, body string, wantStatus int) erro
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, resp.Body) // drain for keep-alive reuse
 	if resp.StatusCode != wantStatus {
 		return fmt.Errorf("%s %s: got %d, want %d", method, path, resp.StatusCode, wantStatus)

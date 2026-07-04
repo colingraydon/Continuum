@@ -21,7 +21,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -64,7 +63,7 @@ func generate(scale float64, tmpParent string) (*Report, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	report := &Report{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
@@ -121,37 +120,51 @@ func writeOutputs(dir string, report *Report) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	_, err = f.Write(append(line, '\n'))
 	return err
 }
 
-// gitCommit returns the short HEAD hash, or "unknown" outside a git checkout.
+// gitCommit returns the short HEAD hash by reading the .git files directly
+// (no subprocess), or "unknown" outside a git checkout.
 func gitCommit() string {
-	out, err := exec.Command("git", "rev-parse", "--short", "HEAD").Output()
+	head, err := os.ReadFile(filepath.Join(".git", "HEAD"))
 	if err != nil {
 		return "unknown"
 	}
-	return strings.TrimSpace(string(out))
+	ref := strings.TrimSpace(string(head))
+	if !strings.HasPrefix(ref, "ref: ") {
+		return shortHash(ref) // detached HEAD holds the hash itself
+	}
+	refPath := strings.TrimPrefix(ref, "ref: ")
+	if hash, err := os.ReadFile(filepath.Join(".git", filepath.FromSlash(refPath))); err == nil {
+		return shortHash(strings.TrimSpace(string(hash)))
+	}
+	// The ref may only exist in packed-refs.
+	packed, err := os.ReadFile(filepath.Join(".git", "packed-refs"))
+	if err != nil {
+		return "unknown"
+	}
+	for _, line := range strings.Split(string(packed), "\n") {
+		if hash, ok := strings.CutSuffix(line, " "+refPath); ok {
+			return shortHash(hash)
+		}
+	}
+	return "unknown"
 }
 
-// cpuModel returns a human-readable CPU name where the platform exposes one.
+func shortHash(hash string) string {
+	if len(hash) < 7 {
+		return "unknown"
+	}
+	return hash[:7]
+}
+
+// cpuModel returns a human-readable CPU name where the platform exposes one,
+// without shelling out (see cpumodel_*.go).
 func cpuModel() string {
-	switch runtime.GOOS {
-	case "darwin":
-		out, err := exec.Command("sysctl", "-n", "machdep.cpu.brand_string").Output()
-		if err == nil {
-			return strings.TrimSpace(string(out))
-		}
-	case "linux":
-		data, err := os.ReadFile("/proc/cpuinfo")
-		if err == nil {
-			for _, line := range strings.Split(string(data), "\n") {
-				if name, ok := strings.CutPrefix(line, "model name"); ok {
-					return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(name), ":"))
-				}
-			}
-		}
+	if model := platformCPUModel(); model != "" {
+		return model
 	}
 	return "unknown"
 }
