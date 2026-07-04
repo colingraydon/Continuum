@@ -74,18 +74,31 @@ func TestGenerateSmoke(t *testing.T) {
 	if len(report.Scenarios) == 0 {
 		t.Fatal("no scenarios ran")
 	}
-	for _, s := range report.Scenarios {
-		if s.Samples < 8 || s.MinNs <= 0 || s.P50Ns < s.MinNs || s.P99Ns < s.P50Ns || s.MaxNs < s.P99Ns {
-			t.Errorf("scenario %s: implausible summary %+v", s.Name, s)
-		}
-		if s.Throughput <= 0 {
-			t.Errorf("scenario %s: non-positive throughput", s.Name)
-		}
-	}
 	if report.GoVersion == "" || report.OS == "" || report.GeneratedAt == "" {
 		t.Errorf("incomplete provenance: %+v", report)
 	}
+	for _, s := range report.Scenarios {
+		assertScenarioSane(t, s)
+	}
+	assertOutputsRoundTrip(t, report)
+}
 
+// assertScenarioSane checks one scenario's distribution for internal
+// consistency: positive values, ordered percentiles, positive throughput.
+func assertScenarioSane(t *testing.T, s ScenarioResult) {
+	t.Helper()
+	if s.Samples < 8 || s.MinNs <= 0 || s.P50Ns < s.MinNs || s.P99Ns < s.P50Ns || s.MaxNs < s.P99Ns {
+		t.Errorf("scenario %s: implausible summary %+v", s.Name, s)
+	}
+	if s.Throughput <= 0 {
+		t.Errorf("scenario %s: non-positive throughput", s.Name)
+	}
+}
+
+// assertOutputsRoundTrip writes the report, re-reads the JSON snapshot, and
+// checks the CSV lands and the history file appends across writes.
+func assertOutputsRoundTrip(t *testing.T, report *Report) {
+	t.Helper()
 	out := t.TempDir()
 	if err := writeOutputs(out, report); err != nil {
 		t.Fatalf("writeOutputs: %v", err)

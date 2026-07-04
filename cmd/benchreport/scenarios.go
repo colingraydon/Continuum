@@ -19,6 +19,10 @@ import (
 	"github.com/colingraydon/continuum/internal/wal"
 )
 
+// benchValue is the payload written by every write scenario - sized like a
+// plausible small value rather than a one-byte toy.
+const benchValue = "report-value-of-plausible-size"
+
 // scenario is one measured workload: setup builds fixtures, op runs a single
 // measured operation. samples is the default count, scaled by -scale.
 type scenario struct {
@@ -229,9 +233,11 @@ func httpScenarios() []scenario {
 
 func runRingLookupBatches(samples int) ([]time.Duration, time.Duration, error) {
 	r := ring.NewRing(150)
-	r.AddNode("node1", "10.0.0.1")
-	r.AddNode("node2", "10.0.0.2")
-	r.AddNode("node3", "10.0.0.3")
+	// Addresses are ring metadata only - lookups never dial them. The
+	// reserved .invalid TLD makes that explicit.
+	r.AddNode("node1", "node1.invalid:0")
+	r.AddNode("node2", "node2.invalid:0")
+	r.AddNode("node3", "node3.invalid:0")
 	const batch = 1000
 	keys := make([]string, batch)
 	for i := range keys {
@@ -264,7 +270,7 @@ func runStoreGetSSTable(tmpDir string) func(int) ([]time.Duration, time.Duration
 		defer cleanup()
 		const keys = 10_000
 		for i := 0; i < keys; i++ {
-			if err := s.Put(fmt.Sprintf("gk-%08d", i), "report-value-of-plausible-size", clock(uint64(i+1))); err != nil {
+			if err := s.Put(fmt.Sprintf("gk-%08d", i), benchValue, clock(uint64(i+1))); err != nil {
 				return nil, 0, err
 			}
 		}
@@ -289,7 +295,7 @@ func runDurablePutSequential(tmpDir string) func(int) ([]time.Duration, time.Dur
 		}
 		defer cleanup()
 		return measure(samples, func(i int) error {
-			return s.Put(fmt.Sprintf("sq-%08d", i), "report-value-of-plausible-size", clock(uint64(i+1)))
+			return s.Put(fmt.Sprintf("sq-%08d", i), benchValue, clock(uint64(i+1)))
 		})
 	}
 }
@@ -316,38 +322,47 @@ func runDurablePutConcurrent(tmpDir string) func(int) ([]time.Duration, time.Dur
 			wg.Add(1)
 			go func(w int) {
 				defer wg.Done()
-				lats := make([]time.Duration, 0, per)
-				for i := 0; i < per; i++ {
-					key := fmt.Sprintf("cc-%d-%08d", w, i)
-					start := time.Now()
-					if err := s.Put(key, "report-value-of-plausible-size", clock(uint64(i+1))); err != nil {
-						errs[w] = err
-						return
-					}
-					lats = append(lats, time.Since(start))
-				}
-				latencies[w] = lats
+				latencies[w], errs[w] = durableWriterLoop(s, w, per)
 			}(w)
 		}
 		wg.Wait()
 		wall := time.Since(wallStart)
-		var all []time.Duration
-		for w := 0; w < workers; w++ {
-			if errs[w] != nil {
-				return nil, 0, errs[w]
-			}
-			all = append(all, latencies[w]...)
-		}
-		return all, wall, nil
+		return mergeWorkerResults(latencies, errs, wall)
 	}
+}
+
+// durableWriterLoop is one worker's timed write sequence.
+func durableWriterLoop(s *store.Store, worker, per int) ([]time.Duration, error) {
+	lats := make([]time.Duration, 0, per)
+	for i := 0; i < per; i++ {
+		key := fmt.Sprintf("cc-%d-%08d", worker, i)
+		start := time.Now()
+		if err := s.Put(key, benchValue, clock(uint64(i+1))); err != nil {
+			return nil, err
+		}
+		lats = append(lats, time.Since(start))
+	}
+	return lats, nil
+}
+
+// mergeWorkerResults flattens per-worker latencies, surfacing the first error.
+func mergeWorkerResults(latencies [][]time.Duration, errs []error, wall time.Duration) ([]time.Duration, time.Duration, error) {
+	var all []time.Duration
+	for w := range latencies {
+		if errs[w] != nil {
+			return nil, 0, errs[w]
+		}
+		all = append(all, latencies[w]...)
+	}
+	return all, wall, nil
 }
 
 func runSyncStateServe(samples int) ([]time.Duration, time.Duration, error) {
 	r := ring.NewRing(8)
-	r.AddNode("self", "127.0.0.1:1")
+	r.AddNode("self", "self.invalid:0") // ring metadata only; never dialed
 	s := store.New()
 	for i := 0; i < 10_000; i++ {
-		if err := s.Put(fmt.Sprintf("sy-%08d", i), "report-value-of-plausible-size", clock(uint64(i+1))); err != nil {
+		if err := s.Put(fmt.Sprintf("sy-%08d", i), benchValue, clock(uint64(i+1))); err != nil {
 			return nil, 0, err
 		}
 	}
