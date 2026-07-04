@@ -131,7 +131,7 @@ func (c *cluster) keyReplicatedOn(t *testing.T, required ...*node) (string, []*n
 	return "", nil
 }
 
-func containsAllNodes(set []*node, required []*node) bool {
+func containsAllNodes(set, required []*node) bool {
 	ids := make(map[string]bool, len(set))
 	for _, n := range set {
 		ids[n.id] = true
