@@ -70,6 +70,7 @@ In Grafana, add `http://prometheus:9090` as a Prometheus data source.
 | `make fault` | Run the fault-injection suite (kills, hangs, partitions, packet loss) |
 | `make bench` | Run all benchmarks with memory stats |
 | `make bench-ci` | Run the CPU-bound benchmark subset used by the CI regression gate |
+| `make bench-report` | Regenerate the published percentile dataset in `docs/data/` (run on a known machine) |
 | `make lint` | Run golangci-lint |
 | `make coverage` | Generate HTML coverage report |
 

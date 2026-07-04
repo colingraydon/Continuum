@@ -22,6 +22,31 @@ All numbers below are from one run of `make bench` on an Apple M1 (8 cores,
 Numbers are hardware- and load-dependent; treat them as one machine's
 snapshot and the *ratios* as the durable findings.
 
+## Published dataset (percentiles)
+
+`go test -bench` reports only means, so the citable dataset comes from a
+dedicated harness: `make bench-report` (`cmd/benchreport`) runs each scenario
+with per-operation timing, computes **exact nearest-rank percentiles** over
+the recorded samples (p50/p90/p99/p999, plus min/mean/max and throughput),
+and writes three provenance-stamped artifacts to `docs/data/`:
+
+| File | Purpose |
+| ---- | ------- |
+| `benchmarks.json` | Latest snapshot; a static frontend fetches this directly |
+| `benchmarks.csv` | Flat companion for spreadsheets |
+| `history.ndjson` | One line per run, for trend charts over time |
+
+Every snapshot embeds `git_commit`, `generated_at`, Go version, and the CPU
+model, so any published number is pinnable to exactly what produced it.
+Scenarios are microsecond-scale or slower, where individual timer readings
+are meaningful - HTTP GET/PUT per consistency level (the user-facing key
+lookup), SSTable point reads, durable writes with and without group commit,
+sync-state serving, and scan pages. The one nanosecond-scale entry (raw ring
+lookup) is measured over 1000-op batches and labeled accordingly.
+
+Generate on a known machine, not shared CI: the dataset is meant to be
+reproducible and citable, and CI runners are neither.
+
 ## Regression gate in CI
 
 Every pull request runs the CPU-bound subset (`make bench-ci`) twice on the
