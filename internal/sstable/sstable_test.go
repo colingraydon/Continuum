@@ -123,6 +123,68 @@ func TestIteratorOrder(t *testing.T) {
 	}
 }
 
+func TestIterFrom(t *testing.T) {
+	entries := sortedEntries(500)
+	// Small blocks force the seek to cross the block index, not just scan.
+	data := buildTable(t, Options{BlockSize: 128}, entries)
+	r := openTable(t, data)
+
+	cases := []struct {
+		name    string
+		start   []byte
+		wantIdx int // index into entries of the first yielded key; -1 = none
+	}{
+		{"nil start scans all", nil, 0},
+		{"before smallest", []byte("aaa"), 0},
+		{"exact first key", []byte("key-00000"), 0},
+		{"exact mid key", []byte("key-00250"), 250},
+		{"between keys", []byte("key-00250a"), 251},
+		{"exact last key", []byte("key-00499"), 499},
+		{"past largest", []byte("zzz"), -1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertIterFrom(t, r, entries, tc.start, tc.wantIdx)
+		})
+	}
+}
+
+// assertIterFrom checks that IterFrom(start) yields entries[wantIdx:] exactly,
+// in order; wantIdx == -1 asserts an empty iteration.
+func assertIterFrom(t *testing.T, r *Reader, entries []kv, start []byte, wantIdx int) {
+	t.Helper()
+	it := r.IterFrom(start)
+	i := wantIdx
+	for it.Next() {
+		if i < 0 || i >= len(entries) {
+			t.Fatalf("unexpected entry %q", it.Key())
+		}
+		assertEntryAt(t, it, entries, i)
+		i++
+	}
+	if err := it.Err(); err != nil {
+		t.Fatalf("Err: %v", err)
+	}
+	want := len(entries)
+	if wantIdx == -1 {
+		want = -1
+	}
+	if i != want {
+		t.Fatalf("stopped at entry index %d, want %d", i, want)
+	}
+}
+
+// assertEntryAt checks the iterator's current entry against entries[i].
+func assertEntryAt(t *testing.T, it *Iterator, entries []kv, i int) {
+	t.Helper()
+	if !bytes.Equal(it.Key(), entries[i].key) {
+		t.Fatalf("key = %q, want %q", it.Key(), entries[i].key)
+	}
+	if !bytes.Equal(it.Value(), entries[i].value) {
+		t.Fatalf("value for %q = %q, want %q", it.Key(), it.Value(), entries[i].value)
+	}
+}
+
 func TestEmptyTable(t *testing.T) {
 	data := buildTable(t, Options{}, nil)
 	r := openTable(t, data)

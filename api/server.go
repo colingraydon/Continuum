@@ -22,6 +22,7 @@ func newMux(h *Handler) http.Handler {
 	mux.HandleFunc("POST /nodes", h.AddNode)
 	mux.HandleFunc("DELETE /nodes/", h.RemoveNode)
 	mux.HandleFunc("GET /nodes", h.GetNodes)
+	mux.HandleFunc("GET /keys", h.ScanKeys)
 	mux.HandleFunc("GET /keys/", h.GetNode)
 	mux.HandleFunc("PUT /keys/", h.PutKey)
 	mux.HandleFunc("DELETE /keys/", h.DeleteKey)

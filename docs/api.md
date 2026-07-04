@@ -77,6 +77,25 @@ GET /keys/profile?consistency=one
 
 An unrecognized level returns 400 without any side effect. Absent, the process default applies. Like the configured W/R, the level is clamped to the currently available replica set, so `all` means "all current replicas", not a hard durability floor — see [Replication](replication.md).
 
+**Scan keys by prefix**
+```
+GET /keys?prefix=user:&limit=100&after=user:41
+```
+Ordered prefix enumeration across the whole cluster: the coordinator fans a local scan to every alive node and merges per-key sibling sets with the same vector clock dominance rules as point reads. `prefix` is required; `limit` defaults to 100 (max 1000); `after` is the exclusive resume cursor from a previous page's `next`.
+
+```json
+{
+  "items": [
+    { "key": "user:42", "value": "alice" },
+    { "key": "user:43", "siblings": [ { "value": "bob", "clocks": {"n1": 2} },
+                                      { "value": "carol", "clocks": {"n2": 1} } ] }
+  ],
+  "next": "user:43"
+}
+```
+
+An empty `next` means the scan is complete. If any alive node fails to respond the scan returns 503 rather than a partial result. With `X-Proxied-From` set, the endpoint returns the node-local scan (raw sibling sets, tombstones included) — the internal format the coordinator consumes. See [Range Scans](range-scans.md) for the merge and pagination semantics.
+
 ### Nodes
 
 **Add a node**

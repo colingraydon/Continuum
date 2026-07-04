@@ -167,6 +167,25 @@ func (r *Reader) Iter() *Iterator {
 	return &Iterator{r: r}
 }
 
+// IterFrom returns an iterator positioned before the first entry with
+// key >= start, using the block index to skip earlier blocks (the same
+// binary search Get uses). A nil or empty start behaves like Iter.
+func (r *Reader) IterFrom(start []byte) *Iterator {
+	if len(start) == 0 {
+		return r.Iter()
+	}
+	// Find the last block whose first key is <= start; earlier blocks cannot
+	// contain entries >= start unless start precedes the whole table, in
+	// which case the scan begins at block 0 and the seek skip is a no-op.
+	i := sort.Search(len(r.index), func(i int) bool {
+		return bytes.Compare(r.index[i].firstKey, start) > 0
+	}) - 1
+	if i < 0 {
+		i = 0
+	}
+	return &Iterator{r: r, blockIdx: i, seek: start}
+}
+
 // Iterator walks a table's entries in key order:
 //
 //	it := r.Iter()
@@ -182,32 +201,16 @@ type Iterator struct {
 	block    []byte
 	pos      int
 	key, val []byte
+	seek     []byte // skip entries with key < seek; cleared once reached
 	err      error
 }
 
 // Next advances to the next entry. It returns false at the end of the table
 // or on error; check Err to distinguish.
 func (it *Iterator) Next() bool {
-	if it.err != nil {
-		return false
-	}
-	for {
-		if it.block == nil {
-			if it.blockIdx >= len(it.r.index) {
-				return false
-			}
-			b, err := it.r.readBlock(it.r.index[it.blockIdx])
-			if err != nil {
-				it.err = err
-				return false
-			}
-			it.block = b
-			it.pos = 0
-		}
-		if it.pos >= len(it.block) {
-			it.block = nil
-			it.blockIdx++
-			continue
+	for it.err == nil {
+		if !it.ensureBlock() {
+			return false
 		}
 		k, v, n, err := decodeEntry(it.block[it.pos:])
 		if err != nil {
@@ -215,9 +218,50 @@ func (it *Iterator) Next() bool {
 			return false
 		}
 		it.pos += n
+		if it.skipForSeek(k) {
+			continue
+		}
 		it.key, it.val = k, v
 		return true
 	}
+	return false
+}
+
+// ensureBlock makes the current position point into a loaded data block,
+// advancing past exhausted blocks. Returns false when the table is exhausted
+// or a block read failed (recorded in it.err).
+func (it *Iterator) ensureBlock() bool {
+	for it.block == nil || it.pos >= len(it.block) {
+		if it.block != nil {
+			it.block = nil
+			it.blockIdx++
+		}
+		if it.blockIdx >= len(it.r.index) {
+			return false
+		}
+		b, err := it.r.readBlock(it.r.index[it.blockIdx])
+		if err != nil {
+			it.err = err
+			return false
+		}
+		it.block = b
+		it.pos = 0
+	}
+	return true
+}
+
+// skipForSeek reports whether k precedes the seek target set by IterFrom and
+// should be skipped. The target is cleared once the first key at or past it
+// is reached.
+func (it *Iterator) skipForSeek(k []byte) bool {
+	if it.seek == nil {
+		return false
+	}
+	if bytes.Compare(k, it.seek) < 0 {
+		return true
+	}
+	it.seek = nil
+	return false
 }
 
 // Key returns the current entry's key. Valid until the next call to Next.

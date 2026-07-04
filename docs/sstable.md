@@ -71,8 +71,11 @@ footer before the reader is usable. A `Get` is then:
    (early exit once a larger key is seen).
 
 So a point lookup costs at most one disk read per table. `Iter` walks
-blocks in order for full scans — this is what compaction, Merkle rebuild,
-and future range scans build on. Readers are immutable and safe for
+blocks in order for full scans — this is what compaction and Merkle rebuild
+build on. `IterFrom(start)` seeks with the same index binary search a `Get`
+uses and iterates from the first key ≥ start — this is what bounds range
+scans to the requested prefix instead of the whole table (see
+[Range Scans](range-scans.md)). Readers are immutable and safe for
 concurrent use.
 
 ## Write path
