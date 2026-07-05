@@ -827,22 +827,10 @@ func (h *Handler) GetNode(w http.ResponseWriter, req *http.Request) {
 
 	survivors := mergeResponses(responses)
 
-	// Session guarantee: if the merged result does not cover the client's
-	// session clock, the quorum read hit only replicas that have not yet seen
-	// the session's writes (the sloppy-quorum visibility window). Escalate to
-	// every replica once; if the cluster still cannot produce a covering
-	// result, fail the read rather than silently violating read-your-writes.
-	if len(session) > 0 && !clockCovered(session, survivorsMaxClock(survivors)) {
-		if len(responses) < len(readNodes) {
-			if all := h.readAllFanOut(readNodes, key); len(all) > 0 {
-				responses = all
-				survivors = mergeResponses(responses)
-			}
-		}
-		if !clockCovered(session, survivorsMaxClock(survivors)) {
-			http.Error(w, "session clock not satisfiable", http.StatusServiceUnavailable)
-			return
-		}
+	responses, survivors, satisfied := h.enforceSessionClock(session, readNodes, key, responses, survivors)
+	if !satisfied {
+		http.Error(w, "session clock not satisfiable", http.StatusServiceUnavailable)
+		return
 	}
 
 	addrByID := make(map[string]string, len(readNodes))
@@ -854,6 +842,26 @@ func (h *Handler) GetNode(w http.ResponseWriter, req *http.Request) {
 	}
 
 	h.writeKeyResponse(w, nodes[0], survivors)
+}
+
+// enforceSessionClock applies the session guarantee to a completed quorum
+// read. If the merged survivors do not cover the client's session clock, the
+// quorum read hit only replicas that have not yet seen the session's writes
+// (the sloppy-quorum visibility window): escalate once to every read node and
+// re-merge. satisfied=false means even the full replica set cannot produce a
+// covering result and the read must fail rather than silently violating
+// read-your-writes. An empty session clock is always satisfied.
+func (h *Handler) enforceSessionClock(session map[string]uint64, readNodes []*ring.Node, key string, responses []NodeResponse, survivors []SiblingResponse) ([]NodeResponse, []SiblingResponse, bool) {
+	if len(session) == 0 || clockCovered(session, survivorsMaxClock(survivors)) {
+		return responses, survivors, true
+	}
+	if len(responses) < len(readNodes) {
+		if all := h.readAllFanOut(readNodes, key); len(all) > 0 {
+			responses = all
+			survivors = mergeResponses(responses)
+		}
+	}
+	return responses, survivors, clockCovered(session, survivorsMaxClock(survivors))
 }
 
 // quorumFanOut fans out a write operation to all non-self replica nodes,
