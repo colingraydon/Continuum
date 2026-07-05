@@ -8,6 +8,7 @@ import (
 	"hash/crc32"
 	"io"
 
+	"github.com/klauspost/compress/s2"
 	"github.com/twmb/murmur3"
 )
 
@@ -21,6 +22,7 @@ type Writer struct {
 	opts       Options
 	offset     uint64
 	block      []byte
+	cbuf       []byte // reusable s2 output buffer
 	blockFirst []byte
 	index      []indexEntry
 	hashes     []bloomHash
@@ -84,7 +86,7 @@ func (w *Writer) Finish() error {
 			return err
 		}
 	}
-	f := footer{indexOff: w.offset, count: w.count}
+	f := footer{indexOff: w.offset, count: w.count, version: version2}
 	indexBlock := encodeIndexBlock(w.index, w.lastKey)
 	if err := w.write(indexBlock); err != nil {
 		return err
@@ -103,14 +105,25 @@ func (w *Writer) Finish() error {
 	return w.write(encodeFooter(f))
 }
 
+// flushBlock writes the buffered block as payload | type:1 | crc32:4. The
+// payload is s2-compressed unless compression is disabled or does not shrink
+// this block, in which case it is stored raw.
 func (w *Writer) flushBlock() error {
+	body, typ := w.block, blockTypeRaw
+	if !w.opts.DisableCompression {
+		w.cbuf = s2.Encode(w.cbuf[:0], w.block)
+		if len(w.cbuf) < len(w.block) {
+			body, typ = w.cbuf, blockTypeS2
+		}
+	}
+	body = append(body, typ)
+	body = binary.BigEndian.AppendUint32(body, crc32.ChecksumIEEE(body))
 	e := indexEntry{
 		firstKey: w.blockFirst,
 		offset:   w.offset,
-		length:   uint32(len(w.block) + 4),
+		length:   uint32(len(body)),
 	}
-	w.block = binary.BigEndian.AppendUint32(w.block, crc32.ChecksumIEEE(w.block))
-	if err := w.write(w.block); err != nil {
+	if err := w.write(body); err != nil {
 		return err
 	}
 	w.index = append(w.index, e)

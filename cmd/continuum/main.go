@@ -39,6 +39,7 @@ type config struct {
 	selfWeight           float64
 	dataDir              string
 	memtableMaxBytes     int64
+	blockCacheBytes      int64
 }
 
 func getEnvInt(key string, dflt int) int {
@@ -122,6 +123,7 @@ func loadConfig() config {
 		selfWeight:           getEnvFloat64("SELF_WEIGHT", 1.0),
 		dataDir:              getEnvString("DATA_DIR", ""),
 		memtableMaxBytes:     int64(getEnvPositiveInt("MEMTABLE_MAX_BYTES", 16<<20)),
+		blockCacheBytes:      int64(getEnvInt("BLOCK_CACHE_BYTES", 16<<20)), // <= 0 disables the cache
 	}
 }
 
@@ -285,10 +287,11 @@ func main() {
 	// Recover persisted state before anything else touches the store. The
 	// downtime gate may discard local data and force a fresh bootstrap; the
 	// seed-node bootstrap path below handles that case naturally.
-	s, persist, err := recoverStore(cfg.dataDir, cfg.selfID, antientropy.GCTTL, cfg.memtableMaxBytes)
+	s, persist, err := recoverStore(cfg.dataDir, cfg.selfID, antientropy.GCTTL, cfg.memtableMaxBytes, cfg.blockCacheBytes)
 	if err != nil {
 		log.Fatalf("persist: recover failed: %v", err)
 	}
+	api.RegisterBlockCacheMetrics(s.BlockCacheStats)
 
 	r := ring.NewRing(cfg.replicas)
 	r.SetUpdateCallback(func(nodeCount, vnodeCount int) {

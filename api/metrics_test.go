@@ -9,6 +9,7 @@ import (
 
 	"github.com/colingraydon/continuum/internal/gossip"
 	"github.com/colingraydon/continuum/internal/ring"
+	"github.com/colingraydon/continuum/internal/sstable"
 	"github.com/colingraydon/continuum/internal/store"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -62,6 +63,52 @@ func TestMetricsHTTPRequestsTotal(t *testing.T) {
 	}))
 	if count != 1 {
 		t.Errorf("expected 1 request, got %f", count)
+	}
+}
+
+func TestBlockCacheMetricsReadStatsAtScrape(t *testing.T) {
+	st := sstable.CacheStats{Hits: 3, Misses: 2, Bytes: 128, Entries: 1}
+	reg := prometheus.NewPedanticRegistry()
+	reg.MustRegister(blockCacheCollectors(func() sstable.CacheStats { return st })...)
+
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(`
+		# HELP continuum_block_cache_bytes Bytes of decompressed blocks currently held by the block cache, including per-entry overhead
+		# TYPE continuum_block_cache_bytes gauge
+		continuum_block_cache_bytes 128
+		# HELP continuum_block_cache_entries Number of blocks currently held by the block cache
+		# TYPE continuum_block_cache_entries gauge
+		continuum_block_cache_entries 1
+		# HELP continuum_block_cache_hits_total Total SSTable block cache hits
+		# TYPE continuum_block_cache_hits_total counter
+		continuum_block_cache_hits_total 3
+		# HELP continuum_block_cache_misses_total Total SSTable block cache misses
+		# TYPE continuum_block_cache_misses_total counter
+		continuum_block_cache_misses_total 2
+	`)); err != nil {
+		t.Errorf("unexpected block cache metrics: %v", err)
+	}
+
+	// The collectors read stats at scrape time, not registration time.
+	st = sstable.CacheStats{Hits: 10, Misses: 2, Bytes: 128, Entries: 1}
+	if got := testutil.ToFloat64(blockCacheCollectors(func() sstable.CacheStats { return st })[0]); got != 10 {
+		t.Errorf("hits after update = %v, want 10", got)
+	}
+
+	// The exported registrar targets the default registry; safe to exercise
+	// once per process (nothing else registers these names in tests).
+	RegisterBlockCacheMetrics(func() sstable.CacheStats { return st })
+	families, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	found := false
+	for _, mf := range families {
+		if mf.GetName() == "continuum_block_cache_hits_total" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("continuum_block_cache_hits_total not registered on the default registry")
 	}
 }
 

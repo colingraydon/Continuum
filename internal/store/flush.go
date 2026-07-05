@@ -70,7 +70,10 @@ func (s *Store) flush(force bool) error {
 	if !ok {
 		return nil
 	}
-	reader, writeErr := writeTable(dir, fileNum, frozen)
+	s.mu.RLock()
+	cache := s.blockCache
+	s.mu.RUnlock()
+	reader, writeErr := writeTable(dir, fileNum, frozen, cache)
 	w, err := s.finishFlush(reader, writeErr, fileNum, frozen, dir)
 	if err != nil {
 		return err
@@ -153,9 +156,20 @@ func (s *Store) finishFlush(reader *sstable.Reader, writeErr error, fileNum uint
 	return s.wal, nil
 }
 
+// openTableWithCache opens a table reader and attaches the shared block
+// cache before the reader is published anywhere.
+func openTableWithCache(path string, cache *sstable.Cache) (*sstable.Reader, error) {
+	r, err := sstable.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	r.SetCache(cache)
+	return r, nil
+}
+
 // writeTable encodes a frozen memtable as an SSTable: temp file, fsync,
 // rename, fsync directory. Returns an open reader for the finished table.
-func writeTable(dir string, fileNum uint64, m *memtable) (*sstable.Reader, error) {
+func writeTable(dir string, fileNum uint64, m *memtable, cache *sstable.Cache) (*sstable.Reader, error) {
 	keys := make([]string, 0, len(m.data)+len(m.evicted))
 	for k := range m.data {
 		keys = append(keys, k)
@@ -193,7 +207,7 @@ func writeTable(dir string, fileNum uint64, m *memtable) (*sstable.Reader, error
 	if err := fsyncDir(dir); err != nil {
 		return nil, fmt.Errorf("store: fsync table dir: %w", err)
 	}
-	return sstable.Open(finalPath)
+	return openTableWithCache(finalPath, cache)
 }
 
 func writeTableEntries(f *os.File, keys []string, m *memtable) error {
@@ -241,9 +255,12 @@ func (s *Store) OpenTables(dir string) (uint64, error) {
 		return 0, err
 	}
 
+	s.mu.RLock()
+	cache := s.blockCache
+	s.mu.RUnlock()
 	live := make([]liveTable, 0, len(m.Tables))
 	for _, name := range m.Tables {
-		r, err := sstable.Open(filepath.Join(dir, name))
+		r, err := openTableWithCache(filepath.Join(dir, name), cache)
 		if err != nil {
 			closeAll(live)
 			return 0, fmt.Errorf("store: open table %s: %w", name, err)

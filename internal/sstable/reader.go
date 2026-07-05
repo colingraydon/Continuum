@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"sort"
+
+	"github.com/klauspost/compress/s2"
 )
 
 // Reader serves point lookups and ordered scans from a finished table. The
@@ -19,9 +21,12 @@ type Reader struct {
 	index    []indexEntry
 	bloom    *bloom
 	count    uint64
+	version  uint16
 	smallest []byte
 	largest  []byte
 	closer   io.Closer
+	cache    *Cache
+	tableID  uint64 // this reader's identity in the shared block cache
 }
 
 // Open opens the table file at path. The returned Reader owns the file
@@ -86,13 +91,24 @@ func NewReader(ra io.ReaderAt, size int64) (*Reader, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &Reader{r: ra, index: index, bloom: bl, count: f.count}
+	r := &Reader{
+		r:       ra,
+		index:   index,
+		bloom:   bl,
+		count:   f.count,
+		version: f.version,
+		tableID: nextTableID.Add(1),
+	}
 	if len(index) > 0 {
 		r.smallest = index[0].firstKey
 		r.largest = largest
 	}
 	return r, nil
 }
+
+// SetCache attaches a shared block cache. Call right after Open/NewReader,
+// before the Reader is used concurrently; a nil cache disables caching.
+func (r *Reader) SetCache(c *Cache) { r.cache = c }
 
 // Get returns the value stored for key. The returned slice does not alias
 // reader-internal state and is safe to retain.
@@ -107,7 +123,7 @@ func (r *Reader) Get(key []byte) ([]byte, bool, error) {
 	if i < 0 {
 		return nil, false, nil
 	}
-	block, err := r.readBlock(r.index[i])
+	block, err := r.readBlock(r.index[i], true)
 	if err != nil {
 		return nil, false, err
 	}
@@ -118,6 +134,11 @@ func (r *Reader) Get(key []byte) ([]byte, bool, error) {
 		}
 		switch bytes.Compare(k, key) {
 		case 0:
+			if r.cache != nil {
+				// The block is (or may become) cache-resident and shared;
+				// copy so the retain-safety contract holds.
+				v = append([]byte(nil), v...)
+			}
 			return v, true, nil
 		case 1: // entries are sorted; key is not in this block
 			return nil, false, nil
@@ -145,7 +166,26 @@ func (r *Reader) Close() error {
 	return nil
 }
 
-func (r *Reader) readBlock(e indexEntry) ([]byte, error) {
+// readBlock returns the decoded (decompressed) body of the data block at e,
+// consulting the shared cache first. fill controls whether a cold read
+// populates the cache: point lookups fill; iterators do not, so scans and
+// compactions cannot evict the hot set. Returned blocks may be cache-shared
+// and must not be modified.
+func (r *Reader) readBlock(e indexEntry, fill bool) ([]byte, error) {
+	if b, ok := r.cache.get(r.tableID, e.offset); ok {
+		return b, nil
+	}
+	body, err := r.readBlockDisk(e)
+	if err != nil {
+		return nil, err
+	}
+	if fill {
+		r.cache.put(r.tableID, e.offset, body)
+	}
+	return body, nil
+}
+
+func (r *Reader) readBlockDisk(e indexEntry) ([]byte, error) {
 	if e.length < 4 {
 		return nil, errors.New("sstable: invalid block length")
 	}
@@ -157,7 +197,26 @@ func (r *Reader) readBlock(e indexEntry) ([]byte, error) {
 	if crc32.ChecksumIEEE(body) != binary.BigEndian.Uint32(buf[len(buf)-4:]) {
 		return nil, fmt.Errorf("%w: data block at offset %d", errCRC, e.offset)
 	}
-	return body, nil
+	if r.version == version1 {
+		return body, nil // v1 blocks are raw with no type byte
+	}
+	if len(body) < 1 {
+		return nil, errors.New("sstable: invalid block length")
+	}
+	typ := body[len(body)-1]
+	body = body[:len(body)-1]
+	switch typ {
+	case blockTypeRaw:
+		return body, nil
+	case blockTypeS2:
+		decoded, err := s2.Decode(nil, body)
+		if err != nil {
+			return nil, fmt.Errorf("sstable: decompress block at offset %d: %w", e.offset, err)
+		}
+		return decoded, nil
+	default:
+		return nil, fmt.Errorf("sstable: unknown block type %d at offset %d", typ, e.offset)
+	}
 }
 
 // Iter returns an iterator over all entries in key order, positioned before
@@ -194,7 +253,8 @@ func (r *Reader) IterFrom(start []byte) *Iterator {
 //	}
 //	if err := it.Err(); err != nil { ... }
 //
-// Key and Value remain valid only until the next call to Next.
+// Key and Value remain valid only until the next call to Next and must not
+// be modified: they may alias a block shared through the block cache.
 type Iterator struct {
 	r        *Reader
 	blockIdx int
@@ -239,7 +299,7 @@ func (it *Iterator) ensureBlock() bool {
 		if it.blockIdx >= len(it.r.index) {
 			return false
 		}
-		b, err := it.r.readBlock(it.r.index[it.blockIdx])
+		b, err := it.r.readBlock(it.r.index[it.blockIdx], false)
 		if err != nil {
 			it.err = err
 			return false

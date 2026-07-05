@@ -67,6 +67,7 @@ func (s *Store) Compact(tombstoneMaxAge time.Duration) (bool, error) {
 	tables := append([]liveTable(nil), s.tables...)
 	dir := s.flushDir
 	policy := s.compaction
+	cache := s.blockCache
 	s.mu.Unlock()
 	defer s.clearCompacting()
 
@@ -89,7 +90,7 @@ func (s *Store) Compact(tombstoneMaxAge time.Duration) (bool, error) {
 	s.nextFileNum++
 	s.mu.Unlock()
 
-	res, err := mergeTables(dir, fileNum, sources, bottom, time.Now().Add(-tombstoneMaxAge))
+	res, err := mergeTables(dir, fileNum, sources, bottom, time.Now().Add(-tombstoneMaxAge), cache)
 	if err != nil {
 		return false, err
 	}
@@ -200,7 +201,7 @@ type mergeResult struct {
 // when the merge produced no entries — every key was dropped as a bottom-level
 // evict marker or expired tombstone — in which case the sources are simply
 // retired with no replacement.
-func mergeTables(dir string, fileNum uint64, sources []liveTable, bottom bool, gcCutoff time.Time) (mergeResult, error) {
+func mergeTables(dir string, fileNum uint64, sources []liveTable, bottom bool, gcCutoff time.Time, cache *sstable.Cache) (mergeResult, error) {
 	name := tableName(fileNum)
 	tmpPath := filepath.Join(dir, name+".tmp")
 	f, err := os.Create(tmpPath)
@@ -234,7 +235,7 @@ func mergeTables(dir string, fileNum uint64, sources []liveTable, bottom bool, g
 	if err := fsyncDir(dir); err != nil {
 		return mergeResult{}, fmt.Errorf("store: fsync compaction dir: %w", err)
 	}
-	r, err := sstable.Open(finalPath)
+	r, err := openTableWithCache(finalPath, cache)
 	if err != nil {
 		return mergeResult{}, err
 	}
