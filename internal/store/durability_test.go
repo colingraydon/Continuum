@@ -34,7 +34,8 @@ func TestStore_WALDurabilityRoundTrip(t *testing.T) {
 	if err := s.Delete("gamma", newTestVC(map[string]uint64{"a": 3})); err != nil {
 		t.Fatalf("Delete gamma: %v", err)
 	}
-	beforeAge := s.tombstoneAges["gamma"]
+	gammaVal, _ := s.mem.get("gamma")
+	beforeAge := gammaVal.age
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close wal: %v", err)
 	}
@@ -54,8 +55,9 @@ func TestStore_WALDurabilityRoundTrip(t *testing.T) {
 		t.Fatalf("lastSeq = %d, want 3", lastSeq)
 	}
 	assertStoresEqual(t, s, s2)
-	if !s2.tombstoneAges["gamma"].Equal(beforeAge) {
-		t.Fatalf("tombstone age changed across replay: %v vs %v", beforeAge, s2.tombstoneAges["gamma"])
+	gamma2Val, _ := s2.mem.get("gamma")
+	if !gamma2Val.age.Equal(beforeAge) {
+		t.Fatalf("tombstone age changed across replay: %v vs %v", beforeAge, gamma2Val.age)
 	}
 }
 
@@ -76,7 +78,7 @@ func TestStore_WALEvictAndGCReplay(t *testing.T) {
 	if err := s.Delete("gc-me", newTestVC(map[string]uint64{"a": 1})); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	s.tombstoneAges["gc-me"] = time.Now().Add(-2 * time.Hour)
+	s.SetTombstoneAge("gc-me", time.Now().Add(-2*time.Hour))
 	purged, err := s.GCTombstones(time.Hour)
 	if err != nil {
 		t.Fatalf("GC: %v", err)
@@ -92,10 +94,10 @@ func TestStore_WALEvictAndGCReplay(t *testing.T) {
 	if _, err := s2.Replay(r, 0); err != nil {
 		t.Fatalf("Replay: %v", err)
 	}
-	if _, ok := s2.data["evict-me"]; ok {
+	if _, ok := memData(s2)["evict-me"]; ok {
 		t.Fatalf("evicted key still present after replay")
 	}
-	if _, ok := s2.data["gc-me"]; ok {
+	if _, ok := memData(s2)["gc-me"]; ok {
 		t.Fatalf("GC'd key still present after replay")
 	}
 }
@@ -116,13 +118,13 @@ func TestStore_ReplaySkipsBelow(t *testing.T) {
 	if _, err := s2.Replay(r, 2); err != nil {
 		t.Fatalf("Replay: %v", err)
 	}
-	if _, ok := s2.data["a"]; ok {
+	if _, ok := memData(s2)["a"]; ok {
 		t.Fatalf("a should be skipped")
 	}
-	if _, ok := s2.data["b"]; ok {
+	if _, ok := memData(s2)["b"]; ok {
 		t.Fatalf("b should be skipped")
 	}
-	if _, ok := s2.data["c"]; !ok {
+	if _, ok := memData(s2)["c"]; !ok {
 		t.Fatalf("c should be applied")
 	}
 }
@@ -145,10 +147,10 @@ func TestStore_WriteCheckpointDuringReplay(t *testing.T) {
 	if _, err := s2.Replay(r, 0); err != nil {
 		t.Fatalf("Replay: %v", err)
 	}
-	if _, ok := s2.data["a"]; !ok {
+	if _, ok := memData(s2)["a"]; !ok {
 		t.Fatalf("a missing after replay")
 	}
-	if _, ok := s2.data["b"]; !ok {
+	if _, ok := memData(s2)["b"]; !ok {
 		t.Fatalf("b missing after replay")
 	}
 }

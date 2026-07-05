@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/colingraydon/continuum/internal/sstable"
 )
@@ -97,22 +96,15 @@ func (s *Store) beginFlush(force bool) (frozen *memtable, dir string, fileNum ui
 		return nil, "", 0, false
 	}
 	if s.frozen == nil {
-		if !force && (s.flushBytes <= 0 || s.memBytes < s.flushBytes) {
+		if !force && (s.flushBytes <= 0 || s.mem.bytes < s.flushBytes) {
 			return nil, "", 0, false
 		}
-		if len(s.data) == 0 && len(s.evicted) == 0 {
+		if s.mem.empty() {
 			return nil, "", 0, false
 		}
-		s.frozen = &memtable{
-			data:    s.data,
-			evicted: s.evicted,
-			ages:    s.tombstoneAges,
-			seq:     s.lastSeq,
-		}
-		s.data = make(map[string]Entry)
-		s.evicted = make(map[string]struct{})
-		s.tombstoneAges = make(map[string]time.Time)
-		s.memBytes = 0
+		s.mem.seq = s.lastSeq
+		s.frozen = s.mem
+		s.mem = newMemtable()
 	}
 	fileNum = s.nextFileNum
 	s.nextFileNum++
@@ -170,22 +162,13 @@ func openTableWithCache(path string, cache *sstable.Cache) (*sstable.Reader, err
 // writeTable encodes a frozen memtable as an SSTable: temp file, fsync,
 // rename, fsync directory. Returns an open reader for the finished table.
 func writeTable(dir string, fileNum uint64, m *memtable, cache *sstable.Cache) (*sstable.Reader, error) {
-	keys := make([]string, 0, len(m.data)+len(m.evicted))
-	for k := range m.data {
-		keys = append(keys, k)
-	}
-	for k := range m.evicted {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
 	name := tableName(fileNum)
 	tmpPath := filepath.Join(dir, name+".tmp")
 	f, err := os.Create(tmpPath)
 	if err != nil {
 		return nil, fmt.Errorf("store: create table tmp: %w", err)
 	}
-	if err := writeTableEntries(f, keys, m); err != nil {
+	if err := writeTableEntries(f, m); err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmpPath)
 		return nil, err
@@ -210,15 +193,17 @@ func writeTable(dir string, fileNum uint64, m *memtable, cache *sstable.Cache) (
 	return openTableWithCache(finalPath, cache)
 }
 
-func writeTableEntries(f *os.File, keys []string, m *memtable) error {
+func writeTableEntries(f *os.File, m *memtable) error {
 	w := sstable.NewWriter(f, sstable.Options{})
-	for _, k := range keys {
+	for it := m.iter(); it.next(); {
+		k := it.key()
+		v := it.value()
 		var val []byte
-		if _, ok := m.evicted[k]; ok {
+		if v.evicted {
 			val = tableEvictValue
 		} else {
 			var err error
-			val, err = encodeTableEntry(k, m.data[k], m.ages)
+			val, err = encodeTableEntry(k, v.entry, v.age)
 			if err != nil {
 				return err
 			}
