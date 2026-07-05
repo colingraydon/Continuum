@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -23,6 +24,7 @@ const (
 	contentTypeJSON      = "application/json"
 	keysPrefix           = "/keys/"
 	headerXProxiedFrom   = "X-Proxied-From"
+	headerXSessionClock  = "X-Session-Clock"
 	schemeHTTP           = "http://"
 	errKeyRequired       = "key is required"
 	errInvalidBody       = "invalid request body"
@@ -118,6 +120,77 @@ func (h *Handler) requestedQuorum(req *http.Request, dflt int) (int, error) {
 	default:
 		return 0, fmt.Errorf("unknown consistency level %q (want one, quorum, or all)", level)
 	}
+}
+
+// casParam enables compare-and-set semantics on PUT/DELETE /keys/{key}:
+// the write is applied only if its clock dominates every sibling currently
+// held by the coordinator, and rejected with 412 instead of creating a
+// sibling otherwise.
+const casParam = "cas"
+
+// requestedCAS reports whether the ?cas= query param asks for a conditional
+// write. Only "true", "false", or absence are accepted; anything else is an
+// error so a typo cannot silently downgrade to a normal sloppy write.
+func requestedCAS(req *http.Request) (bool, error) {
+	switch v := req.URL.Query().Get(casParam); v {
+	case "", "false":
+		return false, nil
+	case "true":
+		return true, nil
+	default:
+		return false, fmt.Errorf("invalid cas param %q (want true or false)", v)
+	}
+}
+
+// parseSessionClock decodes the client's session vector clock from the
+// X-Session-Clock request header. An absent header means no session guarantee
+// was requested and returns a nil map.
+func parseSessionClock(req *http.Request) (map[string]uint64, error) {
+	raw := req.Header.Get(headerXSessionClock)
+	if raw == "" {
+		return nil, nil
+	}
+	var clocks map[string]uint64
+	if err := json.Unmarshal([]byte(raw), &clocks); err != nil {
+		return nil, fmt.Errorf("invalid %s header (want a JSON clocks object): %v", headerXSessionClock, err)
+	}
+	return clocks, nil
+}
+
+// setSessionClockHeader attaches a clock to the response so the client can
+// carry it into later session reads and CAS writes for the same key.
+func setSessionClockHeader(w http.ResponseWriter, clocks map[string]uint64) {
+	b, err := json.Marshal(clocks)
+	if err != nil {
+		return
+	}
+	w.Header().Set(headerXSessionClock, string(b))
+}
+
+// survivorsMaxClock folds all surviving sibling clocks into their
+// componentwise maximum: the most advanced state this read observed.
+func survivorsMaxClock(survivors []SiblingResponse) map[string]uint64 {
+	m := make(map[string]uint64)
+	for _, s := range survivors {
+		for node, c := range s.Clocks {
+			if m[node] < c {
+				m[node] = c
+			}
+		}
+	}
+	return m
+}
+
+// clockCovered reports whether observed dominates-or-equals session
+// componentwise, i.e. the read result reflects every write the session has
+// seen.
+func clockCovered(session, observed map[string]uint64) bool {
+	for node, c := range session {
+		if observed[node] < c {
+			return false
+		}
+	}
+	return true
 }
 
 // replicaResult carries the outcome of a single replica fan-out attempt.
@@ -572,6 +645,23 @@ func (h *Handler) quorumReadFanOut(readNodes []*ring.Node, key string, quorum in
 	return responses, len(responses) >= quorum
 }
 
+// readAllFanOut reads key from every read node and waits for all replies,
+// tolerating individual failures. Used to escalate a session read past the
+// initial quorum when the quorum result does not cover the session clock.
+func (h *Handler) readAllFanOut(readNodes []*ring.Node, key string) []NodeResponse {
+	results := make(chan readResult, len(readNodes))
+	for _, n := range readNodes {
+		go func(node *ring.Node) { results <- h.readNode(node, key) }(n)
+	}
+	var responses []NodeResponse
+	for range readNodes {
+		if r := <-results; r.err == nil {
+			responses = append(responses, r.resp)
+		}
+	}
+	return responses
+}
+
 // writeKeyResponse encodes the final coordinator GET response using the merged
 // survivors. A single deleted survivor becomes a 404; multiple survivors are
 // returned as a sibling conflict.
@@ -580,6 +670,11 @@ func (h *Handler) writeKeyResponse(w http.ResponseWriter, primary *ring.Node, su
 		ID:      primary.ID,
 		Address: primary.Address,
 		Status:  h.nodeStatus(primary.ID),
+	}
+	// Return the observed clock so the client can advance its session clock;
+	// set before any status is written so it also rides the tombstone 404.
+	if len(survivors) > 0 {
+		setSessionClockHeader(w, survivorsMaxClock(survivors))
 	}
 	switch len(survivors) {
 	case 0:
@@ -622,6 +717,12 @@ func (h *Handler) GetNode(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	session, err := parseSessionClock(req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	// Consistent read: fan out to the replica set, merge sibling sets, and
 	// return the canonical result - either a single value or a siblings list.
 	// Reads use the same healthy walk as writes so a fallback node that took a
@@ -648,6 +749,24 @@ func (h *Handler) GetNode(w http.ResponseWriter, req *http.Request) {
 	}
 
 	survivors := mergeResponses(responses)
+
+	// Session guarantee: if the merged result does not cover the client's
+	// session clock, the quorum read hit only replicas that have not yet seen
+	// the session's writes (the sloppy-quorum visibility window). Escalate to
+	// every replica once; if the cluster still cannot produce a covering
+	// result, fail the read rather than silently violating read-your-writes.
+	if len(session) > 0 && !clockCovered(session, survivorsMaxClock(survivors)) {
+		if len(responses) < len(readNodes) {
+			if all := h.readAllFanOut(readNodes, key); len(all) > 0 {
+				responses = all
+				survivors = mergeResponses(responses)
+			}
+		}
+		if !clockCovered(session, survivorsMaxClock(survivors)) {
+			http.Error(w, "session clock not satisfiable", http.StatusServiceUnavailable)
+			return
+		}
+	}
 
 	addrByID := make(map[string]string, len(readNodes))
 	for _, n := range readNodes {
@@ -727,9 +846,15 @@ func (h *Handler) PutKey(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Resolve the write quorum before touching the store so an invalid
-	// consistency level rejects the request without side effects.
+	// Resolve the write quorum and CAS mode before touching the store so an
+	// invalid consistency level or cas param rejects the request without side
+	// effects.
 	writeQuorum, err := h.requestedQuorum(req, h.writeQuorum)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	useCAS, err := requestedCAS(req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -737,14 +862,29 @@ func (h *Handler) PutKey(w http.ResponseWriter, req *http.Request) {
 
 	// Bootstrap clock from current local entry if the client didn't provide one,
 	// so a blind overwrite dominates the existing value rather than equaling it
-	// (an equal clock would be dropped as an idempotent write).
-	if len(incoming.Clocks) == 0 {
+	// (an equal clock would be dropped as an idempotent write). Never for CAS:
+	// there the clocks field is the client's precondition, and an absent one
+	// must mean "expect no current value" rather than silently adopting
+	// whatever the coordinator happens to hold.
+	if len(incoming.Clocks) == 0 && !useCAS {
 		incoming.Clocks = h.bootstrapClock(key)
 	}
 
-	// Primary write: increment self's counter and store locally.
+	// Primary write: increment self's counter and store locally. In CAS mode
+	// the store applies the write only if this version dominates every
+	// existing sibling; a stale or concurrent precondition clock rejects the
+	// request with 412 and no side effects.
 	version := incoming.Increment(h.selfID)
-	if err := h.store.Put(key, body.Value, version); err != nil {
+	if useCAS {
+		if err := h.store.PutCAS(key, body.Value, version); err != nil {
+			if errors.Is(err, store.ErrCASConflict) {
+				http.Error(w, "cas conflict: clocks do not dominate the current value", http.StatusPreconditionFailed)
+				return
+			}
+			http.Error(w, "store write failed", http.StatusServiceUnavailable)
+			return
+		}
+	} else if err := h.store.Put(key, body.Value, version); err != nil {
 		http.Error(w, "store write failed", http.StatusServiceUnavailable)
 		return
 	}
@@ -772,6 +912,9 @@ func (h *Handler) PutKey(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "write quorum not met", http.StatusServiceUnavailable)
 		return
 	}
+	// Return the write's clock so the client can chain CAS writes and demand
+	// read-your-writes on later session reads.
+	setSessionClockHeader(w, version.Clocks)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -832,23 +975,41 @@ func (h *Handler) DeleteKey(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Resolve the write quorum before touching the store so an invalid
-	// consistency level rejects the request without side effects.
+	// Resolve the write quorum and CAS mode before touching the store so an
+	// invalid consistency level or cas param rejects the request without side
+	// effects.
 	writeQuorum, err := h.requestedQuorum(req, h.writeQuorum)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	useCAS, err := requestedCAS(req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	// Bootstrap clock from current local entry if the client didn't provide one,
-	// so the tombstone's clock dominates the existing value rather than equaling it.
-	if len(incoming.Clocks) == 0 {
+	// so the tombstone's clock dominates the existing value rather than equaling
+	// it. Never for CAS: see PutKey.
+	if len(incoming.Clocks) == 0 && !useCAS {
 		incoming.Clocks = h.bootstrapClock(key)
 	}
 
 	// Primary delete: increment self's counter and store tombstone locally.
+	// CAS semantics match PutKey: a stale or concurrent precondition clock
+	// rejects with 412 instead of writing a tombstone sibling.
 	version := incoming.Increment(h.selfID)
-	if err := h.store.Delete(key, version); err != nil {
+	if useCAS {
+		if err := h.store.DeleteCAS(key, version); err != nil {
+			if errors.Is(err, store.ErrCASConflict) {
+				http.Error(w, "cas conflict: clocks do not dominate the current value", http.StatusPreconditionFailed)
+				return
+			}
+			http.Error(w, "store delete failed", http.StatusServiceUnavailable)
+			return
+		}
+	} else if err := h.store.Delete(key, version); err != nil {
 		http.Error(w, "store delete failed", http.StatusServiceUnavailable)
 		return
 	}
@@ -872,6 +1033,8 @@ func (h *Handler) DeleteKey(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "write quorum not met", http.StatusServiceUnavailable)
 		return
 	}
+	// Return the tombstone's clock: see PutKey.
+	setSessionClockHeader(w, version.Clocks)
 	w.WriteHeader(http.StatusNoContent)
 }
 
