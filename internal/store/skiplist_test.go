@@ -141,6 +141,19 @@ func TestSkiplistFuzzAgainstMap(t *testing.T) {
 	}
 }
 
+// TestSkiplistBuildsLevels guards against a degenerate level generator: with
+// 1000 keys the skiplist must grow express lanes above level 1, or it has
+// silently become a plain linked list (correct but O(n) search).
+func TestSkiplistBuildsLevels(t *testing.T) {
+	sl := newSkiplist()
+	for i := 0; i < 1000; i++ {
+		sl.set(fmt.Sprintf("k%04d", i), mv("v"))
+	}
+	if sl.level <= 1 {
+		t.Fatalf("skiplist level = %d after 1000 inserts; randomLevel is degenerate", sl.level)
+	}
+}
+
 // TestMemIterPastEnd exercises the iterator's exhaustion guard: calling next
 // after it has already returned false stays false instead of dereferencing a
 // nil node.

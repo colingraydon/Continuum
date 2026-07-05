@@ -1,18 +1,13 @@
 package store
 
-import "math/rand"
-
 // skiplist is an ordered string-keyed map backing a memtable. It is not safe
 // for concurrent mutation: the owning Store serializes all writes under s.mu,
 // and a frozen memtable is immutable, so concurrent readers need no extra
 // locking. Iteration walks the level-0 chain in ascending key order.
 //
-// Levels are chosen with probability slP per additional level up to slMaxLevel,
-// giving expected O(log n) search over the memtable's bounded key count.
-const (
-	slMaxLevel = 20
-	slP        = 0.5
-)
+// Each additional level is taken with probability 1/2 up to slMaxLevel, giving
+// expected O(log n) search over the memtable's bounded key count.
+const slMaxLevel = 20
 
 type slNode struct {
 	key  string
@@ -21,25 +16,36 @@ type slNode struct {
 }
 
 type skiplist struct {
-	head  *slNode // sentinel; its key is never yielded
-	level int     // highest level currently in use (1..slMaxLevel)
-	n     int
-	rng   *rand.Rand
+	head     *slNode // sentinel; its key is never yielded
+	level    int     // highest level currently in use (1..slMaxLevel)
+	n        int
+	rngState uint64 // xorshift state for level selection
 }
 
 func newSkiplist() *skiplist {
 	return &skiplist{
 		head:  &slNode{next: make([]*slNode, slMaxLevel)},
 		level: 1,
-		// Fixed seed: the level distribution needs randomness but not
-		// unpredictability, and a fixed seed keeps behavior reproducible.
-		rng: rand.New(rand.NewSource(1)),
+		// Fixed non-zero seed: the level distribution needs randomness but not
+		// unpredictability (this is not security-sensitive), and a fixed seed
+		// keeps behavior reproducible.
+		rngState: 0x9E3779B97F4A7C15,
 	}
 }
 
+// randomLevel returns a level in [1, slMaxLevel] with a geometric
+// distribution: each successive level is half as likely as the last. It uses a
+// small xorshift64 generator — a CSPRNG would be pointless here — consuming one
+// bit of a single generated word per coin flip.
 func (s *skiplist) randomLevel() int {
+	x := s.rngState
+	x ^= x << 13
+	x ^= x >> 7
+	x ^= x << 17
+	s.rngState = x
 	lvl := 1
-	for lvl < slMaxLevel && s.rng.Float64() < slP {
+	for lvl < slMaxLevel && x&1 == 1 {
+		x >>= 1
 		lvl++
 	}
 	return lvl
