@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -25,6 +26,7 @@ const (
 	keysPrefix           = "/keys/"
 	headerXProxiedFrom   = "X-Proxied-From"
 	headerXSessionClock  = "X-Session-Clock"
+	headerXCASForwarded  = "X-CAS-Forwarded-From"
 	schemeHTTP           = "http://"
 	errKeyRequired       = "key is required"
 	errInvalidBody       = "invalid request body"
@@ -65,6 +67,11 @@ type Handler struct {
 	readQuorum        int
 	startTime         time.Time
 	replicaClient     *http.Client
+	// casClient forwards CAS requests to the key's primary. Separate from
+	// replicaClient because a forwarded CAS contains the primary's own
+	// replica fan-out, so its round trip is bounded by the replica timeout
+	// plus the primary's quorum wait, not by one replica hop.
+	casClient *http.Client
 }
 
 func NewHandler(r *ring.Ring, ml *gossip.MemberList, s *store.Store, cfg HandlerConfig, hs *hintstore.HintStore) *Handler {
@@ -80,6 +87,7 @@ func NewHandler(r *ring.Ring, ml *gossip.MemberList, s *store.Store, cfg Handler
 		readQuorum:        cfg.ReadQuorum,
 		startTime:         time.Now(),
 		replicaClient:     &http.Client{Timeout: cfg.ReplicaTimeout},
+		casClient:         &http.Client{Timeout: 2 * cfg.ReplicaTimeout},
 	}
 }
 
@@ -139,6 +147,77 @@ func requestedCAS(req *http.Request) (bool, error) {
 		return true, nil
 	default:
 		return false, fmt.Errorf("invalid cas param %q (want true or false)", v)
+	}
+}
+
+// casRoutedElsewhere serializes CAS writes for a key through its primary
+// replica: the first node on the strict ring walk, which every coordinator
+// sharing the ring view resolves identically. It returns false when this
+// node is the primary and the caller should execute the CAS locally.
+// Otherwise it has already written the response: either the primary's reply,
+// relayed by forwardCAS, or a fail-closed 503 when the primary cannot be
+// reached or the forwarder's ring view disagrees with ours. Failing closed
+// keeps the CAS contract honest: a 204 means the precondition was checked
+// under the one mutex all CAS writes for the key serialize on, and an
+// ambiguous cluster state yields a retryable error, never a sibling.
+func (h *Handler) casRoutedElsewhere(w http.ResponseWriter, req *http.Request, key string, body any) bool {
+	nodes := h.ring.GetReplicationNodes(key, 1)
+	if len(nodes) == 0 {
+		http.Error(w, errNoNodes, http.StatusServiceUnavailable)
+		return true
+	}
+	primary := nodes[0]
+	if primary.ID == h.selfID {
+		return false
+	}
+	if req.Header.Get(headerXCASForwarded) != "" {
+		// The forwarder believed we were the primary but our ring view names
+		// someone else: membership is converging. Never forward again (no
+		// loops); make the client retry once the views agree.
+		http.Error(w, "cas primary mismatch, retry", http.StatusServiceUnavailable)
+		return true
+	}
+	if m, ok := h.memberList.Get(primary.ID); !ok || m.Status != gossip.MemberAlive {
+		http.Error(w, "cas primary unavailable", http.StatusServiceUnavailable)
+		return true
+	}
+	h.forwardCAS(w, req, primary.Address, body)
+	return true
+}
+
+// forwardCAS re-issues the client's CAS request against the primary and
+// relays the primary's verdict (status, session clock, and body) back to the
+// client unchanged, so 204/412 semantics are identical whichever coordinator
+// the client happened to hit.
+func (h *Handler) forwardCAS(w http.ResponseWriter, req *http.Request, address string, body any) {
+	payload, err := json.Marshal(body)
+	if err != nil {
+		http.Error(w, errFailedWrite, http.StatusInternalServerError)
+		return
+	}
+	fwd, err := http.NewRequest(req.Method, schemeHTTP+address+req.URL.RequestURI(), bytes.NewReader(payload))
+	if err != nil {
+		http.Error(w, errFailedWrite, http.StatusInternalServerError)
+		return
+	}
+	fwd.Header.Set(contentTypeHeader, contentTypeJSON)
+	fwd.Header.Set(headerXCASForwarded, h.selfID)
+	resp, err := h.casClient.Do(fwd)
+	if err != nil {
+		log.Printf("cas forward to %s: %v", address, err)
+		http.Error(w, "cas primary unreachable", http.StatusServiceUnavailable)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if c := resp.Header.Get(headerXSessionClock); c != "" {
+		w.Header().Set(headerXSessionClock, c)
+	}
+	if ct := resp.Header.Get(contentTypeHeader); ct != "" {
+		w.Header().Set(contentTypeHeader, ct)
+	}
+	w.WriteHeader(resp.StatusCode)
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		log.Printf("cas forward relay body: %v", err)
 	}
 }
 
@@ -860,6 +939,13 @@ func (h *Handler) PutKey(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// CAS writes serialize through the key's primary replica so writers
+	// racing through different coordinators contend on one store mutex
+	// instead of forking into siblings.
+	if useCAS && h.casRoutedElsewhere(w, req, key, body) {
+		return
+	}
+
 	// Bootstrap clock from current local entry if the client didn't provide one,
 	// so a blind overwrite dominates the existing value rather than equaling it
 	// (an equal clock would be dropped as an idempotent write). Never for CAS:
@@ -986,6 +1072,11 @@ func (h *Handler) DeleteKey(w http.ResponseWriter, req *http.Request) {
 	useCAS, err := requestedCAS(req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// CAS deletes serialize through the key's primary replica: see PutKey.
+	if useCAS && h.casRoutedElsewhere(w, req, key, body) {
 		return
 	}
 

@@ -6,7 +6,7 @@
 
 The base system is eventually consistent: a sloppy-quorum write can land on replicas that a later quorum read never touches, and a concurrent write always produces siblings for the client to resolve. Two opt-in mechanisms tighten this per request, without changing the default path:
 
-- **Conditional writes (CAS)** - `?cas=true` on PUT/DELETE turns the request's `clocks` field into a precondition. A write whose clock does not dominate the current state is rejected with 412 instead of becoming a sibling, giving lock-like semantics to clients that want them.
+- **Conditional writes (CAS)** - `?cas=true` on PUT/DELETE turns the request's `clocks` field into a precondition. A write whose clock does not dominate the current state is rejected with 412 instead of becoming a sibling, giving lock-like semantics to clients that want them. Every CAS for a key routes through the key's primary replica, so writers racing through different coordinators serialize on one mutex instead of forking history.
 - **Session guarantees** - every coordinator write and read returns the resulting vector clock in an `X-Session-Clock` response header. A client that sends that clock back on a later GET is guaranteed a result that dominates it (read-your-writes, and monotonic reads when the clock is advanced after each read), or a 503 if the cluster cannot currently prove it.
 
 Both ride the existing vector clock machinery; neither adds a new consensus protocol.
@@ -15,13 +15,14 @@ Both ride the existing vector clock machinery; neither adds a new consensus prot
 
 ### CAS Write Path
 
-A normal write merges into the sibling set: dominated siblings are replaced, concurrent ones accumulate. A CAS write adds one check before anything else happens, under the same store mutex that serializes all writes to the key:
+A normal write merges into the sibling set: dominated siblings are replaced, concurrent ones accumulate. A CAS write adds routing and one check before anything else happens:
 
-1. The coordinator increments its own counter on the client-supplied `clocks` to produce the write's version, exactly as for a normal write. Unlike a normal write, an absent `clocks` field is *not* bootstrapped from the current local entry - it is the precondition "no current value exists".
-2. The store verifies that this version causally dominates **every** existing sibling of the key. Because the check demands domination of all siblings, a key in conflict cannot be CAS-written until the client has read and merged the full sibling set.
-3. On success the write proceeds through the normal path (WAL append, memtable merge, replica fan-out, hints); the merge is guaranteed to resolve to exactly one sibling. On failure the request returns 412 with no side effects: nothing is logged, stored, or replicated.
+1. **Routing.** The receiving coordinator resolves the key's *primary*: the first node on the strict (health-ignoring) ring walk, which every coordinator sharing the ring view resolves identically. If that is another node, the request is forwarded to it with an `X-CAS-Forwarded-From` header and the primary's verdict (status, body, `X-Session-Clock`) is relayed back verbatim. If the primary is not alive in the member list, or a forwarded request lands on a node that does not consider itself primary (diverging ring views), the request fails closed with 503 and the client retries.
+2. **Versioning.** The primary increments its own counter on the client-supplied `clocks` to produce the write's version, exactly as for a normal write. Unlike a normal write, an absent `clocks` field is *not* bootstrapped from the current local entry - it is the precondition "no current value exists".
+3. **Precondition.** Under the store mutex that serializes all writes to the key, the store verifies that this version causally dominates **every** existing sibling. Because the check demands domination of all siblings, a key in conflict cannot be CAS-written until the client has read and merged the full sibling set.
+4. **Commit.** On success the write proceeds through the normal path (WAL append, memtable merge, replica fan-out, hints); the merge is guaranteed to resolve to exactly one sibling. On failure the request returns 412 with no side effects: nothing is logged, stored, or replicated.
 
-The atomic check-then-write means two CAS writers racing through the *same* coordinator serialize correctly: the loser's version is concurrent with the winner's committed sibling and gets 412.
+Because every CAS for a key executes its check-then-write atomically on the same primary, two CAS writers racing through *any* pair of coordinators serialize: the loser's precondition is evaluated after the winner's commit and gets 412.
 
 ### Session Clock Flow
 
@@ -35,13 +36,13 @@ Every coordinator GET response returns the observed merged clock in `X-Session-C
 
 ## Design Decisions
 
-### Coordinator-Local CAS, Not Consensus
+### Primary-Serialized CAS, Not Consensus
 
-**Choice:** The CAS precondition is checked against the coordinator's local store, atomically under the store mutex, rather than against a quorum.
+**Choice:** Every CAS for a key executes on the key's primary replica, which checks the precondition against its local store atomically under the store mutex. Other coordinators forward rather than check locally.
 
-Cassandra implements conditional writes with Paxos rounds (lightweight transactions) precisely because a local check cannot order writes racing through *different* coordinators: each coordinator can pass its local check and the two writes still become siblings on the replicas. This implementation accepts that limit. What CAS buys here is (a) strict serialization of writers that share a coordinator, and (b) a guarantee that a client whose picture of the key is stale finds out via 412 instead of silently forking history - the two failure modes that dominate in practice for clients that route a key through a stable coordinator (as the planned token-aware client would).
+Cassandra implements conditional writes with Paxos rounds (lightweight transactions) because a coordinator-local check cannot order writes racing through *different* coordinators: each passes its own check and the writes still fork into siblings. Routing through a single primary closes that race without a consensus protocol: whichever ring node receives the request, the check-then-write runs on the same mutex, so concurrent CAS writers get exactly one 204 and the rest get 412. The choice of primary is deterministic (the strict ring walk ignores health, so a flapping replica cannot make two coordinators disagree about who is primary while the ring itself is stable), and CAS fails closed with 503 whenever that certainty is missing: primary not alive, primary unreachable, or a forwarded request landing on a node whose ring view disagrees with the forwarder's. A 503 is retryable; what it never does is silently fork history.
 
-**Tradeoff:** Cross-coordinator CAS races still produce siblings, which the next read surfaces as a conflict. Full linearizable CAS would require a consensus round per write. The 412 contract is honest about this: it means "your clock is stale here", not "the cluster has agreed".
+**Tradeoff:** CAS trades availability for this: it is CP-flavored in a system that is otherwise AP. While the primary for a key is down or partitioned, CAS writes to that key return 503 until membership converges and the ring walk names a new primary, whereas normal writes stay available through the sloppy quorum. One window remains open: nodes whose ring views diverge during membership churn can briefly name different primaries, and two CAS writes landing on both in that window can still fork. Closing it requires a consensus round per write (Paxos/Raft per key range), which stays on the roadmap; the mismatch check on forwarded requests narrows the window to direct client hits on a stale-view node, and the next read surfaces any fork as ordinary siblings.
 
 ### Fail Closed on Unsatisfiable Session Reads
 

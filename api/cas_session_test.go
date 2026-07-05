@@ -143,6 +143,140 @@ func TestDeleteKeyCAS(t *testing.T) {
 	}
 }
 
+// keyWithPrimary returns a key whose strict ring primary is nodeID, so tests
+// can steer CAS requests at (or away from) a specific coordinator.
+func keyWithPrimary(t *testing.T, r *ring.Ring, nodeID string) string {
+	t.Helper()
+	for i := range 10000 {
+		key := fmt.Sprintf("cas-routed-%d", i)
+		if nodes := r.GetReplicationNodes(key, 1); len(nodes) == 1 && nodes[0].ID == nodeID {
+			return key
+		}
+	}
+	t.Fatalf("no key found with primary %s", nodeID)
+	return ""
+}
+
+func TestPutKeyCASForwardsToPrimary(t *testing.T) {
+	var gotForwardedFrom, gotCASParam string
+	peerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		gotForwardedFrom = req.Header.Get(headerXCASForwarded)
+		gotCASParam = req.URL.Query().Get("cas")
+		w.Header().Set(headerXSessionClock, `{"peer":1}`)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer peerSrv.Close()
+
+	h := newSelfOnlyHandler(t)
+	h.memberList.Add("peer", peerSrv.Listener.Addr().String())
+	key := keyWithPrimary(t, h.ring, "peer")
+
+	w := doPut(h, "/keys/"+key+"?cas=true", `{"value":"v"}`)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("forwarded CAS: got %d (%s), want 204", w.Code, w.Body.String())
+	}
+	if gotForwardedFrom != "self" {
+		t.Errorf("primary must see %s: self, got %q", headerXCASForwarded, gotForwardedFrom)
+	}
+	if gotCASParam != "true" {
+		t.Errorf("cas param must survive forwarding, got %q", gotCASParam)
+	}
+	// The primary's clock is relayed, and nothing was written locally: the
+	// primary owns the write and fans it back out itself.
+	if got := sessionClockFromHeader(t, w); got["peer"] != 1 {
+		t.Errorf("expected relayed clock {peer:1}, got %v", got)
+	}
+	if _, ok, _ := h.store.Get(key); ok {
+		t.Error("forwarding coordinator must not write locally")
+	}
+}
+
+func TestPutKeyCASForwardRelays412(t *testing.T) {
+	peerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		http.Error(w, "cas conflict: clocks do not dominate the current value", http.StatusPreconditionFailed)
+	}))
+	defer peerSrv.Close()
+
+	h := newSelfOnlyHandler(t)
+	h.memberList.Add("peer", peerSrv.Listener.Addr().String())
+	key := keyWithPrimary(t, h.ring, "peer")
+
+	w := doPut(h, "/keys/"+key+"?cas=true", `{"value":"v"}`)
+	if w.Code != http.StatusPreconditionFailed {
+		t.Fatalf("got %d, want relayed 412", w.Code)
+	}
+}
+
+func TestDeleteKeyCASForwardsToPrimary(t *testing.T) {
+	var gotMethod string
+	peerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		gotMethod = req.Method
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer peerSrv.Close()
+
+	h := newSelfOnlyHandler(t)
+	h.memberList.Add("peer", peerSrv.Listener.Addr().String())
+	key := keyWithPrimary(t, h.ring, "peer")
+
+	req := httptest.NewRequest(http.MethodDelete, "/keys/"+key+"?cas=true", bytes.NewBufferString(`{"clocks":{"peer":1}}`))
+	w := httptest.NewRecorder()
+	h.DeleteKey(w, req)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("forwarded CAS delete: got %d, want 204", w.Code)
+	}
+	if gotMethod != http.MethodDelete {
+		t.Errorf("expected DELETE forwarded, got %q", gotMethod)
+	}
+}
+
+func TestPutKeyCASPrimaryUnavailableFailsClosed(t *testing.T) {
+	h := newSelfOnlyHandler(t)
+	// In the ring but not alive in the member list: reachable by ring walk,
+	// but not a node CAS may trust.
+	h.ring.AddNode("ghost", "localhost:1")
+	key := keyWithPrimary(t, h.ring, "ghost")
+
+	w := doPut(h, "/keys/"+key+"?cas=true", `{"value":"v"}`)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("got %d, want 503", w.Code)
+	}
+	if _, ok, _ := h.store.Get(key); ok {
+		t.Error("fail-closed CAS must not write locally")
+	}
+	// A normal write to the same key still succeeds: fail-closed is CAS-only.
+	if w := doPut(h, "/keys/"+key, `{"value":"v"}`); w.Code != http.StatusNoContent {
+		t.Errorf("plain write: got %d, want 204", w.Code)
+	}
+}
+
+func TestPutKeyCASForwardedMismatchNotReforwarded(t *testing.T) {
+	var peerHits int
+	peerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		peerHits++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer peerSrv.Close()
+
+	h := newSelfOnlyHandler(t)
+	h.memberList.Add("peer", peerSrv.Listener.Addr().String())
+	key := keyWithPrimary(t, h.ring, "peer")
+
+	// An already-forwarded request landing on a node that does not consider
+	// itself primary means ring views diverge: reject, never forward again.
+	req := httptest.NewRequest(http.MethodPut, "/keys/"+key+"?cas=true", bytes.NewBufferString(`{"value":"v"}`))
+	req.Header.Set(headerXCASForwarded, "elsewhere")
+	w := httptest.NewRecorder()
+	h.PutKey(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("got %d, want 503", w.Code)
+	}
+	if peerHits != 0 {
+		t.Errorf("mismatch must not re-forward, primary was hit %d times", peerHits)
+	}
+}
+
 // --- Session guarantee tests ---
 
 func TestPutThenSessionReadIsSatisfied(t *testing.T) {
