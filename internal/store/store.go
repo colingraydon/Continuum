@@ -197,6 +197,12 @@ func (s *Store) LastSeq() uint64 {
 	return s.lastSeq
 }
 
+// ErrCASConflict is returned by PutCAS and DeleteCAS when the incoming
+// version does not causally dominate every existing sibling for the key,
+// meaning the client's precondition clock is stale or concurrent with the
+// current state.
+var ErrCASConflict = errors.New("store: cas conflict")
+
 // tombstoneSentinel is XOR'd into entryHash for deleted siblings so that a
 // tombstone and a zero-hash value produce different hashes.
 const tombstoneSentinel uint32 = 0x544f4d42 // "TOMB"
@@ -325,6 +331,26 @@ func (s *Store) mergeSibling(key string, incoming Sibling) (Entry, bool, error) 
 	return Entry{Siblings: append(survivors, incoming)}, true, nil
 }
 
+// casCheckLocked verifies the compare-and-set precondition: v must causally
+// dominate every existing sibling of key, so the subsequent merge is
+// guaranteed to resolve to exactly one sibling. A missing key passes. Must be
+// called with s.mu held.
+func (s *Store) casCheckLocked(key string, v VectorClockVersion) error {
+	existing, found, err := s.lookupLocked(key)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil
+	}
+	for _, sib := range existing.Siblings {
+		if !sib.Version.HappensBefore(v) {
+			return ErrCASConflict
+		}
+	}
+	return nil
+}
+
 // commitEntry installs a merged entry into the memtable, clearing any prior
 // evict marker and setting the entry's tombstone age (zero for a live write).
 // Because mergeSibling folded in any older-generation state, the memtable now
@@ -342,7 +368,27 @@ func (s *Store) commitEntry(key string, e Entry, incoming Sibling, age time.Time
 // before being applied to memory; any WAL error returns without modifying
 // state. May trigger a memtable flush after the write is applied.
 func (s *Store) Put(key, value string, v VectorClockVersion) error {
+	return s.put(key, value, v, false)
+}
+
+// PutCAS is Put with compare-and-set semantics: the write is applied only if
+// v causally dominates every existing sibling for key, i.e. the caller has
+// seen the complete current state. A stale or concurrent v returns
+// ErrCASConflict without creating a sibling or touching the WAL. A missing
+// key always passes the check, so a CAS from an empty base clock doubles as
+// insert-if-absent.
+func (s *Store) PutCAS(key, value string, v VectorClockVersion) error {
+	return s.put(key, value, v, true)
+}
+
+func (s *Store) put(key, value string, v VectorClockVersion, cas bool) error {
 	s.mu.Lock()
+	if cas {
+		if err := s.casCheckLocked(key, v); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+	}
 	incoming := Sibling{Value: value, Version: v, Hash: murmur3.Sum32([]byte(value))}
 	merged, applied, err := s.mergeSibling(key, incoming)
 	if err != nil {
@@ -395,7 +441,24 @@ func (s *Store) Put(key, value string, v VectorClockVersion) error {
 // writes. When a WAL is installed, the tombstone (with its original wall time)
 // is logged and fsynced before being applied to memory.
 func (s *Store) Delete(key string, v VectorClockVersion) error {
+	return s.del(key, v, false)
+}
+
+// DeleteCAS is Delete with compare-and-set semantics: the tombstone is
+// written only if v causally dominates every existing sibling for key.
+// Returns ErrCASConflict otherwise. See PutCAS.
+func (s *Store) DeleteCAS(key string, v VectorClockVersion) error {
+	return s.del(key, v, true)
+}
+
+func (s *Store) del(key string, v VectorClockVersion, cas bool) error {
 	s.mu.Lock()
+	if cas {
+		if err := s.casCheckLocked(key, v); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+	}
 	incoming := Sibling{Deleted: true, Version: v}
 	merged, applied, err := s.mergeSibling(key, incoming)
 	if err != nil {

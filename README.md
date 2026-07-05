@@ -10,7 +10,7 @@
 
 A distributed key-value store implementing the core data layer patterns from Cassandra and Dynamo - written in Go.
 
-Continuum maps keys to nodes via a consistent hash ring, propagates cluster membership through a gossip protocol, fans writes to N replicas with quorum acknowledgment, surfaces concurrent writes as vector clock siblings rather than discarding them, and repairs divergent replicas through a combination of inline read repair, event-driven hinted handoff, and background Merkle tree anti-entropy. With `DATA_DIR` set, the store runs as an LSM engine: every write goes through a CRC-checked write-ahead log whose fsyncs are batched across concurrent writers by group commit, the memtable flushes to immutable SSTables with bloom filters on a size threshold, and reads merge across generations, so state survives restart and the dataset is no longer RAM-bound on the write path. Buffered hints are persisted to their own append-only log, so undelivered writes survive a coordinator crash rather than depending on anti-entropy alone.
+Continuum maps keys to nodes via a consistent hash ring, propagates cluster membership through a gossip protocol, fans writes to N replicas with quorum acknowledgment, surfaces concurrent writes as vector clock siblings rather than discarding them, and repairs divergent replicas through a combination of inline read repair, event-driven hinted handoff, and background Merkle tree anti-entropy. With `DATA_DIR` set, the store runs as an LSM engine: every write goes through a CRC-checked write-ahead log whose fsyncs are batched across concurrent writers by group commit, the memtable flushes to immutable SSTables with bloom filters on a size threshold, and reads merge across generations, so state survives restart and the dataset is no longer RAM-bound on the write path. Buffered hints are persisted to their own append-only log, so undelivered writes survive a coordinator crash rather than depending on anti-entropy alone. Clients that want more than eventual consistency can opt in per request: conditional writes serialize through the key's primary replica and reject on clock mismatch instead of creating a sibling, and a session clock header buys read-your-writes and monotonic reads.
 
 ---
 
@@ -127,6 +127,7 @@ make coverage  # HTML coverage report
 | [Persistence](docs/persistence.md) | WAL framing, snapshot format, recovery flow, downtime gate |
 | [SSTable](docs/sstable.md) | Immutable sorted table format: compressed data blocks, sparse index, bloom filter, shared block cache |
 | [Read Repair](docs/read-repair.md) | Async repair, always-repair-on-conflict, X-Proxied-From path reuse |
+| [Client Consistency](docs/client-consistency.md) | Conditional writes (CAS) and session guarantees: 412 on clock mismatch, X-Session-Clock, read escalation |
 | [Range Scans](docs/range-scans.md) | Merged LSM prefix scan per node, scatter-gather coordinator, pagination horizon |
 | [Backup and Restore](docs/backup-restore.md) | Hard-linked point-in-time table snapshots; restore through the existing recovery path |
 | [Data Migration](docs/data-migration.md) | Pull on join, push on leave, bootstrapping state machine |
@@ -148,13 +149,12 @@ make coverage  # HTML coverage report
 **Correctness and verification**
 
 - **History checking on the fault harness** - the fault workload already records acknowledged-write histories; feed them through a consistency checker (porcupine-style) to upgrade durability assertions into formal history verification
-- **Session guarantees** - read-your-writes and monotonic reads: the client carries its last-seen vector clock and the coordinator ensures the read result dominates it, closing the sloppy-quorum visibility window
+- **Linearizable CAS** - conditional writes already serialize through the key's primary replica; a consensus round (Paxos/Raft per key range) would close the remaining membership-churn window and keep CAS available through primary failover
 
 **Data model**
 
 - **CRDT sibling auto-merge** - Riak-style server-side data types (counter, set, LWW-register) so clients can opt out of manual sibling resolution
 - **Key TTL** - per-key expiry; interacts with tombstones, compaction, and replica clock skew
-- **Conditional writes (CAS)** - reject on clock mismatch instead of creating a sibling, for clients that want lock-like semantics
 - **Secondary indexes** - local per-node index maintained on write plus a scatter-gather query path, building on the range-scan machinery
 
 **Cluster and operations**

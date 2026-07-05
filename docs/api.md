@@ -12,6 +12,8 @@ The API also owns two non-trivial behaviors that do not fit cleanly in a single 
 
 `X-Proxied-From` - set on all replica sub-requests. When a handler receives a request with this header, it treats itself as a replica, not a coordinator. It stores the value directly without fan-out and without buffering hints. Used by coordinator fan-out, hinted handoff delivery, read repair, and anti-entropy sync pushes.
 
+`X-CAS-Forwarded-From` - set when a coordinator forwards a `?cas=true` write to the key's primary replica. The receiver executes the CAS as a full coordinator (precondition check, fan-out, hints) but will never forward again: if its ring view does not name it primary, it rejects with 503 instead of looping.
+
 ## Endpoints
 
 ### Keys
@@ -23,7 +25,7 @@ Content-Type: application/json
 
 {"value": "alice"}
 ```
-Returns 204. Fans out to the replica set. An optional `clocks` field carries an existing vector clock forward. If omitted, the receiving node's clock is used as the base.
+Returns 204 with an `X-Session-Clock` response header carrying the write's resulting vector clock as a JSON object. Fans out to the replica set. An optional `clocks` field carries an existing vector clock forward. If omitted, the receiving node's clock is used as the base.
 
 **Read a value**
 ```
@@ -58,7 +60,7 @@ Content-Type: application/json
 
 {"clocks": {"node1": 2}}
 ```
-Returns 204. Writes a tombstone sibling at an incremented clock. The tombstone participates in conflict resolution identically to a value write.
+Returns 204 with an `X-Session-Clock` header carrying the tombstone's clock. Writes a tombstone sibling at an incremented clock. The tombstone participates in conflict resolution identically to a value write.
 
 **Per-request consistency**
 
@@ -76,6 +78,22 @@ GET /keys/profile?consistency=one
 ```
 
 An unrecognized level returns 400 without any side effect. Absent, the process default applies. Like the configured W/R, the level is clamped to the currently available replica set, so `all` means "all current replicas", not a hard durability floor — see [Replication](replication.md).
+
+**Conditional writes (CAS)**
+```
+PUT /keys/:key?cas=true
+Content-Type: application/json
+
+{"value": "bob", "clocks": {"node1": 2}}
+```
+`?cas=true` on PUT or DELETE makes the `clocks` field a precondition: the write is applied only if it causally dominates every existing sibling of the key, and otherwise rejected with 412 instead of creating a sibling. An empty or absent `clocks` field means "expect no current value", so a CAS PUT doubles as insert-if-absent. Whichever node receives the request, the check executes on the key's primary replica (non-primary coordinators forward and relay the verdict), so concurrent CAS writes to a key serialize cluster-wide: exactly one gets 204 and the rest get 412. If the primary is down or ring views disagree, CAS fails closed with a retryable 503 rather than risking a fork. Any `cas` value other than `true` or `false` returns 400 without side effects. See [Client Consistency](client-consistency.md) for semantics and the remaining membership-churn caveat.
+
+**Session reads**
+```
+GET /keys/:key
+X-Session-Clock: {"node1": 2}
+```
+An `X-Session-Clock` request header (the JSON clock returned by a previous write or read of the same key) asks the coordinator to guarantee the result dominates that clock: read-your-writes and monotonic reads. If the initial quorum read does not cover the session clock, the coordinator escalates to every replica; if the cluster still cannot produce a covering result the read fails with 503 rather than silently returning stale data. Every coordinator GET response carries the observed merged clock back in `X-Session-Clock` (including the 404 for a tombstone). A malformed header returns 400.
 
 **Scan keys by prefix**
 ```
