@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"sort"
+
+	"github.com/klauspost/compress/s2"
 )
 
 // Reader serves point lookups and ordered scans from a finished table. The
@@ -19,6 +21,7 @@ type Reader struct {
 	index    []indexEntry
 	bloom    *bloom
 	count    uint64
+	version  uint16
 	smallest []byte
 	largest  []byte
 	closer   io.Closer
@@ -86,7 +89,7 @@ func NewReader(ra io.ReaderAt, size int64) (*Reader, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &Reader{r: ra, index: index, bloom: bl, count: f.count}
+	r := &Reader{r: ra, index: index, bloom: bl, count: f.count, version: f.version}
 	if len(index) > 0 {
 		r.smallest = index[0].firstKey
 		r.largest = largest
@@ -157,7 +160,26 @@ func (r *Reader) readBlock(e indexEntry) ([]byte, error) {
 	if crc32.ChecksumIEEE(body) != binary.BigEndian.Uint32(buf[len(buf)-4:]) {
 		return nil, fmt.Errorf("%w: data block at offset %d", errCRC, e.offset)
 	}
-	return body, nil
+	if r.version == version1 {
+		return body, nil // v1 blocks are raw with no type byte
+	}
+	if len(body) < 1 {
+		return nil, errors.New("sstable: invalid block length")
+	}
+	typ := body[len(body)-1]
+	body = body[:len(body)-1]
+	switch typ {
+	case blockTypeRaw:
+		return body, nil
+	case blockTypeS2:
+		decoded, err := s2.Decode(nil, body)
+		if err != nil {
+			return nil, fmt.Errorf("sstable: decompress block at offset %d: %w", e.offset, err)
+		}
+		return decoded, nil
+	default:
+		return nil, fmt.Errorf("sstable: unknown block type %d at offset %d", typ, e.offset)
+	}
 }
 
 // Iter returns an iterator over all entries in key order, positioned before

@@ -16,13 +16,17 @@ import (
 //
 //   [data block]... [index block] [bloom block] [footer]
 //
-// data block:   (key_len:2 | key | val_len:4 | val)... | crc32:4
-//   Entries are sorted by key. A block closes at the first entry that pushes
-//   it past BlockSize, so a single oversized entry gets its own block.
+// data block (version 2):  payload | type:1 | crc32:4
+//   type selects the payload encoding: 0 = raw, 1 = s2-compressed. The CRC
+//   covers payload and type, so corruption is detected before decompression.
+//   The payload holds (key_len:2 | key | val_len:4 | val)... entries sorted
+//   by key; a block closes at the first entry that pushes its uncompressed
+//   size past BlockSize, so a single oversized entry gets its own block.
+//   Version-1 blocks are the same without the type byte (always raw).
 //
 // index block:  count:4 | (first_key_len:2 | first_key | offset:8 | len:4)×count
 //               | largest_key_len:2 | largest_key | crc32:4
-//   offset/len locate each data block; len includes the CRC trailer.
+//   offset/len locate each data block; len includes the type and CRC trailer.
 //
 // bloom block:  k:1 | bits | crc32:4
 //
@@ -42,8 +46,14 @@ const (
 	maxValueLen = 1 << 30
 
 	footerSize = 50
-	version    = uint16(1)
-	magic      = "CSST"
+	// version1 tables have raw data blocks with no type byte; version2 adds
+	// per-block compression. Writers emit version2; readers accept both.
+	version1 = uint16(1)
+	version2 = uint16(2)
+	magic    = "CSST"
+
+	blockTypeRaw = byte(0)
+	blockTypeS2  = byte(1)
 )
 
 var (
@@ -59,6 +69,10 @@ type Options struct {
 	BlockSize int
 	// BitsPerKey sizes the bloom filter; 10 gives ~1% false positives.
 	BitsPerKey int
+	// DisableCompression stores every data block raw. By default each block
+	// is s2-compressed, falling back to raw per block when compression does
+	// not shrink it.
+	DisableCompression bool
 }
 
 func (o Options) withDefaults() Options {
@@ -108,6 +122,7 @@ type footer struct {
 	indexOff, indexLen uint64
 	bloomOff, bloomLen uint64
 	count              uint64
+	version            uint16
 }
 
 func encodeFooter(f footer) []byte {
@@ -117,7 +132,7 @@ func encodeFooter(f footer) []byte {
 	buf = binary.BigEndian.AppendUint64(buf, f.bloomOff)
 	buf = binary.BigEndian.AppendUint64(buf, f.bloomLen)
 	buf = binary.BigEndian.AppendUint64(buf, f.count)
-	buf = binary.BigEndian.AppendUint16(buf, version)
+	buf = binary.BigEndian.AppendUint16(buf, f.version)
 	buf = binary.BigEndian.AppendUint32(buf, crc32.ChecksumIEEE(buf))
 	return append(buf, magic...)
 }
@@ -132,10 +147,12 @@ func decodeFooter(b []byte) (footer, error) {
 	if crc32.ChecksumIEEE(b[:42]) != binary.BigEndian.Uint32(b[42:46]) {
 		return footer{}, fmt.Errorf("%w: crc mismatch", errBadFooter)
 	}
-	if v := binary.BigEndian.Uint16(b[40:42]); v != version {
+	v := binary.BigEndian.Uint16(b[40:42])
+	if v != version1 && v != version2 {
 		return footer{}, fmt.Errorf("sstable: unsupported version %d", v)
 	}
 	return footer{
+		version:  v,
 		indexOff: binary.BigEndian.Uint64(b[0:8]),
 		indexLen: binary.BigEndian.Uint64(b[8:16]),
 		bloomOff: binary.BigEndian.Uint64(b[16:24]),
