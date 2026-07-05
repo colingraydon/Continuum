@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"sort"
 	"testing"
+	"time"
 )
 
 // mv builds a memValue carrying a live entry whose single sibling value marks
@@ -137,6 +138,24 @@ func TestSkiplistFuzzAgainstMap(t *testing.T) {
 		if !ok || v.entry.Siblings[0].Value != want {
 			t.Fatalf("get(%q) = (%+v, %v), want %q", k, v, ok, want)
 		}
+	}
+}
+
+// TestMemIterPastEnd exercises the iterator's exhaustion guard: calling next
+// after it has already returned false stays false instead of dereferencing a
+// nil node.
+func TestMemIterPastEnd(t *testing.T) {
+	m := newMemtable()
+	m.putEntry("a", Entry{Siblings: []Sibling{{Value: "1"}}}, time.Time{}, 1)
+	it := m.iter()
+	if !it.next() {
+		t.Fatal("want first key")
+	}
+	if it.next() {
+		t.Fatal("want end after one key")
+	}
+	if it.next() {
+		t.Fatal("next past end must stay false")
 	}
 }
 
