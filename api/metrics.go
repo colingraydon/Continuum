@@ -98,7 +98,13 @@ func RecordHealthStats(healthy, suspect, dead int) {
 // read at scrape time. Call once at startup; with no cache configured every
 // series reads zero.
 func RegisterBlockCacheMetrics(stats func() sstable.CacheStats) {
-	prometheus.MustRegister(
+	prometheus.MustRegister(blockCacheCollectors(stats)...)
+}
+
+// blockCacheCollectors builds the scrape-time collectors so tests can
+// register them against a private registry.
+func blockCacheCollectors(stats func() sstable.CacheStats) []prometheus.Collector {
+	return []prometheus.Collector{
 		prometheus.NewCounterFunc(prometheus.CounterOpts{
 			Name: "continuum_block_cache_hits_total",
 			Help: "Total SSTable block cache hits",
@@ -115,5 +121,5 @@ func RegisterBlockCacheMetrics(stats func() sstable.CacheStats) {
 			Name: "continuum_block_cache_entries",
 			Help: "Number of blocks currently held by the block cache",
 		}, func() float64 { return float64(stats().Entries) }),
-	)
+	}
 }

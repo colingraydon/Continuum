@@ -51,6 +51,45 @@ func TestBloomCorruption(t *testing.T) {
 	}
 }
 
+func TestShortBlockLengthRejected(t *testing.T) {
+	// An index entry claiming a block shorter than its own CRC trailer.
+	r := openTable(t, assembleTable([]byte{1, 2, 3}))
+	if _, _, err := r.Get([]byte("a")); err == nil {
+		t.Fatal("Get on a 3-byte block: want error")
+	}
+}
+
+// failingBlockReaderAt serves reads at or above failBelow (footer, index,
+// bloom) and fails everything below it (the data block region).
+type failingBlockReaderAt struct {
+	data      []byte
+	failBelow int64
+}
+
+func (f failingBlockReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	if off < f.failBelow {
+		return 0, errors.New("boom")
+	}
+	return bytes.NewReader(f.data).ReadAt(p, off)
+}
+
+func TestBlockReadErrorSurfaced(t *testing.T) {
+	entries := sortedEntries(100)
+	data := buildTable(t, Options{BlockSize: 256}, entries)
+	f, err := decodeFooter(data[len(data)-footerSize:])
+	if err != nil {
+		t.Fatalf("decodeFooter: %v", err)
+	}
+	// Metadata reads succeed, so the reader opens; the data block read fails.
+	r, err := NewReader(failingBlockReaderAt{data: data, failBelow: int64(f.indexOff)}, int64(len(data)))
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	if _, _, err := r.Get(entries[0].key); err == nil {
+		t.Fatal("Get with failing block read: want error")
+	}
+}
+
 func TestCloseNewReaderIsNoop(t *testing.T) {
 	// A reader built via NewReader owns no file handle; Close is a no-op.
 	r := openTable(t, buildTable(t, Options{}, sortedEntries(5)))

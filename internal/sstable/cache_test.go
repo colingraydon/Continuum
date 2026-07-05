@@ -150,8 +150,8 @@ func TestCacheRejectsOversizedBlock(t *testing.T) {
 }
 
 func TestNilCacheIsSafe(t *testing.T) {
-	var c *Cache // NewCache(0) returns nil too
-	if got := NewCache(0); got != nil {
+	var c *Cache
+	if NewCache(0) != nil {
 		t.Fatal("NewCache(0) should return nil")
 	}
 	if _, ok := c.get(1, 0); ok {

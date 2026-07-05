@@ -151,6 +151,62 @@ func TestUnknownBlockTypeRejected(t *testing.T) {
 	}
 }
 
+// assembleTable wraps the given verbatim on-disk block bytes in an otherwise
+// valid version-2 table for the single key "a", so tests can hand a Reader a
+// data block the Writer could never produce.
+func assembleTable(block []byte) []byte {
+	buf := append([]byte(nil), block...)
+	index := []indexEntry{{firstKey: []byte("a"), offset: 0, length: uint32(len(block))}}
+	f := footer{indexOff: uint64(len(buf)), count: 1, version: version2}
+	ib := encodeIndexBlock(index, []byte("a"))
+	buf = append(buf, ib...)
+	f.indexLen = uint64(len(ib))
+	f.bloomOff = uint64(len(buf))
+	bl := newBloom(1, DefaultBitsPerKey)
+	h1, h2 := murmur3.Sum128([]byte("a"))
+	bl.addHash(h1, h2)
+	bb := encodeBloomBlock(bl)
+	buf = append(buf, bb...)
+	f.bloomLen = uint64(len(bb))
+	return append(buf, encodeFooter(f)...)
+}
+
+// buildBadBlockTable CRC-seals the given block content (payload + type byte)
+// and assembles it into a table, so only post-CRC decode logic can reject it.
+func buildBadBlockTable(block []byte) []byte {
+	return assembleTable(binary.BigEndian.AppendUint32(append([]byte(nil), block...), crc32.ChecksumIEEE(block)))
+}
+
+func TestInvalidS2PayloadRejected(t *testing.T) {
+	// 0xFF... is not a valid s2 stream: the CRC passes, decompression fails.
+	block := append(bytes.Repeat([]byte{0xFF}, 8), blockTypeS2)
+	r := openTable(t, buildBadBlockTable(block))
+	if _, _, err := r.Get([]byte("a")); err == nil {
+		t.Fatal("Get on undecodable s2 block: want error")
+	}
+}
+
+func TestEmptyV2BlockBodyRejected(t *testing.T) {
+	// A v2 block must hold at least its type byte; hand-build one that is
+	// only a CRC trailer (the writer can never produce this).
+	r := openTable(t, buildBadBlockTable(nil))
+	if _, _, err := r.Get([]byte("a")); err == nil {
+		t.Fatal("Get on typeless v2 block: want error")
+	}
+}
+
+func TestUnsupportedFooterVersionRejected(t *testing.T) {
+	data := buildTable(t, Options{}, sortedEntries(10))
+	// Stamp version 3 into the footer and re-seal its CRC so only the
+	// version check can reject it.
+	off := len(data) - footerSize
+	binary.BigEndian.PutUint16(data[off+40:], 3)
+	binary.BigEndian.PutUint32(data[off+42:], crc32.ChecksumIEEE(data[off:off+42]))
+	if _, err := NewReader(bytes.NewReader(data), int64(len(data))); err == nil {
+		t.Fatal("NewReader on footer version 3: want error")
+	}
+}
+
 // buildV1Table writes a table in the version-1 format — raw data blocks with
 // no type byte — exactly as the pre-compression writer produced, so reader
 // compatibility with tables already on disk stays pinned.
