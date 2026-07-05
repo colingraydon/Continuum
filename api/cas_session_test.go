@@ -377,22 +377,23 @@ func TestSessionReadInvalidHeaderRejected(t *testing.T) {
 	}
 }
 
-// TestSessionReadEscalatesPastQuorum proves the visibility-window fix: with
-// R=1 the quorum read may hit a replica that has not seen the session's
-// write, and the coordinator must escalate to the full replica set to
-// satisfy the session clock rather than returning the stale value.
-func TestSessionReadEscalatesPastQuorum(t *testing.T) {
-	// Remote replica that holds the newer write.
+// sessionReadWithStalePeer builds a two-node read set (self plus an httptest
+// peer serving peerValue at peerClocks), seeds the coordinator's local store
+// with a stale "sess-key" at {peer:1}, and performs a session GET carrying
+// sessionClock. With R=1 the quorum read may hit either replica, so the
+// outcome exercises the escalation path deterministically.
+func sessionReadWithStalePeer(t *testing.T, peerValue string, peerClocks map[string]uint64, sessionClock string) *httptest.ResponseRecorder {
+	t.Helper()
 	peerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodGet {
 			w.WriteHeader(http.StatusNoContent) // absorb read-repair writes
 			return
 		}
-		resp := NodeResponse{ID: "peer", Status: "alive", Value: "new", Clocks: map[string]uint64{"peer": 2}}
+		resp := NodeResponse{ID: "peer", Status: "alive", Value: peerValue, Clocks: peerClocks}
 		w.Header().Set(contentTypeHeader, contentTypeJSON)
 		_ = json.NewEncoder(w).Encode(resp)
 	}))
-	defer peerSrv.Close()
+	t.Cleanup(peerSrv.Close)
 
 	r := ring.NewRing(10)
 	ml := newTestMemberList(r)
@@ -400,16 +401,24 @@ func TestSessionReadEscalatesPastQuorum(t *testing.T) {
 	h := NewHandler(r, ml, s, HandlerConfig{SelfID: "self", ReplicationFactor: 3, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, nil)
 	r.AddNode("self", "localhost:8080")
 	r.AddNode("peer", peerSrv.Listener.Addr().String())
-
-	// The coordinator holds a stale version the session has already moved past.
 	if err := s.Put("sess-key", "stale", store.VectorClockVersion{Clocks: map[string]uint64{"peer": 1}}); err != nil {
 		t.Fatalf("seed put: %v", err)
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/keys/sess-key", nil)
-	req.Header.Set(headerXSessionClock, `{"peer":2}`)
+	req.Header.Set(headerXSessionClock, sessionClock)
 	w := httptest.NewRecorder()
 	h.GetNode(w, req)
+	return w
+}
+
+// TestSessionReadEscalatesPastQuorum proves the visibility-window fix: with
+// R=1 the quorum read may hit a replica that has not seen the session's
+// write, and the coordinator must escalate to the full replica set to
+// satisfy the session clock rather than returning the stale value.
+func TestSessionReadEscalatesPastQuorum(t *testing.T) {
+	// The peer holds the newer write the session has already seen.
+	w := sessionReadWithStalePeer(t, "new", map[string]uint64{"peer": 2}, `{"peer":2}`)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got %d (%s), want 200", w.Code, w.Body.String())
@@ -431,29 +440,9 @@ func TestSessionReadEscalatesPastQuorum(t *testing.T) {
 // fails closed too: when even the full replica set cannot cover the session
 // clock, the coordinator returns 503 instead of the freshest stale value.
 func TestSessionReadEscalationStillUnsatisfiableFails(t *testing.T) {
-	peerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		resp := NodeResponse{ID: "peer", Status: "alive", Value: "stale", Clocks: map[string]uint64{"peer": 1}}
-		w.Header().Set(contentTypeHeader, contentTypeJSON)
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
-	defer peerSrv.Close()
-
-	r := ring.NewRing(10)
-	ml := newTestMemberList(r)
-	s := store.New()
-	h := NewHandler(r, ml, s, HandlerConfig{SelfID: "self", ReplicationFactor: 3, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, nil)
-	r.AddNode("self", "localhost:8080")
-	r.AddNode("peer", peerSrv.Listener.Addr().String())
-	if err := s.Put("sess-key", "stale", store.VectorClockVersion{Clocks: map[string]uint64{"peer": 1}}); err != nil {
-		t.Fatalf("seed put: %v", err)
-	}
-
 	// No replica has ever seen {peer:2}: quorum read misses, escalation to
 	// both replicas misses too.
-	req := httptest.NewRequest(http.MethodGet, "/keys/sess-key", nil)
-	req.Header.Set(headerXSessionClock, `{"peer":2}`)
-	w := httptest.NewRecorder()
-	h.GetNode(w, req)
+	w := sessionReadWithStalePeer(t, "stale", map[string]uint64{"peer": 1}, `{"peer":2}`)
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("got %d, want 503", w.Code)
