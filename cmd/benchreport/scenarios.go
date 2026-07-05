@@ -15,6 +15,7 @@ import (
 	"github.com/colingraydon/continuum/internal/antientropy"
 	"github.com/colingraydon/continuum/internal/gossip"
 	"github.com/colingraydon/continuum/internal/ring"
+	"github.com/colingraydon/continuum/internal/sstable"
 	"github.com/colingraydon/continuum/internal/store"
 	"github.com/colingraydon/continuum/internal/wal"
 )
@@ -175,9 +176,15 @@ func scenarios(tmpDir string) []scenario {
 		},
 		{
 			name:        "store_get_sstable",
-			description: "Point read served from an SSTable: bloom filter, index binary search, one block read.",
+			description: "Point read served from an SSTable: bloom filter, index binary search, one block read (no block cache).",
 			samples:     100_000,
-			run:         runStoreGetSSTable(tmpDir),
+			run:         runStoreGetSSTable(tmpDir, 0),
+		},
+		{
+			name:        "store_get_sstable_cached",
+			description: "Point read served from an SSTable through the shared block cache; steady state, so blocks arrive decompressed from memory with no disk read.",
+			samples:     100_000,
+			run:         runStoreGetSSTable(tmpDir, 16<<20),
 		},
 		{
 			name:        "durable_put_sequential",
@@ -261,13 +268,18 @@ func runRingLookupBatches(samples int) ([]time.Duration, time.Duration, error) {
 	return lats, wall / batch, nil
 }
 
-func runStoreGetSSTable(tmpDir string) func(int) ([]time.Duration, time.Duration, error) {
+// runStoreGetSSTable measures table point reads; cacheBytes > 0 installs a
+// shared block cache of that size (and names the fixture dir after it so the
+// two scenarios don't collide).
+func runStoreGetSSTable(tmpDir string, cacheBytes int64) func(int) ([]time.Duration, time.Duration, error) {
 	return func(samples int) ([]time.Duration, time.Duration, error) {
-		s, cleanup, err := newDurableStore(filepath.Join(tmpDir, "get"))
+		dir := filepath.Join(tmpDir, fmt.Sprintf("get-%d", cacheBytes))
+		s, cleanup, err := newDurableStore(dir)
 		if err != nil {
 			return nil, 0, err
 		}
 		defer cleanup()
+		s.SetBlockCache(sstable.NewCache(cacheBytes))
 		const keys = 10_000
 		for i := 0; i < keys; i++ {
 			if err := s.Put(fmt.Sprintf("gk-%08d", i), benchValue, clock(uint64(i+1))); err != nil {

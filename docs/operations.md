@@ -22,6 +22,7 @@
 | `SELF_WEIGHT` | `1.0` | Capacity weight for vnode allocation; `2.0` gives twice the vnodes |
 | `DATA_DIR` | (none) | Directory for WAL + SSTable persistence. Empty disables persistence (memory-only) |
 | `MEMTABLE_MAX_BYTES` | `16777216` (16 MiB) | Memtable size that triggers a flush to an SSTable (requires `DATA_DIR`) |
+| `BLOCK_CACHE_BYTES` | `16777216` (16 MiB) | Shared LRU cache over decompressed SSTable blocks; `0` disables it (requires `DATA_DIR`) |
 
 **Notes on specific variables:**
 
@@ -97,12 +98,17 @@ Exposed at `GET /metrics` on each node's HTTP port.
 | `continuum_ring_healthy_nodes` | Gauge | Nodes currently alive per gossip |
 | `continuum_ring_suspect_nodes` | Gauge | Nodes currently suspect per gossip |
 | `continuum_ring_dead_nodes` | Gauge | Nodes currently dead per gossip |
+| `continuum_block_cache_hits_total` | Counter | SSTable block cache hits |
+| `continuum_block_cache_misses_total` | Counter | SSTable block cache misses |
+| `continuum_block_cache_bytes` | Gauge | Decompressed block bytes held by the block cache, including per-entry overhead |
+| `continuum_block_cache_entries` | Gauge | Blocks currently held by the block cache |
 
 **Useful Grafana queries**
 
 ```
 rate(continuum_http_requests_total[1m])
 rate(continuum_http_request_duration_seconds_sum[1m])
+rate(continuum_block_cache_hits_total[5m]) / (rate(continuum_block_cache_hits_total[5m]) + rate(continuum_block_cache_misses_total[5m]))
 continuum_ring_healthy_nodes
 continuum_ring_suspect_nodes
 continuum_ring_dead_nodes

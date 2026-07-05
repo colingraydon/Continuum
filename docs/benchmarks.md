@@ -112,13 +112,15 @@ fsync rate; more concurrency amortizes each fsync over more writes.
 
 | Read | Latency |
 | ---- | ------- |
-| Get from 1 table (bloom → index → 1 block read) | 2.7 µs/op |
-| Get spread over 4 tables | 3.0 µs/op |
+| Get from 1 table, no cache (bloom → index → 1 block read) | 2.4 µs/op |
+| Get from 1 table through the block cache (steady state) | 0.77 µs/op |
+| Get spread over 4 tables, no cache | 3.0 µs/op |
 
 The multi-generation penalty is small because bloom filters short-circuit the
-tables that don't hold the key (~1% false-positive rate at 10 bits/key). This
-is the baseline the planned block cache should improve on: every one of these
-reads currently hits the filesystem.
+tables that don't hold the key (~1% false-positive rate at 10 bits/key). The
+block cache is the before/after of the compression + cache work: an uncached
+read pays a filesystem read, a CRC check, and block decompression on every
+probe; a steady-state cached read skips all three and lands **~3× cheaper**.
 
 **Scans and GC:**
 
@@ -192,7 +194,8 @@ doesn't wait for them.
 
 - A durable quorum write is dominated by the WAL fsync (~ms), not the fan-out
   (~0.1 ms). Group commit is what makes durable throughput usable.
-- Reads are cheap at every layer (67 ns memtable, 2.7 µs table, 100 µs
-  quorum round trip); the planned block cache targets the middle layer.
+- Reads are cheap at every layer (67 ns memtable, 0.8 µs cached / 2.4 µs
+  uncached table, 100 µs quorum round trip); the block cache cut the middle
+  layer ~3× for hot keys.
 - Anti-entropy's background costs are all sub-ms except full rebuilds, which
   only membership changes trigger.

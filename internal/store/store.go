@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/colingraydon/continuum/internal/sstable"
 	"github.com/colingraydon/continuum/internal/wal"
 	"github.com/twmb/murmur3"
 )
@@ -139,6 +140,7 @@ type Store struct {
 	nextFileNum   uint64 // next table file number to allocate
 	compacting    bool
 	compaction    compactionPolicy
+	blockCache    *sstable.Cache // shared across all table readers; nil = uncached
 	// tablesRW guards table-reader lifetime. Lock-free reads (Get, KeyHashes)
 	// hold it shared while reading from table files outside s.mu; compaction
 	// takes it exclusively before closing retired readers, so a closed reader
@@ -170,6 +172,24 @@ func (s *Store) SetWAL(w WAL) {
 		return
 	}
 	s.wal = w
+}
+
+// SetBlockCache installs a shared SSTable block cache attached to every
+// table reader the store opens. Call once at startup, before OpenTables and
+// before any flush or compaction can run; a nil cache disables caching.
+func (s *Store) SetBlockCache(c *sstable.Cache) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.blockCache = c
+}
+
+// BlockCacheStats reports block cache effectiveness; all zeros when no cache
+// is installed.
+func (s *Store) BlockCacheStats() sstable.CacheStats {
+	s.mu.RLock()
+	c := s.blockCache
+	s.mu.RUnlock()
+	return c.Stats()
 }
 
 // SetOnUpdate registers a callback invoked after every write that changes the

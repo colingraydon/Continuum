@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/colingraydon/continuum/internal/sstable"
 	"github.com/colingraydon/continuum/internal/store"
 	"github.com/colingraydon/continuum/internal/wal"
 )
@@ -86,6 +87,24 @@ func populateAndFlush(b *testing.B, s *store.Store, prefix string, n int) {
 // (bloom filter -> index binary search -> one block read).
 func BenchmarkStoreGetFromTable(b *testing.B) {
 	s := newDurableStore(b, 0)
+	const keys = 10_000
+	populateAndFlush(b, s, "tbl", keys)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		key := fmt.Sprintf("tbl-%08d", i%keys)
+		if _, ok, err := s.Get(key); err != nil || !ok {
+			b.Fatalf("Get(%s): ok=%v err=%v", key, ok, err)
+		}
+	}
+}
+
+// BenchmarkStoreGetFromTableCached: the same reads with a 16 MiB shared block
+// cache, so after the first pass every block is served from memory — no disk
+// read, CRC check, or decompression. Compare against GetFromTable for the
+// cache's effect on the steady-state hot read path.
+func BenchmarkStoreGetFromTableCached(b *testing.B) {
+	s := newDurableStore(b, 0)
+	s.SetBlockCache(sstable.NewCache(16 << 20))
 	const keys = 10_000
 	populateAndFlush(b, s, "tbl", keys)
 	b.ResetTimer()

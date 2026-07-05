@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/colingraydon/continuum/internal/sstable"
 	"github.com/colingraydon/continuum/internal/store"
 	"github.com/colingraydon/continuum/internal/wal"
 )
@@ -59,10 +60,11 @@ type persistence struct {
 // recoverStore opens dataDir, applies the downtime gate, attaches SSTables
 // (migrating a legacy snapshot if one is present), replays the WAL tail, and
 // returns the populated store plus a persistence handle for shutdown.
-// memtableMaxBytes sets the flush threshold. If dataDir is empty,
+// memtableMaxBytes sets the flush threshold; blockCacheBytes sizes the
+// shared SSTable block cache (<= 0 disables it). If dataDir is empty,
 // persistence is disabled and a fresh in-memory store is returned with nil
 // persistence.
-func recoverStore(dataDir, nodeID string, gcTTL time.Duration, memtableMaxBytes int64) (*store.Store, *persistence, error) {
+func recoverStore(dataDir, nodeID string, gcTTL time.Duration, memtableMaxBytes, blockCacheBytes int64) (*store.Store, *persistence, error) {
 	if dataDir == "" {
 		return store.New(), nil, nil
 	}
@@ -82,6 +84,9 @@ func recoverStore(dataDir, nodeID string, gcTTL time.Duration, memtableMaxBytes 
 	}
 
 	s := store.New()
+	// The cache must be installed before OpenTables so every reader — restored,
+	// flushed, or compacted — is attached to it.
+	s.SetBlockCache(sstable.NewCache(blockCacheBytes))
 	p := &persistence{dataDir: dataDir, nodeID: nodeID, s: s}
 
 	if downtimeGateFired(m, hasMeta, gcTTL) {

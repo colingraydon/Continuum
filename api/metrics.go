@@ -3,6 +3,8 @@ package api
 import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+
+	"github.com/colingraydon/continuum/internal/sstable"
 )
 
 var (
@@ -90,4 +92,28 @@ func RecordHealthStats(healthy, suspect, dead int) {
 	ringHealthyNodes.Set(float64(healthy))
 	ringSuspectNodes.Set(float64(suspect))
 	ringDeadNodes.Set(float64(dead))
+}
+
+// RegisterBlockCacheMetrics exposes the store's SSTable block cache counters,
+// read at scrape time. Call once at startup; with no cache configured every
+// series reads zero.
+func RegisterBlockCacheMetrics(stats func() sstable.CacheStats) {
+	prometheus.MustRegister(
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Name: "continuum_block_cache_hits_total",
+			Help: "Total SSTable block cache hits",
+		}, func() float64 { return float64(stats().Hits) }),
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Name: "continuum_block_cache_misses_total",
+			Help: "Total SSTable block cache misses",
+		}, func() float64 { return float64(stats().Misses) }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "continuum_block_cache_bytes",
+			Help: "Bytes of decompressed blocks currently held by the block cache, including per-entry overhead",
+		}, func() float64 { return float64(stats().Bytes) }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "continuum_block_cache_entries",
+			Help: "Number of blocks currently held by the block cache",
+		}, func() float64 { return float64(stats().Entries) }),
+	)
 }
