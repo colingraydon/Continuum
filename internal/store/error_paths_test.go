@@ -162,14 +162,13 @@ func TestCompactTableSizesError(t *testing.T) {
 func TestDroppableAtBottom(t *testing.T) {
 	cutoff := time.Now().Add(-24 * time.Hour)
 	tomb := func(age time.Time) []byte {
-		v, err := encodeTableEntry("k", Entry{Siblings: []Sibling{{Deleted: true, Version: vclock("c", 1)}}},
-			map[string]time.Time{"k": age})
+		v, err := encodeTableEntry("k", Entry{Siblings: []Sibling{{Deleted: true, Version: vclock("c", 1)}}}, age)
 		if err != nil {
 			t.Fatal(err)
 		}
 		return v
 	}
-	live, err := encodeTableEntry("k", Entry{Siblings: []Sibling{{Value: "v", Version: vclock("c", 1)}}}, nil)
+	live, err := encodeTableEntry("k", Entry{Siblings: []Sibling{{Value: "v", Version: vclock("c", 1)}}}, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,9 +215,9 @@ func TestDecodeTableEntryErrors(t *testing.T) {
 }
 
 func TestEncodeDecodeTableEntryRoundTrip(t *testing.T) {
-	ages := map[string]time.Time{"k": time.Unix(1234567890, 0)}
+	age := time.Unix(1234567890, 0)
 	e := Entry{Siblings: []Sibling{{Value: "hello", Version: vclock("c", 3), Hash: 42}}}
-	val, err := encodeTableEntry("k", e, ages)
+	val, err := encodeTableEntry("k", e, age)
 	if err != nil {
 		t.Fatalf("encodeTableEntry: %v", err)
 	}

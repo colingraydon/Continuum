@@ -118,7 +118,7 @@ Triggered by the write that pushes the memtable past `MEMTABLE_MAX_BYTES`
 (and forced at shutdown):
 
 1. Under `s.mu`: move the active memtable (entries + evict markers + tombstone ages) to the *frozen* slot and install a fresh one. Reads consult memtable → frozen → tables, so nothing disappears.
-2. Outside the lock: sort the frozen keys, stream them through the SSTable writer to `tables/NNNNNNNN.sst.tmp` (named by the highest WAL seq the memtable covers), fsync, rename, fsync the directory.
+2. Outside the lock: walk the frozen memtable in key order (the skiplist is already sorted), stream the entries through the SSTable writer to `tables/NNNNNNNN.sst.tmp` (named by the highest WAL seq the memtable covers), fsync, rename, fsync the directory.
 3. Under `s.mu`: attach the new table reader at the front, clear the frozen slot.
 4. `TruncateThrough(seq)` deletes WAL segments the table now covers.
 

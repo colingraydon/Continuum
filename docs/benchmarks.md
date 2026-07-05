@@ -127,12 +127,16 @@ probe; a steady-state cached read skips all three and lands **~3× cheaper**.
 | Operation | Latency |
 | --------- | ------- |
 | Scan page (100 keys of a 10k-key prefix, 1 table + memtable overlay) | 6.2 ms/op |
+| Scan page (100 keys served from a 10k-key memtable, ordered overlay) | 17 µs/op |
 | Tombstone GC pass over 10k aged tombstones | 1.3 ms pause |
 
-The scan number reflects a documented tradeoff: a page reads the *entire*
-prefix range before sorting and cutting to `limit`, so paging through a large
-prefix is O(range) per page. A k-way merging iterator with early termination
-(and the skiplist memtable) is the known follow-up if scan volume grows.
+The memtable overlay is now an ordered skiplist, so it seeks to the range start
+and touches only the matching keys instead of sweeping and sorting the whole
+memtable per scan. The table-backed scan number still reflects a documented
+tradeoff: a page reads the *entire* prefix range from the SSTable before
+cutting to `limit`, so paging through a large table prefix stays O(range) per
+page. A k-way merging iterator with early termination across tables is the
+known follow-up if scan volume grows.
 
 ## Anti-entropy and Merkle trees
 

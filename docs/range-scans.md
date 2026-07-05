@@ -132,13 +132,15 @@ tombstone handling. There is one behavioral difference - point reads repair
 stale replicas they discover; scans do not (repair fan-out for up to `limit`
 keys per page would turn a read into a write storm; anti-entropy covers it).
 
-### Map Memtable, Sorted at Scan Time
+### Ordered Skiplist Memtable
 
-The memtable is a hash map, so scans sort matching memtable keys per call
-rather than maintaining sorted order on every write. Point writes stay O(1);
-scans pay O(m log m) over memtable matches, bounded by `MEMTABLE_MAX_BYTES`.
-A skiplist memtable (the standard LSM answer) is deferred until scan volume
-justifies making every write pay for ordering.
+The memtable is an ordered skiplist (`internal/store/skiplist.go`), so a scan
+seeks to the range start and walks only the matching keys — the same bounded
+walk the table scan uses, since keys with a given prefix form a contiguous
+range. Point writes stay O(log m); the overlay no longer sweeps and sorts the
+whole memtable on every scan. A narrow-prefix page over a 10k-key memtable
+drops from a full O(m) sweep to ~100 touched keys (see
+`BenchmarkStoreScanMemtablePrefix`).
 
 ## See Also
 

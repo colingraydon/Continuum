@@ -61,7 +61,7 @@ flowchart TB
 | ----- | ------- | ---- |
 | Hash Ring | `internal/ring` | Routes keys to nodes via consistent hashing with a Red-Black Tree and virtual nodes |
 | Gossip | `internal/gossip` | Cluster membership and failure detection over UDP without a central coordinator |
-| KV Store | `internal/store` | LSM engine: vector clock versioning, tombstone deletes, memtable flush, merged reads |
+| KV Store | `internal/store` | LSM engine: vector clock versioning, tombstone deletes, ordered skiplist memtable, flush, merged reads |
 | WAL + SSTables | `internal/wal`, `internal/sstable` | Crash-durable append-only log with CRC framing; immutable sorted tables with bloom filters, per-block compression, and a shared block cache |
 | Anti-Entropy | `internal/antientropy` | Background Merkle-tree comparison and bidirectional repair of divergent replicas |
 | Hint Store | `internal/hintstore` | Durability buffer that replays missed writes when a down replica recovers |
@@ -141,7 +141,6 @@ make coverage  # HTML coverage report
 
 **Performance and storage**
 
-- **Skiplist memtable** - the memtable is a hash map, so scans sort matching keys per call; a skiplist makes writes ordered and scans cheap
 - **Sharded store** - split the single store mutex into 256 shards; partially superseded by the LSM engine, so benchmark first to see whether it still pays
 - **Streaming bootstrap and decommission** - node join pulls keys as one JSON batch per bucket and graceful shutdown materializes the entire dataset in memory for a single push per successor; replace both with chunked, resumable streaming so migration survives datasets larger than RAM
 
