@@ -250,6 +250,45 @@ func TestPutKeyCASPrimaryUnavailableFailsClosed(t *testing.T) {
 	}
 }
 
+func TestPutKeyCASEmptyRingRejected(t *testing.T) {
+	h := newTestHandler(t) // ring has no nodes at all
+	w := doPut(h, "/keys/cas-noring?cas=true", `{"value":"v"}`)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("got %d, want 503", w.Code)
+	}
+	if _, ok, _ := h.store.Get("cas-noring"); ok {
+		t.Error("empty-ring CAS must not write locally")
+	}
+}
+
+func TestPutKeyCASPrimaryUnreachableFailsClosed(t *testing.T) {
+	h := newSelfOnlyHandler(t)
+	// Alive in the member list but nothing listens on the address: the
+	// forward itself fails and must surface as a retryable 503.
+	h.memberList.Add("peer", "127.0.0.1:1")
+	key := keyWithPrimary(t, h.ring, "peer")
+
+	w := doPut(h, "/keys/"+key+"?cas=true", `{"value":"v"}`)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("got %d, want 503", w.Code)
+	}
+	if _, ok, _ := h.store.Get(key); ok {
+		t.Error("failed forward must not write locally")
+	}
+}
+
+func TestPutKeyCASStoreFailureReturns503(t *testing.T) {
+	h := newSelfOnlyHandler(t)
+	attachFailingWAL(h)
+
+	// A WAL failure during a CAS write is a store error, not a precondition
+	// conflict: 503, never 412.
+	w := doPut(h, "/keys/cas-walfail?cas=true", `{"value":"v"}`)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("got %d, want 503", w.Code)
+	}
+}
+
 func TestPutKeyCASForwardedMismatchNotReforwarded(t *testing.T) {
 	var peerHits int
 	peerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -385,6 +424,39 @@ func TestSessionReadEscalatesPastQuorum(t *testing.T) {
 	got := sessionClockFromHeader(t, w)
 	if got["peer"] < 2 {
 		t.Errorf("observed clock %v must cover the session clock", got)
+	}
+}
+
+// TestSessionReadEscalationStillUnsatisfiableFails proves the escalated read
+// fails closed too: when even the full replica set cannot cover the session
+// clock, the coordinator returns 503 instead of the freshest stale value.
+func TestSessionReadEscalationStillUnsatisfiableFails(t *testing.T) {
+	peerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		resp := NodeResponse{ID: "peer", Status: "alive", Value: "stale", Clocks: map[string]uint64{"peer": 1}}
+		w.Header().Set(contentTypeHeader, contentTypeJSON)
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer peerSrv.Close()
+
+	r := ring.NewRing(10)
+	ml := newTestMemberList(r)
+	s := store.New()
+	h := NewHandler(r, ml, s, HandlerConfig{SelfID: "self", ReplicationFactor: 3, WriteQuorum: 1, ReadQuorum: 1, ReplicaTimeout: time.Second}, nil)
+	r.AddNode("self", "localhost:8080")
+	r.AddNode("peer", peerSrv.Listener.Addr().String())
+	if err := s.Put("sess-key", "stale", store.VectorClockVersion{Clocks: map[string]uint64{"peer": 1}}); err != nil {
+		t.Fatalf("seed put: %v", err)
+	}
+
+	// No replica has ever seen {peer:2}: quorum read misses, escalation to
+	// both replicas misses too.
+	req := httptest.NewRequest(http.MethodGet, "/keys/sess-key", nil)
+	req.Header.Set(headerXSessionClock, `{"peer":2}`)
+	w := httptest.NewRecorder()
+	h.GetNode(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("got %d, want 503", w.Code)
 	}
 }
 

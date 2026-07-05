@@ -239,10 +239,8 @@ func parseSessionClock(req *http.Request) (map[string]uint64, error) {
 // setSessionClockHeader attaches a clock to the response so the client can
 // carry it into later session reads and CAS writes for the same key.
 func setSessionClockHeader(w http.ResponseWriter, clocks map[string]uint64) {
-	b, err := json.Marshal(clocks)
-	if err != nil {
-		return
-	}
+	// Marshal cannot fail on a map[string]uint64.
+	b, _ := json.Marshal(clocks)
 	w.Header().Set(headerXSessionClock, string(b))
 }
 
@@ -920,6 +918,30 @@ func (h *Handler) PutKey(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	h.coordinateWrite(w, req, key, incoming, keyWrite{
+		value:  body.Value,
+		body:   body,
+		errMsg: "store write failed",
+	})
+}
+
+// keyWrite describes one client mutation flowing through the coordinator
+// write path: a value write, or a tombstone when deleted is set. body is the
+// decoded request payload, re-marshaled when a CAS write is forwarded to the
+// key's primary; errMsg is the status text for local store failures.
+type keyWrite struct {
+	value   string
+	deleted bool
+	body    any
+	errMsg  string
+}
+
+// coordinateWrite is the shared coordinator write path behind PutKey and
+// DeleteKey (everything after the replica passthrough): quorum and CAS
+// resolution, primary routing for CAS, clock bootstrapping, the local store
+// mutation, sloppy quorum fan-out with hint buffering, and the session clock
+// response.
+func (h *Handler) coordinateWrite(w http.ResponseWriter, req *http.Request, key string, incoming store.VectorClockVersion, wr keyWrite) {
 	if m, ok := h.memberList.Get(h.selfID); ok && m.Bootstrapping {
 		http.Error(w, errNodeBootstrapping, http.StatusServiceUnavailable)
 		return
@@ -939,44 +961,39 @@ func (h *Handler) PutKey(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// CAS writes serialize through the key's primary replica so writers
+	// CAS mutations serialize through the key's primary replica so writers
 	// racing through different coordinators contend on one store mutex
 	// instead of forking into siblings.
-	if useCAS && h.casRoutedElsewhere(w, req, key, body) {
+	if useCAS && h.casRoutedElsewhere(w, req, key, wr.body) {
 		return
 	}
 
-	// Bootstrap clock from current local entry if the client didn't provide one,
-	// so a blind overwrite dominates the existing value rather than equaling it
-	// (an equal clock would be dropped as an idempotent write). Never for CAS:
-	// there the clocks field is the client's precondition, and an absent one
-	// must mean "expect no current value" rather than silently adopting
-	// whatever the coordinator happens to hold.
+	// Bootstrap clock from the current local entry if the client didn't
+	// provide one, so a blind overwrite dominates the existing value rather
+	// than equaling it (an equal clock would be dropped as an idempotent
+	// write). Never for CAS: there the clocks field is the client's
+	// precondition, and an absent one must mean "expect no current value"
+	// rather than silently adopting whatever the coordinator happens to hold.
 	if len(incoming.Clocks) == 0 && !useCAS {
 		incoming.Clocks = h.bootstrapClock(key)
 	}
 
-	// Primary write: increment self's counter and store locally. In CAS mode
-	// the store applies the write only if this version dominates every
+	// Primary write: increment self's counter and apply locally. In CAS mode
+	// the store applies the mutation only if this version dominates every
 	// existing sibling; a stale or concurrent precondition clock rejects the
 	// request with 412 and no side effects.
 	version := incoming.Increment(h.selfID)
-	if useCAS {
-		if err := h.store.PutCAS(key, body.Value, version); err != nil {
-			if errors.Is(err, store.ErrCASConflict) {
-				http.Error(w, "cas conflict: clocks do not dominate the current value", http.StatusPreconditionFailed)
-				return
-			}
-			http.Error(w, "store write failed", http.StatusServiceUnavailable)
+	if err := h.applyLocalWrite(key, wr, version, useCAS); err != nil {
+		if errors.Is(err, store.ErrCASConflict) {
+			http.Error(w, "cas conflict: clocks do not dominate the current value", http.StatusPreconditionFailed)
 			return
 		}
-	} else if err := h.store.Put(key, body.Value, version); err != nil {
-		http.Error(w, "store write failed", http.StatusServiceUnavailable)
+		http.Error(w, wr.errMsg, http.StatusServiceUnavailable)
 		return
 	}
 
-	// Sloppy quorum write: fan out to the first RF *healthy* nodes on the ring
-	// and wait for W acks. Unhealthy replicas are skipped in favor of the next
+	// Sloppy quorum: fan out to the first RF *healthy* nodes on the ring and
+	// wait for W acks. Unhealthy replicas are skipped in favor of the next
 	// healthy nodes (so the write stays available while any W healthy nodes
 	// exist) and each skipped intended owner gets a hint for later replay. The
 	// fan-out happens even when self's ack already satisfies quorum (W=1) so
@@ -984,12 +1001,12 @@ func (h *Handler) PutKey(w http.ResponseWriter, req *http.Request) {
 	nodes, skipped := h.ring.GetHealthyReplicationNodes(key, h.replicationFactor)
 	quorum := min(writeQuorum, len(nodes))
 	acks, remaining, failed, resultCh := h.quorumFanOut(nodes, quorum, func(n *ring.Node) replicaResult {
-		return replicaResult{n.ID, h.replicateToSync(n.Address, key, body.Value, version.Clocks)}
+		return replicaResult{n.ID, h.replicateWriteToSync(n.Address, key, wr, version.Clocks)}
 	})
 
 	if h.hintStore != nil {
 		h.bufferHints(
-			hintstore.Hint{Key: key, Value: body.Value, Clocks: version.Clocks},
+			hintstore.Hint{Key: key, Value: wr.value, Deleted: wr.deleted, Clocks: version.Clocks},
 			append(failed, nodeIDs(skipped)...), remaining, resultCh,
 		)
 	}
@@ -1002,6 +1019,21 @@ func (h *Handler) PutKey(w http.ResponseWriter, req *http.Request) {
 	// read-your-writes on later session reads.
 	setSessionClockHeader(w, version.Clocks)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// applyLocalWrite applies wr to the local store at version v, using the
+// compare-and-set variant when cas is set.
+func (h *Handler) applyLocalWrite(key string, wr keyWrite, v store.VectorClockVersion, cas bool) error {
+	switch {
+	case wr.deleted && cas:
+		return h.store.DeleteCAS(key, v)
+	case wr.deleted:
+		return h.store.Delete(key, v)
+	case cas:
+		return h.store.PutCAS(key, wr.value, v)
+	default:
+		return h.store.Put(key, wr.value, v)
+	}
 }
 
 type DeleteKeyRequest struct {
@@ -1056,125 +1088,50 @@ func (h *Handler) DeleteKey(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if m, ok := h.memberList.Get(h.selfID); ok && m.Bootstrapping {
-		http.Error(w, errNodeBootstrapping, http.StatusServiceUnavailable)
-		return
-	}
-
-	// Resolve the write quorum and CAS mode before touching the store so an
-	// invalid consistency level or cas param rejects the request without side
-	// effects.
-	writeQuorum, err := h.requestedQuorum(req, h.writeQuorum)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	useCAS, err := requestedCAS(req)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	// CAS deletes serialize through the key's primary replica: see PutKey.
-	if useCAS && h.casRoutedElsewhere(w, req, key, body) {
-		return
-	}
-
-	// Bootstrap clock from current local entry if the client didn't provide one,
-	// so the tombstone's clock dominates the existing value rather than equaling
-	// it. Never for CAS: see PutKey.
-	if len(incoming.Clocks) == 0 && !useCAS {
-		incoming.Clocks = h.bootstrapClock(key)
-	}
-
-	// Primary delete: increment self's counter and store tombstone locally.
-	// CAS semantics match PutKey: a stale or concurrent precondition clock
-	// rejects with 412 instead of writing a tombstone sibling.
-	version := incoming.Increment(h.selfID)
-	if useCAS {
-		if err := h.store.DeleteCAS(key, version); err != nil {
-			if errors.Is(err, store.ErrCASConflict) {
-				http.Error(w, "cas conflict: clocks do not dominate the current value", http.StatusPreconditionFailed)
-				return
-			}
-			http.Error(w, "store delete failed", http.StatusServiceUnavailable)
-			return
-		}
-	} else if err := h.store.Delete(key, version); err != nil {
-		http.Error(w, "store delete failed", http.StatusServiceUnavailable)
-		return
-	}
-
-	// Sloppy quorum delete: same healthy-walk semantics as PutKey, with hints
-	// for the skipped intended owners carrying the tombstone.
-	nodes, skipped := h.ring.GetHealthyReplicationNodes(key, h.replicationFactor)
-	quorum := min(writeQuorum, len(nodes))
-	acks, remaining, failed, resultCh := h.quorumFanOut(nodes, quorum, func(n *ring.Node) replicaResult {
-		return replicaResult{n.ID, h.replicateDeleteToSync(n.Address, key, version.Clocks)}
+	h.coordinateWrite(w, req, key, incoming, keyWrite{
+		deleted: true,
+		body:    body,
+		errMsg:  "store delete failed",
 	})
-
-	if h.hintStore != nil {
-		h.bufferHints(
-			hintstore.Hint{Key: key, Deleted: true, Clocks: version.Clocks},
-			append(failed, nodeIDs(skipped)...), remaining, resultCh,
-		)
-	}
-
-	if acks < quorum {
-		http.Error(w, "write quorum not met", http.StatusServiceUnavailable)
-		return
-	}
-	// Return the tombstone's clock: see PutKey.
-	setSessionClockHeader(w, version.Clocks)
-	w.WriteHeader(http.StatusNoContent)
 }
 
-// replicateToSync sends a replica write to addr and returns an error if the
-// write fails or the replica responds with a non-204 status.
+// replicateWriteToSync sends a replica sub-write (a value write, or a
+// tombstone when wr.deleted is set) to addr and returns an error if the
+// request fails or the replica responds with a non-204 status.
+func (h *Handler) replicateWriteToSync(address, key string, wr keyWrite, clocks map[string]uint64) error {
+	method, payload := http.MethodPut, any(PutKeyRequest{Value: wr.value, Clocks: clocks})
+	if wr.deleted {
+		method, payload = http.MethodDelete, any(DeleteKeyRequest{Clocks: clocks})
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(method, schemeHTTP+address+keysPrefix+key, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set(contentTypeHeader, contentTypeJSON)
+	req.Header.Set(headerXProxiedFrom, h.selfID)
+	resp, err := h.replicaClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("replica returned %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// replicateToSync sends a replica value write to addr: see replicateWriteToSync.
 func (h *Handler) replicateToSync(address, key, value string, clocks map[string]uint64) error {
-	body, err := json.Marshal(PutKeyRequest{Value: value, Clocks: clocks})
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequest(http.MethodPut, schemeHTTP+address+keysPrefix+key, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set(contentTypeHeader, contentTypeJSON)
-	req.Header.Set(headerXProxiedFrom, h.selfID)
-	resp, err := h.replicaClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("replica returned %d", resp.StatusCode)
-	}
-	return nil
+	return h.replicateWriteToSync(address, key, keyWrite{value: value}, clocks)
 }
 
-// replicateDeleteToSync sends a replica tombstone to addr and returns an error
-// if the delete fails or the replica responds with a non-204 status.
+// replicateDeleteToSync sends a replica tombstone to addr: see replicateWriteToSync.
 func (h *Handler) replicateDeleteToSync(address, key string, clocks map[string]uint64) error {
-	body, err := json.Marshal(DeleteKeyRequest{Clocks: clocks})
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequest(http.MethodDelete, schemeHTTP+address+keysPrefix+key, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set(contentTypeHeader, contentTypeJSON)
-	req.Header.Set(headerXProxiedFrom, h.selfID)
-	resp, err := h.replicaClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("replica returned %d", resp.StatusCode)
-	}
-	return nil
+	return h.replicateWriteToSync(address, key, keyWrite{deleted: true}, clocks)
 }
 
 // readFromReplica fetches the local entry for key from a replica node. The
