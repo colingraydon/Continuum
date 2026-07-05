@@ -61,7 +61,7 @@ flowchart TB
 | ----- | ------- | ---- |
 | Hash Ring | `internal/ring` | Routes keys to nodes via consistent hashing with a Red-Black Tree and virtual nodes |
 | Gossip | `internal/gossip` | Cluster membership and failure detection over UDP without a central coordinator |
-| KV Store | `internal/store` | LSM engine: vector clock versioning, tombstone deletes, memtable flush, merged reads |
+| KV Store | `internal/store` | LSM engine: vector clock versioning, tombstone deletes, ordered skiplist memtable, flush, merged reads |
 | WAL + SSTables | `internal/wal`, `internal/sstable` | Crash-durable append-only log with CRC framing; immutable sorted tables with bloom filters, per-block compression, and a shared block cache |
 | Anti-Entropy | `internal/antientropy` | Background Merkle-tree comparison and bidirectional repair of divergent replicas |
 | Hint Store | `internal/hintstore` | Durability buffer that replays missed writes when a down replica recovers |
@@ -128,6 +128,7 @@ make coverage  # HTML coverage report
 | [SSTable](docs/sstable.md) | Immutable sorted table format: compressed data blocks, sparse index, bloom filter, shared block cache |
 | [Read Repair](docs/read-repair.md) | Async repair, always-repair-on-conflict, X-Proxied-From path reuse |
 | [Range Scans](docs/range-scans.md) | Merged LSM prefix scan per node, scatter-gather coordinator, pagination horizon |
+| [Backup and Restore](docs/backup-restore.md) | Hard-linked point-in-time table snapshots; restore through the existing recovery path |
 | [Data Migration](docs/data-migration.md) | Pull on join, push on leave, bootstrapping state machine |
 | [Fault Injection](docs/fault-injection.md) | Process-level fault harness: proxies, kill/hang/partition scenarios, durability and convergence invariants |
 | [Testing](docs/testing.md) | The full test pyramid: unit and fault-seam tests, randomized store model, in-process clusters, process E2E, fault injection |
@@ -141,7 +142,6 @@ make coverage  # HTML coverage report
 
 **Performance and storage**
 
-- **Skiplist memtable** - the memtable is a hash map, so scans sort matching keys per call; a skiplist makes writes ordered and scans cheap
 - **Sharded store** - split the single store mutex into 256 shards; partially superseded by the LSM engine, so benchmark first to see whether it still pays
 - **Streaming bootstrap and decommission** - node join pulls keys as one JSON batch per bucket and graceful shutdown materializes the entire dataset in memory for a single push per successor; replace both with chunked, resumable streaming so migration survives datasets larger than RAM
 
@@ -159,6 +159,5 @@ make coverage  # HTML coverage report
 
 **Cluster and operations**
 
-- **Backup and restore** - immutable SSTables plus the manifest make point-in-time snapshots nearly free: hard-link the tables, record the WAL position, restore through the existing recovery path
 - **Rack/DC-aware placement** - spread each key's replica set across failure domains instead of taking the next N distinct nodes on the ring
 - **Token-aware Go client** - a client library that hashes keys locally and talks directly to a replica, skipping the coordinator hop

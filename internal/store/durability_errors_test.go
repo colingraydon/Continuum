@@ -125,7 +125,7 @@ func TestStore_Evict_WALSyncError(t *testing.T) {
 func TestStore_GCTombstones_WALAppendError(t *testing.T) {
 	s := New()
 	s.Delete("k", newTestVC(map[string]uint64{"a": 1}))
-	s.tombstoneAges["k"] = time.Now().Add(-2 * time.Hour)
+	s.SetTombstoneAge("k", time.Now().Add(-2*time.Hour))
 	s.SetWAL(&failingWAL{appendErr: errors.New("boom")})
 	purged, err := s.GCTombstones(time.Hour)
 	if err == nil {
@@ -142,7 +142,7 @@ func TestStore_GCTombstones_WALAppendError(t *testing.T) {
 func TestStore_GCTombstones_WALSyncError(t *testing.T) {
 	s := New()
 	s.Delete("k", newTestVC(map[string]uint64{"a": 1}))
-	s.tombstoneAges["k"] = time.Now().Add(-2 * time.Hour)
+	s.SetTombstoneAge("k", time.Now().Add(-2*time.Hour))
 	s.SetWAL(&failingWAL{syncErr: errors.New("boom")})
 	if _, err := s.GCTombstones(time.Hour); err == nil {
 		t.Fatalf("expected error")

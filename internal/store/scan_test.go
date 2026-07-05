@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func mustScan(t *testing.T, s *Store, prefix, after string, limit int) []KeyItem {
@@ -162,11 +163,11 @@ func TestScanFrozenOverlay(t *testing.T) {
 
 	// Install a frozen generation directly (white-box): overrides fz-a,
 	// evicts fz-b.
+	fz := newMemtable()
+	fz.putEntry("fz-a", Entry{Siblings: []Sibling{{Value: "frozen", Version: vclock("w", 5)}}}, time.Time{}, len("frozen"))
+	fz.evict("fz-b")
 	s.mu.Lock()
-	s.frozen = &memtable{
-		data:    map[string]Entry{"fz-a": {Siblings: []Sibling{{Value: "frozen", Version: vclock("w", 5)}}}},
-		evicted: map[string]struct{}{"fz-b": {}},
-	}
+	s.frozen = fz
 	s.mu.Unlock()
 
 	items := mustScan(t, s, "fz-", "", 100)

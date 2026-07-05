@@ -25,7 +25,9 @@ const (
 // tableEvictValue is the encoded value for an evict marker.
 var tableEvictValue = []byte{tableKindEvict}
 
-func encodeTableEntry(key string, e Entry, ages map[string]time.Time) ([]byte, error) {
+// encodeTableEntry encodes an entry for an SSTable value. age is the entry's
+// tombstone wall-time; a zero age encodes as "no tombstone".
+func encodeTableEntry(key string, e Entry, age time.Time) ([]byte, error) {
 	var buf bytes.Buffer
 	buf.WriteByte(tableKindEntry)
 	if len(e.Siblings) > 0xFFFF {
@@ -37,7 +39,7 @@ func encodeTableEntry(key string, e Entry, ages map[string]time.Time) ([]byte, e
 			return nil, err
 		}
 	}
-	if err := writeTombstoneAge(&buf, key, ages); err != nil {
+	if err := writeTombstoneAgeVal(&buf, age, !age.IsZero()); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil

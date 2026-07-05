@@ -60,13 +60,17 @@ type SnapHeader struct {
 // encoding happens outside the lock.
 func (s *Store) Snapshot(w io.Writer, header SnapHeader) error {
 	s.mu.RLock()
-	data := make(map[string]Entry, len(s.data))
-	for k, v := range s.data {
-		data[k] = v
-	}
-	ages := make(map[string]time.Time, len(s.tombstoneAges))
-	for k, v := range s.tombstoneAges {
-		ages[k] = v
+	data := make(map[string]Entry, s.mem.len())
+	ages := make(map[string]time.Time)
+	for it := s.mem.iter(); it.next(); {
+		v := it.value()
+		if v.evicted {
+			continue
+		}
+		data[it.key()] = v.entry
+		if !v.age.IsZero() {
+			ages[it.key()] = v.age
+		}
 	}
 	s.mu.RUnlock()
 
@@ -92,14 +96,27 @@ func (s *Store) LoadSnapshot(r io.Reader, expectedNodeID string) (SnapHeader, er
 	if err != nil {
 		return SnapHeader{}, err
 	}
+	m := newMemtable()
+	for key, e := range data {
+		m.putEntry(key, e, ages[key], entryValueBytes(e))
+	}
 	s.mu.Lock()
-	s.data = data
-	s.tombstoneAges = ages
+	s.mem = m
 	if header.SequenceAt > s.lastSeq {
 		s.lastSeq = header.SequenceAt
 	}
 	s.mu.Unlock()
 	return header, nil
+}
+
+// entryValueBytes sums an entry's sibling value lengths, for the memtable size
+// estimate when loading a snapshot.
+func entryValueBytes(e Entry) int {
+	n := 0
+	for _, sib := range e.Siblings {
+		n += len(sib.Value)
+	}
+	return n
 }
 
 func writeSnapHeader(w io.Writer, h SnapHeader) error {
@@ -249,7 +266,11 @@ func writeSibling(w io.Writer, key string, sib Sibling) error {
 
 func writeTombstoneAge(w io.Writer, key string, ages map[string]time.Time) error {
 	t, ok := ages[key]
-	if !ok {
+	return writeTombstoneAgeVal(w, t, ok)
+}
+
+func writeTombstoneAgeVal(w io.Writer, t time.Time, has bool) error {
+	if !has {
 		_, err := w.Write([]byte{0})
 		return err
 	}

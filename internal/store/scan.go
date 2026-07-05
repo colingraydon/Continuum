@@ -52,10 +52,10 @@ func (s *Store) Scan(prefix, after string, limit int) ([]KeyItem, error) {
 		return nil, err
 	}
 	if frozen != nil {
-		overlayEntries(merged, frozen.data, frozen.evicted, prefix, start)
+		overlayEntries(merged, frozen, prefix, start)
 	}
 	s.mu.RLock()
-	overlayEntries(merged, s.data, s.evicted, prefix, start)
+	overlayEntries(merged, s.mem, prefix, start)
 	s.mu.RUnlock()
 
 	keys := make([]string, 0, len(merged))
@@ -120,14 +120,20 @@ func scanOneTable(r *sstable.Reader, prefix string, start []byte, out map[string
 
 // overlayEntries applies one memtable generation on top of the accumulated
 // scan state: entries replace older ones wholesale (each generation holds a
-// key's complete sibling set) and evictions hide the key.
-func overlayEntries(out map[string]Entry, data map[string]Entry, evicted map[string]struct{}, prefix, start string) {
-	for key, e := range data {
-		if strings.HasPrefix(key, prefix) && key >= start {
-			out[key] = e
+// key's complete sibling set) and evict markers hide the key. The memtable is
+// ordered, so it is seeked to start and left as soon as keys stop matching the
+// prefix — the same bounded walk the table scan uses (keys with a given prefix
+// form a contiguous range).
+func overlayEntries(out map[string]Entry, m *memtable, prefix, start string) {
+	for it := m.seek(start); it.next(); {
+		key := it.key()
+		if !strings.HasPrefix(key, prefix) {
+			break
 		}
-	}
-	for key := range evicted {
-		delete(out, key)
+		if v := it.value(); v.evicted {
+			delete(out, key)
+		} else {
+			out[key] = v.entry
+		}
 	}
 }

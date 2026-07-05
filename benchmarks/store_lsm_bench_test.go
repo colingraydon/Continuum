@@ -163,6 +163,32 @@ func BenchmarkStoreScan100(b *testing.B) {
 	}
 }
 
+// BenchmarkStoreScanMemtablePrefix: a narrow 100-key prefix page served
+// entirely from a large in-memory memtable holding 10k keys across 100
+// prefixes. With the ordered skiplist the overlay seeks to the range start and
+// stops at the prefix end, touching ~100 keys instead of sweeping all 10k -
+// the memtable-overlay cost the hash-map memtable paid on every scan.
+func BenchmarkStoreScanMemtablePrefix(b *testing.B) {
+	s := store.New() // memory-only: every key stays in the active memtable
+	seq := uint64(1)
+	for p := 0; p < 100; p++ {
+		for i := 0; i < 100; i++ {
+			key := fmt.Sprintf("p%03d-%05d", p, i)
+			if err := s.Put(key, "value-payload", benchClock(seq)); err != nil {
+				b.Fatalf("Put: %v", err)
+			}
+			seq++
+		}
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		items, err := s.Scan("p042-", "", 100)
+		if err != nil || len(items) != 100 {
+			b.Fatalf("Scan: len=%d err=%v", len(items), err)
+		}
+	}
+}
+
 // BenchmarkStoreTombstoneGC: one GC pass over a store holding 10k aged
 // tombstones - the pause a GC tick can introduce.
 func BenchmarkStoreTombstoneGC(b *testing.B) {

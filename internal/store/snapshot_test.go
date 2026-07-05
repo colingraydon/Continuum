@@ -48,8 +48,8 @@ func TestSnapshot_RoundTrip(t *testing.T) {
 	if got.NodeID != "node-A" || got.Epoch != 7 || got.SequenceAt != 42 {
 		t.Fatalf("header round-trip mismatch: %+v", got)
 	}
-	if got.EntryCount != uint64(len(src.data)) {
-		t.Fatalf("EntryCount = %d, want %d", got.EntryCount, len(src.data))
+	if got.EntryCount != uint64(len(memData(src))) {
+		t.Fatalf("EntryCount = %d, want %d", got.EntryCount, len(memData(src)))
 	}
 	assertStoresEqual(t, src, dst)
 }
@@ -68,8 +68,8 @@ func TestSnapshot_EmptyStore(t *testing.T) {
 	if hdr.EntryCount != 0 {
 		t.Fatalf("EntryCount = %d, want 0", hdr.EntryCount)
 	}
-	if len(dst.data) != 0 || len(dst.tombstoneAges) != 0 {
-		t.Fatalf("expected empty dst, got %d data / %d ages", len(dst.data), len(dst.tombstoneAges))
+	if len(memData(dst)) != 0 || len(memAges(dst)) != 0 {
+		t.Fatalf("expected empty dst, got %d data / %d ages", len(memData(dst)), len(memAges(dst)))
 	}
 }
 
@@ -160,12 +160,12 @@ func TestSnapshot_TombstoneAgePreserved(t *testing.T) {
 		t.Fatalf("Snapshot: %v", err)
 	}
 
-	srcAge := src.tombstoneAges["k"]
+	srcAge := memAges(src)["k"]
 	dst := New()
 	if _, err := dst.LoadSnapshot(&buf, "n"); err != nil {
 		t.Fatalf("LoadSnapshot: %v", err)
 	}
-	dstAge, ok := dst.tombstoneAges["k"]
+	dstAge, ok := memAges(dst)["k"]
 	if !ok {
 		t.Fatalf("tombstone age missing after load")
 	}
@@ -180,7 +180,7 @@ func TestSnapshot_GCTombstonesUsesLoadedAges(t *testing.T) {
 	src := New()
 	src.Delete("k", newTestVC(map[string]uint64{"a": 1}))
 	// Force the age into the past.
-	src.tombstoneAges["k"] = time.Now().Add(-2 * time.Hour)
+	src.SetTombstoneAge("k", time.Now().Add(-2*time.Hour))
 
 	var buf bytes.Buffer
 	if err := src.Snapshot(&buf, SnapHeader{NodeID: "n"}); err != nil {
@@ -323,7 +323,7 @@ func TestSnapshot_LoadHandlesMixedSiblings(t *testing.T) {
 	src := New()
 	src.Put("k", "v", newTestVC(map[string]uint64{"a": 1}))
 	src.Delete("k", newTestVC(map[string]uint64{"b": 1}))
-	if got := len(src.data["k"].Siblings); got != 2 {
+	if got := len(memData(src)["k"].Siblings); got != 2 {
 		t.Fatalf("setup: want 2 siblings, got %d", got)
 	}
 
@@ -429,6 +429,42 @@ func TestReadEntry_BruteForceTruncations(t *testing.T) {
 	}
 }
 
+// memDataLocked materializes the active memtable's live (non-evicted) entries.
+// Caller holds s.mu.
+func memDataLocked(s *Store) map[string]Entry {
+	out := make(map[string]Entry)
+	for it := s.mem.iter(); it.next(); {
+		if v := it.value(); !v.evicted {
+			out[it.key()] = v.entry
+		}
+	}
+	return out
+}
+
+// memAgesLocked materializes the active memtable's tombstone ages. Caller holds
+// s.mu.
+func memAgesLocked(s *Store) map[string]time.Time {
+	out := make(map[string]time.Time)
+	for it := s.mem.iter(); it.next(); {
+		if v := it.value(); !v.evicted && !v.age.IsZero() {
+			out[it.key()] = v.age
+		}
+	}
+	return out
+}
+
+func memData(s *Store) map[string]Entry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return memDataLocked(s)
+}
+
+func memAges(s *Store) map[string]time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return memAgesLocked(s)
+}
+
 // assertStoresEqual checks both stores contain the same logical entries.
 // Sibling order within an Entry is not guaranteed, so we match by content.
 func assertStoresEqual(t *testing.T, a, b *Store) {
@@ -437,11 +473,12 @@ func assertStoresEqual(t *testing.T, a, b *Store) {
 	defer a.mu.RUnlock()
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	if len(a.data) != len(b.data) {
-		t.Fatalf("data len mismatch: %d vs %d", len(a.data), len(b.data))
+	aData, bData := memDataLocked(a), memDataLocked(b)
+	if len(aData) != len(bData) {
+		t.Fatalf("data len mismatch: %d vs %d", len(aData), len(bData))
 	}
-	for k, ae := range a.data {
-		be, ok := b.data[k]
+	for k, ae := range aData {
+		be, ok := bData[k]
 		if !ok {
 			t.Fatalf("key %q missing from dst", k)
 		}
@@ -449,11 +486,12 @@ func assertStoresEqual(t *testing.T, a, b *Store) {
 			t.Fatalf("entry %q differs:\nA: %+v\nB: %+v", k, ae, be)
 		}
 	}
-	if len(a.tombstoneAges) != len(b.tombstoneAges) {
-		t.Fatalf("ages len mismatch: %d vs %d", len(a.tombstoneAges), len(b.tombstoneAges))
+	aAges, bAges := memAgesLocked(a), memAgesLocked(b)
+	if len(aAges) != len(bAges) {
+		t.Fatalf("ages len mismatch: %d vs %d", len(aAges), len(bAges))
 	}
-	for k, at := range a.tombstoneAges {
-		bt, ok := b.tombstoneAges[k]
+	for k, at := range aAges {
+		bt, ok := bAges[k]
 		if !ok {
 			t.Fatalf("tombstone age for %q missing from dst", k)
 		}

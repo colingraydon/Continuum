@@ -97,20 +97,6 @@ type WAL interface {
 	TruncateThrough(seq uint64) error
 }
 
-// memtable is an immutable snapshot of the active write set, frozen while it
-// is flushed to an SSTable. Reads consult it between the active memtable and
-// the tables; nothing mutates it after the freeze.
-type memtable struct {
-	data    map[string]Entry
-	evicted map[string]struct{}
-	ages    map[string]time.Time
-	seq     uint64 // highest WAL sequence covered by this memtable
-}
-
-// memEntryOverhead is the per-entry constant added to the memtable size
-// estimate on top of key and value bytes.
-const memEntryOverhead = 64
-
 // Store is an LSM-shaped versioned KV store. Writes land in an in-memory
 // memtable (WAL-durable when one is installed); when the memtable exceeds the
 // flush threshold it is frozen and written out as an immutable SSTable, and
@@ -122,20 +108,17 @@ const memEntryOverhead = 64
 // that a generation holding a key holds its complete merged sibling set —
 // so a lookup stops at the first generation that contains the key.
 type Store struct {
-	mu            sync.RWMutex
-	data          map[string]Entry
-	evicted       map[string]struct{} // keys locally evicted but still present in tables
-	tombstoneAges map[string]time.Time
-	frozen        *memtable   // non-nil while a flush is in progress or pending retry
-	tables        []liveTable // immutable readers, newest first
-	onUpdate      func(key string, hash uint32)
-	onEvict       func(key string)
-	wal           WAL // nil = memory-only mode
-	lastSeq       uint64
-	memBytes      int64
-	flushDir      string // "" = flushing disabled
-	flushBytes    int64
-	flushing      bool
+	mu         sync.RWMutex
+	mem        *memtable   // active write set (ordered skiplist)
+	frozen     *memtable   // non-nil while a flush is in progress or pending retry
+	tables     []liveTable // immutable readers, newest first
+	onUpdate   func(key string, hash uint32)
+	onEvict    func(key string)
+	wal        WAL // nil = memory-only mode
+	lastSeq    uint64
+	flushDir   string // "" = flushing disabled
+	flushBytes int64
+	flushing   bool
 	maxTableSeq   uint64 // highest WAL sequence any attached table covers
 	nextFileNum   uint64 // next table file number to allocate
 	compacting    bool
@@ -151,11 +134,9 @@ type Store struct {
 
 func New() *Store {
 	return &Store{
-		data:          make(map[string]Entry),
-		evicted:       make(map[string]struct{}),
-		tombstoneAges: make(map[string]time.Time),
-		nextFileNum:   1,
-		compaction:    defaultCompactionPolicy(),
+		mem:         newMemtable(),
+		nextFileNum: 1,
+		compaction:  defaultCompactionPolicy(),
 	}
 }
 
@@ -262,18 +243,18 @@ func clockHash(v VectorClockVersion) uint32 {
 // lookupLocked returns the complete visible entry for key, searching
 // generations newest-first. Must be called with s.mu held (read or write).
 func (s *Store) lookupLocked(key string) (Entry, bool, error) {
-	if e, ok := s.data[key]; ok {
-		return e, true, nil
-	}
-	if _, ok := s.evicted[key]; ok {
-		return Entry{}, false, nil
+	if v, ok := s.mem.get(key); ok {
+		if v.evicted {
+			return Entry{}, false, nil
+		}
+		return v.entry, true, nil
 	}
 	if f := s.frozen; f != nil {
-		if e, ok := f.data[key]; ok {
-			return e, true, nil
-		}
-		if _, ok := f.evicted[key]; ok {
-			return Entry{}, false, nil
+		if v, ok := f.get(key); ok {
+			if v.evicted {
+				return Entry{}, false, nil
+			}
+			return v.entry, true, nil
 		}
 	}
 	return tableGet(s.tables, key)
@@ -309,11 +290,8 @@ func tableGet(tables []liveTable, key string) (Entry, bool, error) {
 // called with s.mu held.
 func (s *Store) shadowedBelowLocked(key string) (bool, error) {
 	if f := s.frozen; f != nil {
-		if _, ok := f.evicted[key]; ok {
-			return false, nil
-		}
-		if _, ok := f.data[key]; ok {
-			return true, nil
+		if v, ok := f.get(key); ok {
+			return !v.evicted, nil
 		}
 	}
 	_, found, err := tableGet(s.tables, key)
@@ -347,13 +325,13 @@ func (s *Store) mergeSibling(key string, incoming Sibling) (Entry, bool, error) 
 	return Entry{Siblings: append(survivors, incoming)}, true, nil
 }
 
-// commitEntry installs a merged entry into the memtable. Because mergeSibling
-// folded in any older-generation state, the memtable now subsumes everything
-// below it for this key. Must be called with s.mu held for writing.
-func (s *Store) commitEntry(key string, e Entry, incoming Sibling) {
-	s.data[key] = e
-	delete(s.evicted, key)
-	s.memBytes += int64(len(key)+len(incoming.Value)) + memEntryOverhead
+// commitEntry installs a merged entry into the memtable, clearing any prior
+// evict marker and setting the entry's tombstone age (zero for a live write).
+// Because mergeSibling folded in any older-generation state, the memtable now
+// subsumes everything below it for this key. Must be called with s.mu held for
+// writing.
+func (s *Store) commitEntry(key string, e Entry, incoming Sibling, age time.Time) {
+	s.mem.putEntry(key, e, age, len(incoming.Value))
 }
 
 // Put stores key=value at version v. If v is dominated by any existing sibling
@@ -392,10 +370,10 @@ func (s *Store) Put(key, value string, v VectorClockVersion) error {
 		}
 		w = s.wal
 	}
-	s.commitEntry(key, merged, incoming)
-	// A live write supersedes any prior tombstone age for this key. If the
-	// key is deleted again later, the new tombstone gets a fresh timestamp.
-	delete(s.tombstoneAges, key)
+	// A live write supersedes any prior tombstone age for this key (zero age).
+	// If the key is deleted again later, the new tombstone gets a fresh
+	// timestamp.
+	s.commitEntry(key, merged, incoming, time.Time{})
 	if s.onUpdate != nil {
 		s.onUpdate(key, entryHash(merged))
 	}
@@ -446,11 +424,10 @@ func (s *Store) Delete(key string, v VectorClockVersion) error {
 		}
 		w = s.wal
 	}
-	s.commitEntry(key, merged, incoming)
 	// Always record the current time so that a new deletion event (different
 	// clock) resets the TTL window. Equal-clock re-applications never reach
 	// this branch because mergeSibling rejects idempotent writes.
-	s.tombstoneAges[key] = tombAt
+	s.commitEntry(key, merged, incoming, tombAt)
 	if s.onUpdate != nil {
 		s.onUpdate(key, entryHash(merged))
 	}
@@ -506,11 +483,10 @@ func (s *Store) evictLocked(key string) error {
 	if err != nil {
 		return err
 	}
-	delete(s.data, key)
-	delete(s.tombstoneAges, key)
 	if below {
-		s.evicted[key] = struct{}{}
-		s.memBytes += int64(len(key)) + memEntryOverhead
+		s.mem.evict(key)
+	} else {
+		s.mem.remove(key)
 	}
 	return nil
 }
@@ -556,7 +532,7 @@ func (s *Store) GCTombstones(maxAge time.Duration) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	candidates := collectExpiredTombstones(s.data, s.tombstoneAges, time.Now().Add(-maxAge))
+	candidates := collectExpiredTombstones(s.mem, time.Now().Add(-maxAge))
 	var purged []string
 	for _, key := range candidates {
 		below, err := s.shadowedBelowLocked(key)
@@ -580,23 +556,25 @@ func (s *Store) GCTombstones(maxAge time.Duration) ([]string, error) {
 		}
 	}
 	for _, key := range purged {
-		delete(s.data, key)
-		delete(s.tombstoneAges, key)
+		s.mem.remove(key)
 	}
 	return purged, nil
 }
 
-func collectExpiredTombstones(data map[string]Entry, ages map[string]time.Time, cutoff time.Time) []string {
+func collectExpiredTombstones(m *memtable, cutoff time.Time) []string {
 	var purged []string
-	for key, entry := range data {
-		if len(entry.Siblings) != 1 || !entry.Siblings[0].Deleted {
+	for it := m.iter(); it.next(); {
+		v := it.value()
+		if v.evicted {
 			continue
 		}
-		age, ok := ages[key]
-		if !ok || age.After(cutoff) {
+		if len(v.entry.Siblings) != 1 || !v.entry.Siblings[0].Deleted {
 			continue
 		}
-		purged = append(purged, key)
+		if v.age.IsZero() || v.age.After(cutoff) {
+			continue
+		}
+		purged = append(purged, it.key())
 	}
 	return purged
 }
@@ -606,22 +584,20 @@ func collectExpiredTombstones(data map[string]Entry, ages map[string]time.Time, 
 // surfaced as an error.
 func (s *Store) Get(key string) (Entry, bool, error) {
 	s.mu.RLock()
-	if e, ok := s.data[key]; ok {
+	if v, ok := s.mem.get(key); ok {
 		s.mu.RUnlock()
-		return e, true, nil
-	}
-	if _, ok := s.evicted[key]; ok {
-		s.mu.RUnlock()
-		return Entry{}, false, nil
+		if v.evicted {
+			return Entry{}, false, nil
+		}
+		return v.entry, true, nil
 	}
 	if f := s.frozen; f != nil {
-		if e, ok := f.data[key]; ok {
+		if v, ok := f.get(key); ok {
 			s.mu.RUnlock()
-			return e, true, nil
-		}
-		if _, ok := f.evicted[key]; ok {
-			s.mu.RUnlock()
-			return Entry{}, false, nil
+			if v.evicted {
+				return Entry{}, false, nil
+			}
+			return v.entry, true, nil
 		}
 	}
 	tables := s.tables
@@ -714,8 +690,7 @@ func (s *Store) applyPutRecord(body []byte) error {
 		return err
 	}
 	if applied {
-		s.commitEntry(key, merged, incoming)
-		delete(s.tombstoneAges, key)
+		s.commitEntry(key, merged, incoming, time.Time{})
 	}
 	return nil
 }
@@ -731,8 +706,7 @@ func (s *Store) applyDeleteRecord(body []byte) error {
 		return err
 	}
 	if applied {
-		s.commitEntry(key, merged, incoming)
-		s.tombstoneAges[key] = tombAt
+		s.commitEntry(key, merged, incoming, tombAt)
 	}
 	return nil
 }
@@ -751,8 +725,7 @@ func (s *Store) applyGCRecord(body []byte) error {
 		return err
 	}
 	for _, key := range keys {
-		delete(s.data, key)
-		delete(s.tombstoneAges, key)
+		s.mem.remove(key)
 	}
 	return nil
 }
@@ -767,7 +740,7 @@ func (s *Store) applyCheckpointRecord(body []byte) error {
 func (s *Store) SetTombstoneAge(key string, t time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.tombstoneAges[key] = t
+	s.mem.setAge(key, t)
 }
 
 // KeyHashes returns every visible key and its current entry hash, merged
@@ -790,10 +763,10 @@ func (s *Store) KeyHashes() (map[string]uint32, error) {
 		return nil, err
 	}
 	if frozen != nil {
-		overlayHashes(out, frozen.data, frozen.evicted)
+		overlayHashes(out, frozen)
 	}
 	s.mu.RLock()
-	overlayHashes(out, s.data, s.evicted)
+	overlayHashes(out, s.mem)
 	s.mu.RUnlock()
 	return out, nil
 }
@@ -824,11 +797,12 @@ func scanTableHashes(tables []liveTable) (map[string]uint32, error) {
 	return out, nil
 }
 
-func overlayHashes(out map[string]uint32, data map[string]Entry, evicted map[string]struct{}) {
-	for key, e := range data {
-		out[key] = entryHash(e)
-	}
-	for key := range evicted {
-		delete(out, key)
+func overlayHashes(out map[string]uint32, m *memtable) {
+	for it := m.iter(); it.next(); {
+		if v := it.value(); v.evicted {
+			delete(out, it.key())
+		} else {
+			out[it.key()] = entryHash(v.entry)
+		}
 	}
 }
