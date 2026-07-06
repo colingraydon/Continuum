@@ -268,8 +268,11 @@
 
       <div class="hero-figure">
         <div class="figure">
-          <!-- decorative: the routing it shows is narrated in text by .readout below -->
-          <canvas id="ring" width="460" height="460" aria-hidden="true"></canvas>
+          <!-- decorative: the routing it shows is narrated in text by .readout below.
+               aria-hidden sits on the wrapper, never on a (potentially focusable) canvas. -->
+          <div class="ring-wrap" aria-hidden="true">
+            <canvas id="ring" width="460" height="460"></canvas>
+          </div>
           <div class="figure-foot">
             <div class="legend">
               <span><i style="background:var(--cx-n1)"></i>node-1</span>
