@@ -73,7 +73,7 @@ Replicas originally computed bucket hashes on-the-fly, scanning the store for ke
 
 The trees are kept current by the same `onUpdate` / `onEvict` callbacks the primary already uses, so replica sub-writes (from `/replicate`) update the tree with no extra machinery. The tree's `BucketHash`/`RootHash` are byte-identical to the scan path's `ComputeBucketHash`/`ComputeRootHash`, so nodes still agree on hashes exactly - the change is pure cost reduction, no protocol change.
 
-**Tradeoff:** A node now trees every local key rather than only its primary-range keys, ~RF× more tree metadata (one `uint32` per key). This is the same order as the store's own key set and is the inherent cost of not scanning. Trees are in-memory, rebuilt from one store scan at startup and on membership change; persisting them to disk to avoid even that startup scan is a deferred refinement.
+**Tradeoff:** A node now trees every local key rather than only its primary-range keys, ~RF× more tree metadata (one `uint32` per key). This is the same order as the store's own key set and is the inherent cost of not scanning. Trees live in memory and are rebuilt from one store scan on membership change; clean restarts skip even the startup scan by restoring a snapshot (see [Tree Snapshots on Clean Shutdown](#tree-snapshots-on-clean-shutdown) below).
 
 ### TTL-Based Tombstone GC over Per-Replica Confirmation Tracking
 
@@ -107,7 +107,7 @@ Ranges were previously computed once at startup, so a node that started alone co
 
 The sequence check is the safety argument: WAL-tail replay deliberately suppresses the `onUpdate` callbacks that keep trees current, so a snapshot taken before a crash would silently miss whatever the tail replayed. Matching sequences mean the store state is byte-identical to what the trees were built against. The snapshot also carries the topology (ranges and sync order) it was built under; once gossip re-converges to the same membership, the per-tick range comparison passes and nothing rescans, while a genuinely changed topology triggers the usual rebuild.
 
-**Tradeoff:** Only clean restarts get the O(load) fast path - crash recovery rebuilds exactly as before (correct, just not faster). Startup restore cost is proportional to key count (~120 ns per key to replay pairs into trees), not to table bytes.
+**Tradeoff:** Only clean restarts get the O(load) fast path - crash recovery rebuilds exactly as before (correct, just not faster). Startup restore cost is proportional to key count (~110 ns per key to replay pairs into trees), not to table bytes.
 
 ## See Also
 
