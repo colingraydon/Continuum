@@ -10,7 +10,11 @@
 
 A distributed key-value store implementing the core data layer patterns from Cassandra and Dynamo - written in Go.
 
-Continuum maps keys to nodes via a consistent hash ring, propagates cluster membership through a gossip protocol, fans writes to N replicas with quorum acknowledgment, surfaces concurrent writes as vector clock siblings rather than discarding them, and repairs divergent replicas through a combination of inline read repair, event-driven hinted handoff, and background Merkle tree anti-entropy. With `DATA_DIR` set, the store runs as an LSM engine: every write goes through a CRC-checked write-ahead log whose fsyncs are batched across concurrent writers by group commit, the memtable flushes to immutable SSTables with bloom filters on a size threshold, and reads merge across generations, so state survives restart and the dataset is no longer RAM-bound on the write path. Buffered hints are persisted to their own append-only log, so undelivered writes survive a coordinator crash rather than depending on anti-entropy alone. Clients that want more than eventual consistency can opt in per request: conditional writes serialize through the key's primary replica and reject on clock mismatch instead of creating a sibling, and a session clock header buys read-your-writes and monotonic reads.
+Continuum maps keys to nodes via a consistent hash ring, propagates cluster membership through a gossip protocol, fans writes to N replicas under a sloppy quorum whose consistency level is tunable per request from one to all, surfaces concurrent writes as vector clock siblings rather than discarding them, and repairs divergent replicas through a combination of inline read repair, event-driven hinted handoff, and background Merkle tree anti-entropy. With `DATA_DIR` set, the store runs as an LSM engine: every write goes through a CRC-checked write-ahead log whose fsyncs are batched across concurrent writers by group commit, the memtable flushes to immutable SSTables with bloom filters on a size threshold, and reads merge across generations, so state survives restart and the dataset is no longer RAM-bound on the write path. Buffered hints are persisted to their own append-only log, so undelivered writes survive a coordinator crash rather than depending on anti-entropy alone. Clients that want more than eventual consistency can opt in per request: conditional writes serialize through the key's primary replica and reject on clock mismatch instead of creating a sibling, and a session clock header buys read-your-writes and monotonic reads.
+
+**18M** key routings/s &nbsp;·&nbsp; **7.6M** memtable reads/s &nbsp;·&nbsp; **1.4M** cached SSTable reads/s &nbsp;·&nbsp; **9.5K** quorum writes/s at **~100 µs** p50 &nbsp;·&nbsp; **7.5×** durable write throughput from group commit
+
+<sub>One Apple M3 Max; exact percentiles in [docs/data](docs/data/benchmarks.json), method and full tables in [Benchmarks](docs/benchmarks.md).</sub>
 
 ---
 
@@ -65,7 +69,7 @@ flowchart TB
 | WAL + SSTables | `internal/wal`, `internal/sstable` | Crash-durable append-only log with CRC framing; immutable sorted tables with bloom filters, per-block compression, and a shared block cache |
 | Anti-Entropy | `internal/antientropy` | Background Merkle-tree comparison and bidirectional repair of divergent replicas |
 | Hint Store | `internal/hintstore` | Durability buffer that replays missed writes when a down replica recovers |
-| HTTP API | `api` | Transport, read repair, data migration, Prometheus instrumentation |
+| HTTP API | `api` | Transport, quorum fan-out, read repair, data migration, Prometheus instrumentation |
 
 ---
 
@@ -121,8 +125,8 @@ make coverage  # HTML coverage report
 | [Architecture](docs/architecture.md) | System diagram, layer map, write and read path narratives |
 | [Hash Ring](docs/ring.md) | RBT, murmur3, virtual nodes, weighted allocation, health filter |
 | [Gossip](docs/gossip.md) | UDP transport, membership lifecycle, failure detection, convergence |
-| [Replication](docs/replication.md) | Vector clocks, quorum, sibling surfacing, fan-out implementation |
-| [Anti-Entropy](docs/antientropy.md) | Merkle trees, bidirectional sync, tombstone GC safety argument |
+| [Replication](docs/replication.md) | Vector clocks, sloppy quorum, per-request consistency levels, sibling surfacing, fan-out implementation |
+| [Anti-Entropy](docs/antientropy.md) | Merkle trees, bidirectional sync, tombstone GC safety argument, tree snapshots on clean shutdown |
 | [Hinted Handoff](docs/hinted-handoff.md) | Durability gap, hint lifecycle, event-driven delivery, graceful flush |
 | [Persistence](docs/persistence.md) | WAL framing, snapshot format, recovery flow, downtime gate |
 | [SSTable](docs/sstable.md) | Immutable sorted table format: compressed data blocks, sparse index, bloom filter, shared block cache |
