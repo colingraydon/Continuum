@@ -133,5 +133,5 @@ A replica that receives a write with `X-Proxied-From` set stores the value witho
 - [Ring](ring.md) - provides the healthy replica set via `GetHealthyReplicationNodes`
 - [Hinted Handoff](hinted-handoff.md) - records hints for failed replica writes and skipped intended owners
 - [Read Repair](read-repair.md) - repairs stale replicas after quorum reads
-- [KV Store](../internal/store/store.go) - implements the vector clock conflict resolution logic
+- [KV Store](https://github.com/colingraydon/Continuum/blob/main/internal/store/store.go) - implements the vector clock conflict resolution logic
 - [Operations](operations.md) - `REPLICATION_FACTOR`, `WRITE_QUORUM`, `READ_QUORUM`, `REPLICA_TIMEOUT_MS`

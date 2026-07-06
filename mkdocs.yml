@@ -1,0 +1,89 @@
+site_name: continuum
+site_description: A leaderless distributed key-value store in Go — consistent hashing, SWIM gossip, vector-clock replication, and an LSM engine. Built to be read.
+site_url: https://colingraydon.github.io/Continuum/
+repo_url: https://github.com/colingraydon/Continuum
+repo_name: colingraydon/Continuum
+edit_uri: edit/main/docs/
+copyright: continuum — a distributed KV store in Go, for learning. MIT licensed.
+
+theme:
+  name: material
+  custom_dir: overrides
+  font: false
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - navigation.indexes
+    - content.code.copy
+    - content.action.edit
+    - search.suggest
+    - search.highlight
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/weather-night
+        name: switch to dark
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: switch to light
+  icon:
+    repo: fontawesome/brands/github
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/colingraydon/Continuum
+
+extra_css:
+  - assets/extra.css
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - footnotes
+  - toc:
+      permalink: true
+      toc_depth: 3
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.details
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+nav:
+  - home: index.md
+  - routing & membership:
+      - hash ring: ring.md
+      - gossip: gossip.md
+      - data migration: data-migration.md
+  - storage engine:
+      - persistence: persistence.md
+      - sstable: sstable.md
+      - backup & restore: backup-restore.md
+  - replication & repair:
+      - replication: replication.md
+      - read repair: read-repair.md
+      - hinted handoff: hinted-handoff.md
+      - anti-entropy: antientropy.md
+  - consistency & queries:
+      - client consistency: client-consistency.md
+      - range scans: range-scans.md
+  - reference & rigor:
+      - architecture: architecture.md
+      - api reference: api.md
+      - operations: operations.md
+      - benchmarks: benchmarks.md
+      - fault injection: fault-injection.md
+      - testing: testing.md

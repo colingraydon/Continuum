@@ -112,7 +112,7 @@ The sequence check is the safety argument: WAL-tail replay deliberately suppress
 ## See Also
 
 - [Ring](ring.md) - provides vnode ranges and replica sets
-- [KV Store](../internal/store/store.go) - source of truth for all entries; fires `onUpdate` and `onEvict` callbacks
+- [KV Store](https://github.com/colingraydon/Continuum/blob/main/internal/store/store.go) - source of truth for all entries; fires `onUpdate` and `onEvict` callbacks
 - [Read Repair](read-repair.md) - inline complement that catches divergence on the read path
 - [Hinted Handoff](hinted-handoff.md) - the faster-reacting durability layer anti-entropy backs up
 - [API](api.md) - sync endpoints (`/sync`, `/sync/keys`, `/sync/bucket-keys`, `/sync/push`)

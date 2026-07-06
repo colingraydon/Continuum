@@ -39,3 +39,6 @@ coverage.out
 .vscode/
 
 sonarqube_issues.csv
+
+# MkDocs build output (published by the docs workflow, never committed)
+/site/
