@@ -1,0 +1,49 @@
+/* Theme the rendered docs pages to sit in the same visual family as the
+   landing page: system fonts, a slate ground in dark mode, and the signal
+   amber as the accent/link color. The landing page (overrides/home.html)
+   carries its own scoped styles and is unaffected by anything here. */
+
+:root {
+  --md-text-font: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --md-code-font: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+}
+
+/* light */
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: #10151D;
+  --md-primary-fg-color--light: #10151D;
+  --md-primary-fg-color--dark: #10151D;
+  --md-accent-fg-color: #A5620A;
+  --md-typeset-a-color: #A5620A;
+}
+
+/* dark: slate ground matching the landing */
+[data-md-color-scheme="slate"] {
+  --md-hue: 220;
+  --md-primary-fg-color: #0D1117;
+  --md-default-bg-color: #0D1117;
+  --md-accent-fg-color: #F0A93C;
+  --md-typeset-a-color: #F0A93C;
+}
+
+/* mono, tightly-tracked headings echo the landing's display type */
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3 {
+  font-family: var(--md-code-font);
+  letter-spacing: -0.015em;
+  font-weight: 600;
+}
+
+.md-header__title,
+.md-nav__title {
+  font-family: var(--md-code-font);
+  letter-spacing: 0.01em;
+}
+
+/* amber accent on the active nav item and inline code */
+.md-nav__link--active,
+.md-nav__link:focus,
+.md-nav__link:hover {
+  color: var(--md-accent-fg-color);
+}

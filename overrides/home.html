@@ -1,0 +1,693 @@
+{% extends "main.html" %}
+
+{#
+  Custom landing page for continuum. Rendered only for the page whose front
+  matter sets `template: home.html` (docs/index.md). All styles and scripts
+  below load only on this page, so nothing here touches the docs pages, which
+  use Material's default templates. Everything is scoped under `.cx-home`.
+#}
+
+{% block styles %}
+  {{ super() }}
+  <style>
+    :root {
+      --cx-bg: #EAEEF3;
+      --cx-surface: #F7F9FB;
+      --cx-panel: #FFFFFF;
+      --cx-border: #D3DAE3;
+      --cx-border-strong: #BEC7D2;
+      --cx-ink: #10151D;
+      --cx-ink-soft: #4F5A69;
+      --cx-ink-faint: #7C8797;
+      --cx-signal: #A5620A;
+      --cx-signal-bright: #C0790F;
+      --cx-n1: #1683A0;
+      --cx-n2: #4E58BE;
+      --cx-n3: #2F9070;
+      --cx-glow: rgba(165, 98, 10, 0.16);
+      --cx-font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+      --cx-font-sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      --cx-measure: 62ch;
+      --cx-maxw: 1140px;
+      --cx-radius: 6px;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --cx-bg: #0D1117; --cx-surface: #12171F; --cx-panel: #161C26;
+        --cx-border: #232B36; --cx-border-strong: #2F3A48;
+        --cx-ink: #E7ECF3; --cx-ink-soft: #99A3B3; --cx-ink-faint: #6A7484;
+        --cx-signal: #F0A93C; --cx-signal-bright: #F8C069;
+        --cx-n1: #58B7CD; --cx-n2: #8C95EE; --cx-n3: #60BF9C;
+        --cx-glow: rgba(240, 169, 60, 0.20);
+      }
+    }
+    /* material's palette toggle stamps data-md-color-scheme on <body>; mirror it */
+    [data-md-color-scheme="slate"] {
+      --cx-bg: #0D1117; --cx-surface: #12171F; --cx-panel: #161C26;
+      --cx-border: #232B36; --cx-border-strong: #2F3A48;
+      --cx-ink: #E7ECF3; --cx-ink-soft: #99A3B3; --cx-ink-faint: #6A7484;
+      --cx-signal: #F0A93C; --cx-signal-bright: #F8C069;
+      --cx-n1: #58B7CD; --cx-n2: #8C95EE; --cx-n3: #60BF9C;
+      --cx-glow: rgba(240, 169, 60, 0.20);
+    }
+    [data-md-color-scheme="default"] {
+      --cx-bg: #EAEEF3; --cx-surface: #F7F9FB; --cx-panel: #FFFFFF;
+      --cx-border: #D3DAE3; --cx-border-strong: #BEC7D2;
+      --cx-ink: #10151D; --cx-ink-soft: #4F5A69; --cx-ink-faint: #7C8797;
+      --cx-signal: #A5620A; --cx-signal-bright: #C0790F;
+      --cx-n1: #1683A0; --cx-n2: #4E58BE; --cx-n3: #2F9070;
+      --cx-glow: rgba(165, 98, 10, 0.16);
+    }
+
+    /* home page: suppress material chrome, go full-bleed. !important is needed
+       to beat material's higher-specificity `.md-main__inner.md-grid` rule;
+       these globals are safe because this style block only loads on the home page. */
+    .md-header, .md-tabs, .md-footer, .md-sidebar { display: none !important; }
+    .md-container, .md-main, .md-content {
+      max-width: none !important; margin: 0 !important; padding: 0 !important; width: 100% !important;
+    }
+    .md-main__inner {
+      display: block !important; max-width: none !important; margin: 0 !important; padding: 0 !important; width: 100% !important;
+    }
+
+    .cx-home, .cx-home * { box-sizing: border-box; }
+    .cx-home {
+      background: var(--cx-bg);
+      color: var(--cx-ink);
+      font-family: var(--cx-font-sans);
+      line-height: 1.65;
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+    .cx-home a { color: inherit; }
+
+    /* fully lowercase voice; only code/protocol tokens keep their case */
+    .cx-home .brand, .cx-home .nav a, .cx-home .theme-btn, .cx-home h1.title,
+    .cx-home .thesis, .cx-home .btn, .cx-home .band-head h2, .cx-home .band-head p,
+    .cx-home .eyebrow, .cx-home .metric .lab, .cx-home .metrics-foot, .cx-home .step .idx,
+    .cx-home .step h3, .cx-home .step p, .cx-home .path-note, .cx-home .doc-group h4,
+    .cx-home .doc-group a .t, .cx-home .closing h2, .cx-home .closing p,
+    .cx-home footer, .cx-home .readout {
+      text-transform: lowercase;
+    }
+    .cx-home code { text-transform: none; }
+
+    .cx-home .wrap { max-width: var(--cx-maxw); margin: 0 auto; padding: 0 clamp(1.1rem, 4vw, 2.5rem); }
+    .cx-home .eyebrow {
+      font-family: var(--cx-font-mono); font-size: 0.72rem; letter-spacing: 0.14em;
+      color: var(--cx-ink-faint); margin: 0;
+    }
+
+    .cx-home .top {
+      border-bottom: 1px solid var(--cx-border);
+      background: color-mix(in srgb, var(--cx-bg) 82%, transparent);
+      backdrop-filter: blur(8px); position: sticky; top: 0; z-index: 10;
+    }
+    .cx-home .top-inner { display: flex; align-items: center; justify-content: space-between; height: 58px; }
+    .cx-home .brand {
+      font-family: var(--cx-font-mono); font-weight: 600; letter-spacing: 0.03em;
+      font-size: 0.92rem; display: flex; align-items: center; gap: 0.6rem;
+    }
+    .cx-home .brand .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--cx-signal); box-shadow: 0 0 0 3px var(--cx-glow); }
+    .cx-home .nav { display: flex; align-items: center; gap: clamp(0.9rem, 2.5vw, 1.7rem); font-family: var(--cx-font-mono); font-size: 0.8rem; }
+    .cx-home .nav a { color: var(--cx-ink-soft); text-decoration: none; transition: color .15s; }
+    .cx-home .nav a:hover { color: var(--cx-ink); }
+    .cx-home .theme-btn {
+      font-family: var(--cx-font-mono); font-size: 0.72rem; letter-spacing: 0.08em;
+      color: var(--cx-ink-soft); background: transparent; border: 1px solid var(--cx-border-strong);
+      border-radius: var(--cx-radius); padding: 0.32rem 0.6rem; cursor: pointer; transition: border-color .15s, color .15s;
+    }
+    .cx-home .theme-btn:hover { color: var(--cx-ink); border-color: var(--cx-ink-faint); }
+
+    .cx-home .hero {
+      display: grid; grid-template-columns: 1.05fr 0.95fr; gap: clamp(1.5rem, 4vw, 3.5rem);
+      align-items: center; padding: clamp(2.8rem, 7vw, 5.5rem) 0 clamp(2rem, 5vw, 3.5rem);
+    }
+    .cx-home .hero-copy { min-width: 0; }
+    .cx-home .reveal { animation: cx-rise .7s cubic-bezier(.2,.7,.2,1) both; }
+    .cx-home .reveal.d1 { animation-delay: .05s; }
+    .cx-home .reveal.d2 { animation-delay: .13s; }
+    .cx-home .reveal.d3 { animation-delay: .21s; }
+    .cx-home .reveal.d4 { animation-delay: .29s; }
+    @keyframes cx-rise { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+
+    .cx-home h1.title {
+      font-family: var(--cx-font-mono); font-weight: 600; font-size: clamp(2.5rem, 6.4vw, 4.4rem);
+      letter-spacing: -0.03em; line-height: 0.98; margin: 0.9rem 0 0; text-wrap: balance;
+    }
+    .cx-home .thesis { font-size: clamp(1.02rem, 1.5vw, 1.18rem); color: var(--cx-ink-soft); max-width: 46ch; margin: 1.15rem 0 0; text-wrap: pretty; }
+    .cx-home .thesis b { color: var(--cx-ink); font-weight: 600; }
+
+    .cx-home .actions { display: flex; flex-wrap: wrap; gap: 0.7rem; margin-top: 1.7rem; }
+    .cx-home .btn {
+      font-family: var(--cx-font-mono); font-size: 0.83rem; letter-spacing: 0.02em; text-decoration: none;
+      padding: 0.66rem 1.05rem; border-radius: var(--cx-radius); border: 1px solid transparent;
+      display: inline-flex; align-items: center; gap: 0.5rem; transition: transform .12s, background .15s, border-color .15s;
+    }
+    .cx-home .btn.primary { background: var(--cx-signal); color: #12100A; font-weight: 600; }
+    .cx-home .btn.primary:hover { transform: translateY(-1px); background: var(--cx-signal-bright); }
+    .cx-home .btn.ghost { border-color: var(--cx-border-strong); color: var(--cx-ink); }
+    .cx-home .btn.ghost:hover { border-color: var(--cx-ink-faint); transform: translateY(-1px); }
+
+    .cx-home .meta-line { margin-top: 1.6rem; font-family: var(--cx-font-mono); font-size: 0.76rem; color: var(--cx-ink-faint); display: flex; flex-wrap: wrap; gap: 0.45rem 0.9rem; }
+    .cx-home .meta-line .sep { opacity: 0.4; }
+
+    .cx-home .figure {
+      border: 1px solid var(--cx-border);
+      background: radial-gradient(120% 120% at 50% 30%, var(--cx-panel), var(--cx-surface));
+      border-radius: 10px; padding: 1.1rem 1.1rem 0.9rem; min-width: 0;
+    }
+    .cx-home .figure canvas { display: block; width: 100%; height: auto; aspect-ratio: 1 / 1; max-height: 460px; }
+    .cx-home .figure-foot { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-top: 0.55rem; flex-wrap: wrap; }
+    .cx-home .legend { display: flex; gap: 0.9rem; font-family: var(--cx-font-mono); font-size: 0.7rem; color: var(--cx-ink-soft); }
+    .cx-home .legend span { display: inline-flex; align-items: center; gap: 0.35rem; }
+    .cx-home .legend i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+    .cx-home .readout { font-family: var(--cx-font-mono); font-size: 0.72rem; color: var(--cx-ink-faint); min-height: 1.1em; }
+    .cx-home .readout b { color: var(--cx-signal); font-weight: 600; }
+    .cx-home .readout .k { color: var(--cx-ink); }
+
+    .cx-home section.band { padding: clamp(2.6rem, 6vw, 4.6rem) 0; border-top: 1px solid var(--cx-border); }
+    .cx-home .band-head { margin-bottom: clamp(1.6rem, 4vw, 2.6rem); }
+    .cx-home .band-head h2 { font-family: var(--cx-font-mono); font-weight: 600; font-size: clamp(1.4rem, 3vw, 1.95rem); letter-spacing: -0.02em; margin: 0.5rem 0 0; text-wrap: balance; }
+    .cx-home .band-head p { color: var(--cx-ink-soft); max-width: var(--cx-measure); margin: 0.6rem 0 0; }
+
+    .cx-home .metrics { display: grid; grid-template-columns: repeat(5, 1fr); border: 1px solid var(--cx-border); border-radius: 10px; overflow: hidden; background: var(--cx-panel); }
+    .cx-home .metric { padding: 1.4rem 1.25rem; border-right: 1px solid var(--cx-border); min-width: 0; }
+    .cx-home .metric:last-child { border-right: none; }
+    .cx-home .metric .num { font-family: var(--cx-font-mono); font-variant-numeric: tabular-nums; font-weight: 600; font-size: clamp(1.7rem, 3.2vw, 2.5rem); letter-spacing: -0.02em; color: var(--cx-ink); line-height: 1; }
+    .cx-home .metric .num .suf { color: var(--cx-signal); }
+    .cx-home .metric .lab { font-family: var(--cx-font-mono); font-size: 0.72rem; letter-spacing: 0.06em; color: var(--cx-ink); margin-top: 0.7rem; }
+    .cx-home .metric .sub { font-size: 0.78rem; color: var(--cx-ink-faint); margin-top: 0.28rem; font-family: var(--cx-font-mono); }
+    .cx-home .metrics-foot { margin-top: 0.9rem; font-family: var(--cx-font-mono); font-size: 0.75rem; color: var(--cx-ink-faint); }
+    .cx-home .metrics-foot a { color: var(--cx-signal); text-decoration: none; border-bottom: 1px solid transparent; }
+    .cx-home .metrics-foot a:hover { border-bottom-color: var(--cx-signal); }
+
+    .cx-home .path { display: grid; grid-template-columns: repeat(5, 1fr); gap: 1px; background: var(--cx-border); border: 1px solid var(--cx-border); border-radius: 10px; overflow: hidden; }
+    .cx-home .step { background: var(--cx-panel); padding: 1.3rem 1.15rem 1.5rem; position: relative; min-width: 0; }
+    .cx-home .step .idx { font-family: var(--cx-font-mono); font-size: 0.72rem; color: var(--cx-signal); letter-spacing: 0.05em; }
+    .cx-home .step h3 { font-family: var(--cx-font-mono); font-size: 0.98rem; margin: 0.7rem 0 0.45rem; color: var(--cx-ink); letter-spacing: -0.01em; }
+    .cx-home .step p { margin: 0; font-size: 0.85rem; color: var(--cx-ink-soft); line-height: 1.55; }
+    .cx-home .step code, .cx-home .band-head code { font-family: var(--cx-font-mono); font-size: 0.8em; color: var(--cx-ink); background: color-mix(in srgb, var(--cx-signal) 12%, transparent); padding: 0.05em 0.32em; border-radius: 3px; }
+    .cx-home .path-note { margin-top: 1.1rem; font-size: 0.88rem; color: var(--cx-ink-soft); max-width: var(--cx-measure); }
+    .cx-home .path-note b { color: var(--cx-ink); font-weight: 600; }
+
+    .cx-home .doc-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 1.5rem 2rem; }
+    .cx-home .doc-group h4 { font-family: var(--cx-font-mono); font-size: 0.74rem; letter-spacing: 0.08em; color: var(--cx-ink-faint); margin: 0 0 0.7rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--cx-border); }
+    .cx-home .doc-group ul { list-style: none; margin: 0; padding: 0; }
+    .cx-home .doc-group li { margin: 0; }
+    .cx-home .doc-group a { display: flex; align-items: baseline; justify-content: space-between; gap: 0.6rem; text-decoration: none; color: var(--cx-ink); padding: 0.4rem 0; border-bottom: 1px solid transparent; transition: color .13s; }
+    .cx-home .doc-group a:hover { color: var(--cx-signal); }
+    .cx-home .doc-group a .t { font-size: 0.93rem; }
+    .cx-home .doc-group a .f { font-family: var(--cx-font-mono); font-size: 0.68rem; color: var(--cx-ink-faint); white-space: nowrap; }
+    .cx-home .doc-group a:hover .f { color: var(--cx-signal); }
+
+    .cx-home .closing { border: 1px solid var(--cx-border); border-radius: 12px; background: radial-gradient(90% 140% at 85% 0%, var(--cx-glow), transparent 60%), var(--cx-panel); padding: clamp(1.8rem, 5vw, 3rem); }
+    .cx-home .closing h2 { font-family: var(--cx-font-mono); font-weight: 600; font-size: clamp(1.4rem, 3vw, 2.05rem); letter-spacing: -0.02em; margin: 0; max-width: 20ch; text-wrap: balance; }
+    .cx-home .closing p { color: var(--cx-ink-soft); max-width: var(--cx-measure); margin: 1rem 0 0; }
+    .cx-home .closing p b { color: var(--cx-ink); font-weight: 600; }
+
+    .cx-home footer { border-top: 1px solid var(--cx-border); padding: 2rem 0 3rem; font-family: var(--cx-font-mono); font-size: 0.76rem; color: var(--cx-ink-faint); display: flex; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+    .cx-home footer a { color: var(--cx-ink-soft); text-decoration: none; }
+    .cx-home footer a:hover { color: var(--cx-ink); }
+
+    .cx-home :focus-visible { outline: 2px solid var(--cx-signal); outline-offset: 2px; border-radius: 3px; }
+
+    @media (max-width: 860px) {
+      .cx-home .hero { grid-template-columns: 1fr; }
+      .cx-home .hero-figure { order: 2; }
+      .cx-home .metrics { grid-template-columns: repeat(2, 1fr); }
+      .cx-home .metric:nth-child(2n) { border-right: none; }
+      .cx-home .metric { border-bottom: 1px solid var(--cx-border); }
+      .cx-home .metric:nth-last-child(-n+1) { border-bottom: none; }
+      .cx-home .path { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 520px) {
+      .cx-home .metrics { grid-template-columns: 1fr; }
+      .cx-home .metric { border-right: none; }
+      .cx-home .path { grid-template-columns: 1fr; }
+      .cx-home .nav .hide-sm { display: none; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .cx-home .reveal { animation: none; }
+    }
+  </style>
+{% endblock %}
+
+{% block container %}
+<div class="cx-home">
+  <header class="top">
+    <div class="wrap top-inner">
+      <div class="brand"><span class="dot"></span>continuum</div>
+      <nav class="nav">
+        <a href="#write-path" class="hide-sm">how it works</a>
+        <a href="#docs">docs</a>
+        <a href="https://github.com/colingraydon/Continuum">github</a>
+        <button class="theme-btn" id="themeBtn" aria-label="Toggle color theme">theme</button>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="wrap hero">
+      <div class="hero-copy">
+        <p class="eyebrow reveal d1">Distributed key-value store &nbsp;·&nbsp; Go &nbsp;·&nbsp; leaderless</p>
+        <h1 class="title reveal d2">every key finds<br>its place on the ring.</h1>
+        <p class="thesis reveal d3">Continuum maps each key to a point on a consistent hash ring, replicates clockwise to its neighbors, and heals divergence on its own. It is a working study of the <b>Dynamo and Cassandra data layer</b>, built to be read as much as run.</p>
+        <div class="actions reveal d4">
+          <a class="btn primary" href="#docs">Explore the docs &rarr;</a>
+          <a class="btn ghost" href="https://github.com/colingraydon/Continuum">View source</a>
+        </div>
+        <div class="meta-line reveal d4">
+          <span>consistent hashing</span><span class="sep">/</span>
+          <span>SWIM gossip</span><span class="sep">/</span>
+          <span>vector clocks</span><span class="sep">/</span>
+          <span>LSM storage</span>
+        </div>
+      </div>
+
+      <div class="hero-figure">
+        <div class="figure">
+          <canvas id="ring" width="460" height="460" role="img"
+            aria-label="A consistent hash ring with three nodes; a key routes clockwise to its coordinator and two replica nodes."></canvas>
+          <div class="figure-foot">
+            <div class="legend">
+              <span><i style="background:var(--cx-n1)"></i>node-1</span>
+              <span><i style="background:var(--cx-n2)"></i>node-2</span>
+              <span><i style="background:var(--cx-n3)"></i>node-3</span>
+            </div>
+          </div>
+          <div class="readout" id="readout">routing&hellip;</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="wrap band" id="benchmarks" style="border-top:none;">
+      <div class="band-head">
+        <p class="eyebrow">Measured, not asserted</p>
+        <h2>fast at every layer of the stack.</h2>
+        <p>Numbers from the in-repo benchmark harness, which records per-operation timings and reports exact nearest-rank percentiles. Ratios are the durable finding; treat absolutes as one machine's snapshot.</p>
+      </div>
+      <div class="metrics" id="metrics">
+        <div class="metric">
+          <div class="num" data-to="18" data-suffix="M">0<span class="suf">M</span></div>
+          <div class="lab">key routings / s</div>
+          <div class="sub">hash lookup · 49 ns</div>
+        </div>
+        <div class="metric">
+          <div class="num" data-to="7.6" data-decimals="1" data-suffix="M">0<span class="suf">M</span></div>
+          <div class="lab">memtable reads / s</div>
+          <div class="sub">point read · 131 ns</div>
+        </div>
+        <div class="metric">
+          <div class="num" data-to="1.4" data-decimals="1" data-suffix="M">0<span class="suf">M</span></div>
+          <div class="lab">cached table reads / s</div>
+          <div class="sub">warm SSTable · 0.55 µs</div>
+        </div>
+        <div class="metric">
+          <div class="num" data-to="9.5" data-decimals="1" data-suffix="K">0<span class="suf">K</span></div>
+          <div class="lab">quorum writes / s</div>
+          <div class="sub">durable · ~100 µs p50</div>
+        </div>
+        <div class="metric">
+          <div class="num" data-to="7.5" data-decimals="1" data-suffix="&times;">0<span class="suf">&times;</span></div>
+          <div class="lab">write throughput</div>
+          <div class="sub">from WAL group commit</div>
+        </div>
+      </div>
+      <p class="metrics-foot">One Apple M3 Max, 14 cores &nbsp;·&nbsp; exact p50 / p99 / p999 ship in the repo as <a href="https://github.com/colingraydon/Continuum/blob/main/docs/data/benchmarks.json">benchmarks.json &rarr;</a></p>
+    </section>
+
+    <section class="wrap band" id="write-path">
+      <div class="band-head">
+        <p class="eyebrow">The path of a write</p>
+        <h2>one <code>PUT</code>, five stages, no leader.</h2>
+      </div>
+      <div class="path">
+        <div class="step">
+          <div class="idx">01 / route</div>
+          <h3>Place</h3>
+          <p>The ring hashes the key and returns its <code>N</code> replica nodes. A red-black tree over virtual nodes keeps placement balanced as the cluster grows.</p>
+        </div>
+        <div class="step">
+          <div class="idx">02 / fan out</div>
+          <h3>Replicate</h3>
+          <p>The coordinator writes to all replicas and waits for <code>W</code> acknowledgments. A sloppy quorum walks past down nodes so a write is never blocked.</p>
+        </div>
+        <div class="step">
+          <div class="idx">03 / persist</div>
+          <h3>Durably log</h3>
+          <p>Each replica appends to a CRC-checked WAL, with fsyncs batched across writers by group commit, then flushes its memtable to bloom-filtered SSTables.</p>
+        </div>
+        <div class="step">
+          <div class="idx">04 / version</div>
+          <h3>Reconcile</h3>
+          <p>Vector clocks track causality. Concurrent writes surface as <code>siblings</code> for the client to merge, rather than one silently overwriting the other.</p>
+        </div>
+        <div class="step">
+          <div class="idx">05 / heal</div>
+          <h3>Converge</h3>
+          <p>Read repair fixes stale replicas inline; hinted handoff replays missed writes; Merkle-tree anti-entropy is the slow, thorough backstop.</p>
+        </div>
+      </div>
+      <p class="path-note">Reads run the same ring in reverse: fan out to the replicas, wait for <b>R</b> responses, merge siblings, and repair any replica that came back stale. Clients that need more can opt into <b>conditional writes</b> or a <b>session clock</b> for read-your-writes.</p>
+    </section>
+
+    <section class="wrap band" id="docs">
+      <div class="band-head">
+        <p class="eyebrow">Read the system, end to end</p>
+        <h2>the docs that argue for every decision.</h2>
+        <p>These are the source of truth. Each one states the choice, the alternative it beat, and the tradeoff it accepts: the reasoning a design review would ask for.</p>
+      </div>
+      <div class="doc-groups">
+        <div class="doc-group">
+          <h4>Routing &amp; membership</h4>
+          <ul>
+            <li><a href="{{ 'ring/' | url }}"><span class="t">Hash Ring</span><span class="f">ring.md</span></a></li>
+            <li><a href="{{ 'gossip/' | url }}"><span class="t">Gossip</span><span class="f">gossip.md</span></a></li>
+            <li><a href="{{ 'data-migration/' | url }}"><span class="t">Data Migration</span><span class="f">data-migration.md</span></a></li>
+          </ul>
+        </div>
+        <div class="doc-group">
+          <h4>Storage engine</h4>
+          <ul>
+            <li><a href="{{ 'persistence/' | url }}"><span class="t">Persistence</span><span class="f">persistence.md</span></a></li>
+            <li><a href="{{ 'sstable/' | url }}"><span class="t">SSTable</span><span class="f">sstable.md</span></a></li>
+            <li><a href="{{ 'backup-restore/' | url }}"><span class="t">Backup &amp; Restore</span><span class="f">backup-restore.md</span></a></li>
+          </ul>
+        </div>
+        <div class="doc-group">
+          <h4>Replication &amp; repair</h4>
+          <ul>
+            <li><a href="{{ 'replication/' | url }}"><span class="t">Replication</span><span class="f">replication.md</span></a></li>
+            <li><a href="{{ 'read-repair/' | url }}"><span class="t">Read Repair</span><span class="f">read-repair.md</span></a></li>
+            <li><a href="{{ 'hinted-handoff/' | url }}"><span class="t">Hinted Handoff</span><span class="f">hinted-handoff.md</span></a></li>
+            <li><a href="{{ 'antientropy/' | url }}"><span class="t">Anti-Entropy</span><span class="f">antientropy.md</span></a></li>
+          </ul>
+        </div>
+        <div class="doc-group">
+          <h4>Consistency &amp; queries</h4>
+          <ul>
+            <li><a href="{{ 'client-consistency/' | url }}"><span class="t">Client Consistency</span><span class="f">client-consistency.md</span></a></li>
+            <li><a href="{{ 'range-scans/' | url }}"><span class="t">Range Scans</span><span class="f">range-scans.md</span></a></li>
+          </ul>
+        </div>
+        <div class="doc-group">
+          <h4>Reference &amp; rigor</h4>
+          <ul>
+            <li><a href="{{ 'architecture/' | url }}"><span class="t">Architecture</span><span class="f">architecture.md</span></a></li>
+            <li><a href="{{ 'api/' | url }}"><span class="t">API Reference</span><span class="f">api.md</span></a></li>
+            <li><a href="{{ 'operations/' | url }}"><span class="t">Operations</span><span class="f">operations.md</span></a></li>
+            <li><a href="{{ 'benchmarks/' | url }}"><span class="t">Benchmarks</span><span class="f">benchmarks.md</span></a></li>
+            <li><a href="{{ 'fault-injection/' | url }}"><span class="t">Fault Injection</span><span class="f">fault-injection.md</span></a></li>
+            <li><a href="{{ 'testing/' | url }}"><span class="t">Testing</span><span class="f">testing.md</span></a></li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="wrap band">
+      <div class="closing">
+        <h2>built to be read, and to be built on.</h2>
+        <p>The whole point of Continuum is legibility: every headline number links to a benchmark, every design choice links to the document that defends it. <b>Contributions are welcome.</b> The docs are plain Markdown and the test pyramid runs from unit seams up through process-level fault injection, so a change is easy to make and easy to trust.</p>
+        <div class="actions" style="margin-top:1.6rem;">
+          <a class="btn primary" href="https://github.com/colingraydon/Continuum">Star on GitHub &rarr;</a>
+          <a class="btn ghost" href="{{ 'architecture/' | url }}">Start with the architecture</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="wrap">
+    <span>continuum: a distributed KV store in Go, for learning.</span>
+    <span><a href="https://github.com/colingraydon/Continuum">github.com/colingraydon/Continuum</a> &nbsp;·&nbsp; MIT</span>
+  </footer>
+</div>
+{% endblock %}
+
+{% block scripts %}
+  {{ super() }}
+  <script>
+  (function () {
+    "use strict";
+    var cv = document.getElementById("ring");
+    if (!cv) return;
+    var root = document.documentElement;
+    var body = document.body;
+
+    function effectiveScheme() {
+      var s = body.getAttribute("data-md-color-scheme");
+      if (s === "slate") return "dark";
+      if (s === "default") return "light";
+      return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    }
+
+    var themeBtn = document.getElementById("themeBtn");
+    if (themeBtn) {
+      themeBtn.addEventListener("click", function () {
+        body.setAttribute("data-md-color-scheme", effectiveScheme() === "dark" ? "default" : "slate");
+        palette = readPalette();
+      });
+    }
+
+    var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    function readPalette() {
+      var cs = getComputedStyle(root);
+      function v(n) { return cs.getPropertyValue(n).trim(); }
+      return {
+        ink: v("--cx-ink"), soft: v("--cx-ink-soft"), faint: v("--cx-ink-faint"),
+        border: v("--cx-border-strong"), signal: v("--cx-signal"), signalBright: v("--cx-signal-bright"),
+        nodes: [v("--cx-n1"), v("--cx-n2"), v("--cx-n3")], panel: v("--cx-panel")
+      };
+    }
+    var palette = readPalette();
+    window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", function () {
+      if (!body.getAttribute("data-md-color-scheme")) palette = readPalette();
+    });
+
+    var vnodes = [
+      { h: 0.02, n: 0 }, { h: 0.09, n: 1 }, { h: 0.14, n: 2 },
+      { h: 0.21, n: 0 }, { h: 0.27, n: 1 }, { h: 0.34, n: 2 },
+      { h: 0.40, n: 0 }, { h: 0.49, n: 1 }, { h: 0.55, n: 2 },
+      { h: 0.63, n: 0 }, { h: 0.70, n: 1 }, { h: 0.77, n: 2 },
+      { h: 0.86, n: 0 }, { h: 0.91, n: 1 }, { h: 0.97, n: 2 }
+    ].sort(function (a, b) { return a.h - b.h; });
+
+    var keys = [
+      { name: "user:8821", h: 0.12 }, { name: "cart:0af3", h: 0.45 },
+      { name: "sku:41d9", h: 0.58 }, { name: "order:c7", h: 0.73 },
+      { name: "sess:9c2", h: 0.95 }, { name: "acct:6b1", h: 0.31 }
+    ];
+    var RF = 3;
+
+    function resolve(h) {
+      var start = 0;
+      for (var i = 0; i < vnodes.length; i++) { if (vnodes[i].h >= h) { start = i; break; } }
+      var seen = [], path = [];
+      for (var j = 0; j < vnodes.length && seen.length < RF; j++) {
+        var idx = (start + j) % vnodes.length;
+        var node = vnodes[idx].n;
+        if (seen.indexOf(node) === -1) { seen.push(node); path.push({ idx: idx, node: node }); }
+      }
+      return { path: path, nodes: seen };
+    }
+    keys.forEach(function (k) { k.res = resolve(k.h); });
+
+    var ctx = cv.getContext("2d");
+    var W = 0, H = 0, cx = 0, cy = 0, R = 0;
+
+    function resize() {
+      var rect = cv.getBoundingClientRect();
+      var dpr = Math.min(window.devicePixelRatio || 1, 2);
+      W = rect.width; H = rect.width;
+      cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      cx = W / 2; cy = H / 2; R = Math.min(W, H) * 0.36;
+    }
+    function pt(h, radius) {
+      var a = h * Math.PI * 2 - Math.PI / 2;
+      return { x: cx + Math.cos(a) * radius, y: cy + Math.sin(a) * radius, a: a };
+    }
+    function drawArc(fromH, toH, color, width, alpha) {
+      ctx.save();
+      ctx.globalAlpha = alpha == null ? 1 : alpha;
+      ctx.strokeStyle = color; ctx.lineWidth = width; ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.arc(cx, cy, R, fromH * Math.PI * 2 - Math.PI / 2, toH * Math.PI * 2 - Math.PI / 2, false);
+      ctx.stroke(); ctx.restore();
+    }
+
+    var keyi = 0, phaseStart = 0, PH = { IN: 0, WALK: 1, HOLD: 2, OUT: 3 }, phase = PH.IN;
+    var SEG = 720, DWELL = 260, HOLDMS = 1500, INMS = 380, OUTMS = 380;
+    var readoutEl = document.getElementById("readout");
+
+    function nodeName(n) { return "node-" + (n + 1); }
+    function setReadout(k, resolvedCount) {
+      var p = k.res.path;
+      var coordTxt = resolvedCount >= 1 ? '<b>' + nodeName(p[0].node) + '</b>' : '&hellip;';
+      var reps = [];
+      for (var i = 1; i < p.length; i++) reps.push(resolvedCount >= i + 1 ? nodeName(p[i].node) : '&hellip;');
+      readoutEl.innerHTML = '<span class="k">' + k.name + '</span> &nbsp; hash ' + k.h.toFixed(2) +
+        ' &nbsp;&rarr;&nbsp; coord ' + coordTxt +
+        (reps.length ? ' &nbsp;&rarr;&nbsp; ' + reps.join(', ') : '');
+    }
+    function waypoints(k) {
+      var wp = [k.h], prev = k.h;
+      k.res.path.forEach(function (p) {
+        var hh = vnodes[p.idx].h;
+        while (hh < prev) hh += 1;
+        wp.push(hh); prev = hh;
+      });
+      return wp;
+    }
+    function ease(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
+
+    function frame(ts) {
+      if (!phaseStart) phaseStart = ts;
+      var k = keys[keyi], wp = waypoints(k), elapsed = ts - phaseStart;
+      ctx.clearRect(0, 0, W, H);
+
+      ctx.save(); ctx.strokeStyle = palette.border; ctx.globalAlpha = 0.9; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.stroke(); ctx.restore();
+
+      ctx.save(); ctx.strokeStyle = palette.faint; ctx.globalAlpha = 0.35; ctx.lineWidth = 1;
+      for (var t = 0; t < 60; t++) {
+        var a = t / 60 * Math.PI * 2 - Math.PI / 2;
+        var r1 = R + 4, r2 = R + (t % 5 === 0 ? 11 : 7);
+        ctx.beginPath();
+        ctx.moveTo(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1);
+        ctx.lineTo(cx + Math.cos(a) * r2, cy + Math.sin(a) * r2);
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      var resolvedCount = 0, sigH = k.h, walkAlpha = 0;
+      if (phase === PH.IN) {
+        walkAlpha = Math.min(elapsed / INMS, 1);
+      } else if (phase === PH.WALK) {
+        walkAlpha = 1;
+        var seg = 0, tt = elapsed;
+        while (seg < wp.length - 1) {
+          if (tt < SEG) { sigH = wp[seg] + (wp[seg + 1] - wp[seg]) * ease(tt / SEG); break; }
+          tt -= SEG; resolvedCount++;
+          if (tt < DWELL) { sigH = wp[seg + 1]; break; }
+          tt -= DWELL; seg++;
+          if (seg === wp.length - 1) { sigH = wp[seg]; resolvedCount = wp.length - 1; }
+        }
+      } else {
+        walkAlpha = 1; sigH = wp[wp.length - 1]; resolvedCount = wp.length - 1;
+      }
+
+      if (phase !== PH.IN) {
+        drawArc(k.h, sigH, palette.signal, 3, phase === PH.OUT ? Math.max(1 - elapsed / OUTMS, 0) : 0.85);
+      }
+
+      for (var i = 0; i < vnodes.length; i++) {
+        var vp = pt(vnodes[i].h, R), col = palette.nodes[vnodes[i].n], repRank = -1;
+        for (var pi = 0; pi < k.res.path.length; pi++) {
+          if (k.res.path[pi].idx === i && pi < resolvedCount) repRank = pi;
+        }
+        ctx.save();
+        if (repRank >= 0) {
+          var pulse = phase === PH.HOLD ? (0.6 + 0.4 * Math.sin(ts / 260)) : 1;
+          ctx.globalAlpha = phase === PH.OUT ? Math.max(1 - elapsed / OUTMS, 0.15) : 1;
+          ctx.beginPath(); ctx.arc(vp.x, vp.y, 9, 0, Math.PI * 2);
+          ctx.strokeStyle = palette.signal; ctx.lineWidth = 2; ctx.globalAlpha *= pulse; ctx.stroke();
+          ctx.globalAlpha = 1;
+        }
+        ctx.beginPath(); ctx.arc(vp.x, vp.y, 4.2, 0, Math.PI * 2); ctx.fillStyle = col; ctx.fill();
+        ctx.restore();
+      }
+
+      var kp = pt(k.h, R), ko = pt(k.h, R + 24);
+      ctx.save();
+      ctx.globalAlpha = phase === PH.OUT ? Math.max(1 - elapsed / OUTMS, 0) : walkAlpha;
+      ctx.strokeStyle = palette.signal; ctx.lineWidth = 1; ctx.globalAlpha *= 0.5;
+      ctx.beginPath(); ctx.moveTo(ko.x, ko.y); ctx.lineTo(kp.x, kp.y); ctx.stroke();
+      ctx.globalAlpha = phase === PH.OUT ? Math.max(1 - elapsed / OUTMS, 0) : walkAlpha;
+      ctx.beginPath(); ctx.arc(ko.x, ko.y, 3.4, 0, Math.PI * 2); ctx.fillStyle = palette.signalBright; ctx.fill();
+      ctx.restore();
+
+      if (phase === PH.WALK) {
+        var sp = pt(sigH, R);
+        ctx.save(); ctx.shadowColor = palette.signal; ctx.shadowBlur = 12;
+        ctx.beginPath(); ctx.arc(sp.x, sp.y, 5, 0, Math.PI * 2); ctx.fillStyle = palette.signalBright; ctx.fill();
+        ctx.restore();
+      }
+
+      ctx.save(); ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillStyle = palette.faint; ctx.font = "600 " + Math.round(R * 0.085) + "px ui-monospace, Menlo, monospace";
+      ctx.fillText("hash ring", cx, cy - R * 0.12);
+      ctx.fillStyle = palette.soft; ctx.font = "600 " + Math.round(R * 0.13) + "px ui-monospace, Menlo, monospace";
+      ctx.fillText("rf = 3", cx, cy + R * 0.08);
+      ctx.restore();
+
+      setReadout(k, resolvedCount);
+
+      if (phase === PH.IN && elapsed >= INMS) { phase = PH.WALK; phaseStart = ts; }
+      else if (phase === PH.WALK) {
+        if (elapsed >= (wp.length - 1) * (SEG + DWELL)) { phase = PH.HOLD; phaseStart = ts; }
+      }
+      else if (phase === PH.HOLD && elapsed >= HOLDMS) { phase = PH.OUT; phaseStart = ts; }
+      else if (phase === PH.OUT && elapsed >= OUTMS) { keyi = (keyi + 1) % keys.length; phase = PH.IN; phaseStart = ts; }
+
+      requestAnimationFrame(frame);
+    }
+
+    function staticFrame() {
+      ctx.clearRect(0, 0, W, H);
+      var k = keys[0];
+      ctx.strokeStyle = palette.border; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.stroke();
+      var wp = waypoints(k);
+      drawArc(k.h, wp[wp.length - 1], palette.signal, 3, 0.8);
+      for (var i = 0; i < vnodes.length; i++) {
+        var vp = pt(vnodes[i].h, R);
+        var isRep = k.res.path.some(function (p) { return p.idx === i; });
+        if (isRep) { ctx.beginPath(); ctx.arc(vp.x, vp.y, 9, 0, Math.PI * 2); ctx.strokeStyle = palette.signal; ctx.lineWidth = 2; ctx.stroke(); }
+        ctx.beginPath(); ctx.arc(vp.x, vp.y, 4.2, 0, Math.PI * 2); ctx.fillStyle = palette.nodes[vnodes[i].n]; ctx.fill();
+      }
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillStyle = palette.soft; ctx.font = "600 " + Math.round(R * 0.13) + "px ui-monospace, monospace";
+      ctx.fillText("rf = 3", cx, cy);
+      setReadout(k, k.res.path.length);
+    }
+
+    function boot() { resize(); if (reduce) staticFrame(); else requestAnimationFrame(frame); }
+    var rt;
+    window.addEventListener("resize", function () {
+      clearTimeout(rt);
+      rt = setTimeout(function () { resize(); if (reduce) staticFrame(); }, 120);
+    });
+
+    var counted = false;
+    function countUp() {
+      if (counted) return; counted = true;
+      document.querySelectorAll("#metrics .num").forEach(function (el) {
+        var to = parseFloat(el.getAttribute("data-to"));
+        var dec = parseInt(el.getAttribute("data-decimals") || "0", 10);
+        var suf = el.getAttribute("data-suffix") || "";
+        if (reduce) { el.innerHTML = to.toFixed(dec) + '<span class="suf">' + suf + '</span>'; return; }
+        var dur = 750, t0 = null;
+        function stepf(ts) {
+          if (!t0) t0 = ts;
+          var p = Math.min((ts - t0) / dur, 1);
+          el.innerHTML = (to * (1 - Math.pow(1 - p, 3))).toFixed(dec) + '<span class="suf">' + suf + '</span>';
+          if (p < 1) requestAnimationFrame(stepf);
+        }
+        requestAnimationFrame(stepf);
+      });
+    }
+    var mEl = document.getElementById("metrics");
+    if (mEl) {
+      var mObs = new IntersectionObserver(function (entries) {
+        entries.forEach(function (e) { if (e.isIntersecting) { countUp(); mObs.disconnect(); } });
+      }, { threshold: 0.4 });
+      mObs.observe(mEl);
+    }
+
+    boot();
+  })();
+  </script>
+{% endblock %}

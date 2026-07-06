@@ -61,4 +61,4 @@ The alternative is a dedicated repair endpoint. Reusing the existing path means 
 
 - [Replication](replication.md) - the quorum read that triggers repair
 - [Anti-Entropy](antientropy.md) - the background complement that catches what read repair misses
-- [KV Store](../internal/store/store.go) - vector clock merge logic applied to repair writes
+- [KV Store](https://github.com/colingraydon/Continuum/blob/main/internal/store/store.go) - vector clock merge logic applied to repair writes

@@ -7,6 +7,9 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/colingraydon/continuum)](https://goreportcard.com/report/github.com/colingraydon/continuum)
 [![Go](https://img.shields.io/badge/go-1.26-blue)](https://go.dev)
 [![License](https://img.shields.io/github/license/colingraydon/Continuum)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-continuum-F0A93C)](https://colingraydon.github.io/Continuum/)
+
+**[Read the documentation site →](https://colingraydon.github.io/Continuum/)**
 
 A distributed key-value store implementing the core data layer patterns from Cassandra and Dynamo - written in Go.
 
