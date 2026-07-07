@@ -163,7 +163,6 @@ make coverage  # HTML coverage report
 
 **Correctness and verification**
 
-- **Bootstrapping rejoin for wiped nodes** - a node that discards its data through the downtime gate rejoins CAS quorums immediately, so a committed value can be down to one store copy until anti-entropy repairs it ([finding #10](docs/fault-injection.md#findings-the-harness-surfaced)); wiped nodes should rejoin as bootstrapping — out of read sets and paxos quorums — until repair completes, reusing the existing join machinery
 - **TLA+ specification** - model the sloppy quorum, hinted handoff, read repair, and anti-entropy interaction and model-check the invariants the fault harness only samples (acknowledged writes survive F failures, tombstone GC never resurrects); stretch goal is trace conformance between harness events and the spec
 
 **Data model**

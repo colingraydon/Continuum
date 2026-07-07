@@ -243,6 +243,29 @@ func runHintDelivery(ctx context.Context, h *api.Handler, interval time.Duration
 // compaction opportunity.
 const compactionInterval = 30 * time.Second
 
+// wipedRejoinGrace bounds how long a node that discarded its data waits for
+// peers to repair from before concluding it is standalone.
+const wipedRejoinGrace = 10 * time.Second
+
+// waitForPeers polls until the member list knows at least one other node,
+// the grace period expires, or shutdown begins. Returns whether peers exist.
+func waitForPeers(ctx context.Context, ml *gossip.MemberList, grace time.Duration) bool {
+	deadline := time.Now().Add(grace)
+	for {
+		if ml.Size() > 1 {
+			return true
+		}
+		if time.Now().After(deadline) || ctx.Err() != nil {
+			return false
+		}
+		select {
+		case <-time.After(200 * time.Millisecond):
+		case <-ctx.Done():
+			return false
+		}
+	}
+}
+
 // runCompaction periodically compacts the store's SSTables, cascading within a
 // tick until no run qualifies. It uses the anti-entropy GC window so the
 // bottom-level drop of aged tombstones matches GCTombstones. Returns on ctx
@@ -327,10 +350,16 @@ func main() {
 
 	g.Start(ctx)
 
-	// Mark self as bootstrapping before the gossip exchange so seed nodes
-	// exclude us from read replica sets until data migration is complete.
-	if len(cfg.seedNodes) > 0 {
+	// Mark self as bootstrapping before the gossip exchange so peers exclude
+	// us from read replica sets (and paxos quorums) until data migration is
+	// complete. Two triggers: a configured seed join, and a downtime-gate
+	// discard — a wiped rejoiner still holds its paxos promises but its store
+	// can no longer vouch for the keys it replicates (finding #10).
+	discarded := persist != nil && persist.discardedData
+	if len(cfg.seedNodes) > 0 || discarded {
 		ml.SetBootstrapping(cfg.selfID, true)
+	}
+	if len(cfg.seedNodes) > 0 {
 		log.Printf("bootstrapping from seed nodes: %v", cfg.seedNodes)
 		g.Bootstrap(cfg.seedNodes)
 	}
@@ -415,8 +444,24 @@ func main() {
 		}
 	}()
 
-	// Pull primary vnode ranges from existing replicas, then exit bootstrapping.
-	if len(cfg.seedNodes) > 0 {
+	// Repair, then exit bootstrapping. A joiner pulls the primary ranges it
+	// is taking over; a wiped rejoiner pulls its entire replica set, because
+	// it previously vouched for all of it and must not vote in quorums with
+	// absent state. The wiped path may have no seeds configured (the fault
+	// harness re-registers members instead), so it waits for membership
+	// before pulling; a node that stays alone past the grace period has no
+	// one to repair from and serves standalone.
+	switch {
+	case discarded:
+		go func() {
+			if waitForPeers(ctx, ml, wipedRejoinGrace) {
+				h.BootstrapReplicaRanges()
+			} else {
+				log.Printf("migration: no peers within %v after data discard; serving standalone", wipedRejoinGrace)
+			}
+			ml.SetBootstrapping(cfg.selfID, false)
+		}()
+	case len(cfg.seedNodes) > 0:
 		go func() {
 			h.Bootstrap()
 			ml.SetBootstrapping(cfg.selfID, false)

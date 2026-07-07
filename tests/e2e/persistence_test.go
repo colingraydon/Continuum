@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // startPersistentNode launches a node with a fixed SELF_ID and DATA_DIR.
@@ -119,10 +120,27 @@ func TestPersistence_RecoversFromWALOnlyAfterCrash(t *testing.T) {
 	_ = n.cmd.Wait()
 
 	// No meta.json was written so the downtime gate trips and discards data.
-	// GET on a never-stored key returns 200 with an empty value (see
+	// The node rejoins as bootstrapping (its store can no longer vouch for
+	// its replica ranges — finding #10) and, having no peers to repair from,
+	// serves 503 until the standalone grace period expires. After that, GET
+	// on a never-stored key returns 200 with an empty value (see
 	// writeKeyResponse case 0), so we assert on the value rather than status.
 	n2 := startPersistentNode(t, selfID, dataDir)
-	if nr, code := n2.get(t, "k"); code != http.StatusOK || nr.Value != "" {
-		t.Fatalf("crashed node should re-bootstrap empty; got code=%d value=%q", code, nr.Value)
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		nr, code := n2.get(t, "k")
+		if code == http.StatusOK {
+			if nr.Value != "" {
+				t.Fatalf("crashed node should re-bootstrap empty; got value=%q", nr.Value)
+			}
+			return
+		}
+		if code != http.StatusServiceUnavailable {
+			t.Fatalf("unexpected status %d during bootstrapping window", code)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("node never exited the standalone bootstrapping grace period")
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
 }

@@ -9,6 +9,7 @@ import (
 
 	"github.com/colingraydon/continuum/internal/gossip"
 	"github.com/colingraydon/continuum/internal/merkle"
+	"github.com/colingraydon/continuum/internal/ring"
 	"github.com/colingraydon/continuum/internal/store"
 )
 
@@ -18,6 +19,28 @@ import (
 func (h *Handler) Bootstrap() {
 	ranges := h.ring.GetPrimaryVnodeRanges(h.selfID)
 	log.Printf("migration: bootstrapping %d primary vnode ranges", len(ranges))
+	h.pullRanges(ranges)
+	log.Printf("migration: bootstrap complete")
+}
+
+// BootstrapReplicaRanges pulls every key range this node replicates — the
+// full replica set, not just the primary subset. Used when a node rejoins
+// after the downtime gate discarded its data: a joiner starts owning
+// nothing, but a wiped rejoiner previously vouched for its entire replica
+// set and must not vote in read sets or CAS quorums with absent state, so
+// repair has to cover everything it replicates before the bootstrapping
+// flag clears (fault-harness finding #10).
+func (h *Handler) BootstrapReplicaRanges() {
+	ranges := h.ring.GetReplicaVnodeRanges(h.selfID, h.replicationFactor)
+	log.Printf("migration: re-bootstrapping %d replica vnode ranges after data discard", len(ranges))
+	h.pullRanges(ranges)
+	log.Printf("migration: replica-range bootstrap complete")
+}
+
+// pullRanges fetches each range's keys from the other replicas that hold
+// them, merging entries into the local store via the standard vector clock
+// path.
+func (h *Handler) pullRanges(ranges []ring.VnodeRange) {
 	for _, vr := range ranges {
 		sources := h.ring.GetReplicationNodesForHash(vr.End, h.replicationFactor)
 		for _, src := range sources {
@@ -29,7 +52,6 @@ func (h *Handler) Bootstrap() {
 			}
 		}
 	}
-	log.Printf("migration: bootstrap complete")
 }
 
 // applyEntries merges a map of key→siblings into the local store using the

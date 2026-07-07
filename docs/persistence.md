@@ -99,7 +99,7 @@ return nil
 ## Recovery flow
 
 1. Read `meta.json`. Refuse to start if `node_id != SELF_ID` (prevents accidental data-dir reuse across nodes).
-2. **Downtime gate**: if `now - last_clean_shutdown > gcTTL` OR meta is missing → skip steps 3–6. Clear data files, return an empty store, let the existing `Bootstrap()` flow refill primary ranges from current replicas. A crash does not update `last_clean_shutdown`, so a crashed node recovers normally as long as its last clean shutdown is within `gcTTL`. See "Tombstone GC safety" below.
+2. **Downtime gate**: if `now - last_clean_shutdown > gcTTL` OR meta is missing → skip steps 3–6. Clear data files and return an empty store. When the clear actually discarded data, the node rejoins as **bootstrapping** — excluded from read sets and from paxos CAS voting — waits for peers, pulls its entire replica set back via `BootstrapReplicaRanges()`, and only then clears the flag (a wiped node that still voted with absent state let serial reads merge to stale history — fault-harness finding #10; a wiped node with no peers within a grace period serves standalone). A crash does not update `last_clean_shutdown`, so a crashed node recovers normally as long as its last clean shutdown is within `gcTTL`. See "Tombstone GC safety" below.
 3. Clean up any `*.sst.tmp` (and legacy `*.snap.tmp`) left from a crashed flush.
 4. Open every `tables/*.sst`, newest first. Set `applied_seq` to the highest table name. **Legacy migration**: if there are no tables but a v1 snapshot exists, load it as memtable contents and use its `sequence_at` instead; after step 6 it is flushed out as the first SSTable and the snap files are removed.
 5. Walk `wal/` segments in sequence order. For each record:

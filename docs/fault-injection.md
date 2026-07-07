@@ -176,22 +176,26 @@ system behaviors, not test artifacts:
    incrementing; surfaced by the simulation harness.* Two different values
    could share one vector clock, a divergence anti-entropy can never
    repair. See the [simulation findings](simulation.md#findings).
-10. **A downtime-gate wipe under-replicates committed CAS values** — *open;
-    the fix is bootstrapping rejoin (see the roadmap).* Surfaced by the
-    history checker the moment finding #7's fix made the failover scenario
-    a hard assertion. A SIGKILLed node rejoins through the downtime gate
-    with an empty store but keeps voting in paxos quorums immediately.
-    Commit acks at majority, so a committed value can be down to a single
-    surviving store copy after the wipe — and a serial read whose prepare
-    majority is {the wiped node, the replica that commit never reached}
-    honestly merges to stale or absent state, which the next CAS then
-    chains from (one forked generation, one stale read per occurrence).
-    Ballot safety is not the issue; the decided *value's* replication is.
-    The fix is for a node that discarded data to rejoin as bootstrapping —
-    pulled back into quorums only once repair completes — reusing the
-    existing join machinery. `LinearizableCASAcrossPrimaryFailover` runs
-    the checker in detector mode for this finding; the partition and
-    healthy scenarios remain hard assertions.
+10. **A downtime-gate wipe under-replicated committed CAS values** — *fixed
+    by bootstrapping rejoin.* Surfaced by the history checker the moment
+    finding #7's fix made the failover scenario a hard assertion. A
+    SIGKILLed node rejoined through the downtime gate with an empty store
+    but kept voting in paxos quorums immediately. Commit acks at majority,
+    so a committed value could be down to a single surviving store copy
+    after the wipe — and a serial read whose prepare majority was {the
+    wiped node, the replica that commit never reached} honestly merged to
+    stale or absent state, which the next CAS then chained from (one
+    forked generation, one stale read per occurrence). Ballot safety was
+    never the issue; the decided *value's* replication was. Now a node
+    whose gate discard actually threw away data rejoins as bootstrapping —
+    excluded from read sets and from paxos voting (while still counting in
+    the quorum denominator, like dead members) — waits for peers, pulls
+    its **entire replica set** back (`BootstrapReplicaRanges`, not just
+    the primary ranges a fresh joiner takes), and only then clears the
+    flag. A wiped node with no peers within a grace period serves
+    standalone. `LinearizableCASAcrossPrimaryFailover` asserts
+    linearizability again — the scenario that surfaced both #7 and #10 is
+    the regression test for both fixes.
 
 ## Extending the suite
 

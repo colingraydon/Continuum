@@ -67,7 +67,7 @@ no such treatment: it guarantees no side effects.
 | Scenario | Faults | Expectation |
 | -------- | ------ | ----------- |
 | `LinearizableCASHealthy` | none | Hard assertion: the history linearizes |
-| `LinearizableCASAcrossPrimaryFailover` | SIGKILL + restart | Detector for finding #10 (downtime-gate wipe); finding #7 itself is closed |
+| `LinearizableCASAcrossPrimaryFailover` | SIGKILL + restart (downtime-gate wipe) | Hard assertion since bootstrapping rejoin (finding #10) |
 | `LinearizableCASAcrossPartition` | asymmetric partition + heal | Hard assertion since paxos-backed CAS |
 
 Under the original primary-serialized CAS design, the churn scenarios failed
@@ -87,11 +87,12 @@ signatures of that root cause alongside the porcupine visualization:
 
 The scenarios ran as detectors — logging violations instead of failing —
 until [paxos-backed CAS](client-consistency.md) closed the window; the
-partition scenario has been a hard assertion since, and the failover
-scenario immediately surfaced the *next* gap (finding #10: a downtime-gate
-wipe under-replicates committed values until repair) and detects that one
-now. The checker also drove the paxos fix itself, catching three protocol
-bugs in the wiring that final-state checks cannot see:
+partition scenario became a hard assertion, and the failover scenario
+immediately surfaced the *next* gap (finding #10: a downtime-gate wipe
+under-replicated committed values until repair), detected it while
+bootstrapping rejoin was built, and asserts linearizability again since.
+The checker also drove the paxos fix itself, catching three protocol bugs
+in the wiring that final-state checks cannot see:
 the isolated-node "majority of one" fork (quorum denominators must include
 dead members), the false 412 a retrying coordinator returned after a rival
 round resurrected and committed its own mutation, and the resurrection of

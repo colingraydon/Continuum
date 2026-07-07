@@ -380,9 +380,9 @@ func committedSurvivors(promises []prepareResponse) []SiblingResponse {
 	return mergeResponses(responses)
 }
 
-// casReplicas resolves the strict replica set (the health-ignoring ring
-// walk) and the round's majority size. Paxos quorums must come from a stable
-// set, so two rules apply. First, the walk ignores health verdicts: the
+// casReplicas resolves the replica set that may vote in a paxos round for
+// key, and the round's majority size. Quorums must come from a stable set,
+// so three rules apply. First, the walk ignores health verdicts: the
 // healthy walk resizes with suspicion and quorums over a shifting set lose
 // the intersection guarantee. Second, the majority denominator is the
 // replication factor capped by *total known membership including dead
@@ -392,8 +392,21 @@ func committedSurvivors(promises []prepareResponse) []SiblingResponse {
 // and decide rounds disjointly from the real majority on the other side
 // (this forked histories in the asymmetric-partition fault scenario).
 // A dead replica still counts toward the quorum size; it just cannot vote.
+// Third, bootstrapping replicas are excluded from voting for the same
+// denominator-unchanged reason: a node that discarded its data through the
+// downtime gate rejoins with promises intact but a store that can no longer
+// vouch for the keys it replicates, and a prepare majority leaning on its
+// absent state merges to stale history (finding #10). It votes again once
+// repair clears the flag.
 func (h *Handler) casReplicas(key string) ([]*ring.Node, int, bool) {
-	replicas := h.ring.GetReplicationNodes(key, h.replicationFactor)
+	all := h.ring.GetReplicationNodes(key, h.replicationFactor)
+	replicas := make([]*ring.Node, 0, len(all))
+	for _, n := range all {
+		if m, ok := h.memberList.Get(n.ID); ok && m.Bootstrapping {
+			continue
+		}
+		replicas = append(replicas, n)
+	}
 	if len(replicas) == 0 {
 		return nil, 0, false
 	}

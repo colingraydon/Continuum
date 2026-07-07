@@ -209,20 +209,6 @@ func verifyLinearizable(t *testing.T, w *casWorkload, timeout time.Duration) {
 	}
 }
 
-// expectKnownCASGap runs the linearizability check in detector mode for a
-// scenario that reproduces a documented open finding: a violation is
-// reported with its diagnosis and visualization but does not fail the
-// suite, and the reason is logged so the flip back to verifyLinearizable is
-// one line once the finding is fixed.
-func expectKnownCASGap(t *testing.T, w *casWorkload, timeout time.Duration, finding string) {
-	t.Helper()
-	if checkLinearizable(t, w, timeout) {
-		t.Log("no violation surfaced this run; the window is timing-dependent")
-		return
-	}
-	t.Logf("known gap reproduced: %s", finding)
-}
-
 func checkLinearizable(t *testing.T, w *casWorkload, timeout time.Duration) bool {
 	t.Helper()
 	hist := w.rec.history()
