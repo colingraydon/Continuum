@@ -64,6 +64,11 @@ acknowledged with 204. Single-writer keys make verification exact:
   replica of a key must hold an identical, non-empty sibling set (verified by
   direct replica reads that bypass coordinator merging and read repair).
 
+A second workload drives racing CAS clients over shared keys and records
+every operation with invocation and response timestamps; after the run a
+porcupine checker verifies the history is per-key linearizable. See
+[History Checking](history-checking.md).
+
 ## Scenario catalog
 
 | Test | Fault | What it proves |
@@ -78,6 +83,9 @@ acknowledged with 204. Single-writer keys make verification exact:
 | `GossipPacketLossStability` | 40% gossip drop | No false death verdicts; data path unaffected |
 | `PeriodicHintDeliveryAcrossAsymmetricPartition` | inbound HTTP blackhole, gossip up, AE off | Periodic sweep delivers buffered hints with no dead→alive edge and no coordinator restart; failed sweeps re-buffer |
 | `SloppyQuorumAlwaysWritable` | SIGKILL 1 of 4, RF=3, AE off | Once the victim is suspect, a `consistency=all` write succeeds via the next healthy node; the skipped owner's hint repairs it after restart |
+| `LinearizableCASHealthy` | none | Racing CAS clients on shared keys produce a linearizable per-key history: one winner per generation, the rest 412 |
+| `LinearizableCASAcrossPrimaryFailover` | SIGKILL + restart mid-workload | Detector for finding #7: CAS histories fork and reads go stale across primary failover |
+| `LinearizableCASAcrossPartition` | inbound blackhole 6s | Detector for finding #7: same signatures across an asymmetric partition and heal |
 
 ## Findings the harness surfaced
 
@@ -135,14 +143,33 @@ system behaviors, not test artifacts:
    once the deterministic sync cadence made convergence timing reliable
    enough to expose it; the entry hash now XORs each sibling's value hash
    with a canonical hash of its vector clock.
+7. **Primary-serialized CAS is not linearizable across membership churn** —
+   *open; the fix is consensus-backed CAS (see the roadmap).* Surfaced the
+   moment porcupine checking replaced spot assertions: under a node kill or
+   an asymmetric partition, racing CAS clients produce histories no
+   sequential CAS register can explain. The checker's diagnosis shows three
+   signatures with one root cause — CAS serializes against the *current
+   primary's local state* only, and membership churn changes which node that
+   is without moving the state along. A new primary that never received the
+   last acknowledged write both serves **stale reads** and accepts a CAS
+   from the superseded value, **forking** the history into siblings that
+   later surface as **conflict reads**
+   ([Client Consistency](client-consistency.md#primary-serialized-cas-not-consensus)
+   concedes exactly this window). `LinearizableCASAcrossPrimaryFailover` and
+   `LinearizableCASAcrossPartition` reproduce it reliably and run the
+   checker in detector mode — reporting the violation and its porcupine
+   visualization instead of failing — until a consensus round closes the
+   window and they flip to hard assertions. See
+   [History Checking](history-checking.md).
 
 ## Extending the suite
 
 New scenarios compose from the same pieces: `newCluster` (per-test topology
 and quorum config), fault primitives on `cluster`/`node` (`kill`, `shutdown`,
 `pause`, `resume`, `restart`, `isolate`, `heal`, proxy latency and drop
-knobs), `newWorkload` for load with history, and `verifyDurability` /
-`verifyConvergence` for the invariants. Keep scenarios deterministic where
+knobs), `newWorkload` for load with history, `newCASWorkload` +
+`verifyLinearizable` for porcupine-checked CAS histories, and
+`verifyDurability` / `verifyConvergence` for the invariants. Keep scenarios deterministic where
 possible (seeded writes, explicit fault windows) and lean on the invariant
 checkers rather than sleeping and asserting exact states.
 

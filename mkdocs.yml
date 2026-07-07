@@ -86,4 +86,5 @@ nav:
       - operations: operations.md
       - benchmarks: benchmarks.md
       - fault injection: fault-injection.md
+      - history checking: history-checking.md
       - testing: testing.md

@@ -70,8 +70,12 @@ scenarios inject crashes, hangs, asymmetric partitions, gossip packet loss,
 and coordinator crashes with buffered hints, while a causal workload records
 every acknowledged write. Two invariants are asserted after every scenario:
 no acknowledged write is ever lost, and all replicas converge to identical
-sibling sets. See [Fault Injection](fault-injection.md) for the architecture,
-the scenario catalog, and the system findings the harness surfaced.
+sibling sets. A second workload races CAS clients on shared keys and feeds
+the recorded operation history through a porcupine linearizability checker
+([History Checking](history-checking.md)), which both proves the healthy-path
+CAS contract and reproduces the churn-window violation as finding #7. See
+[Fault Injection](fault-injection.md) for the architecture, the scenario
+catalog, and the system findings the harness surfaced.
 
 ## Benchmarks
 
