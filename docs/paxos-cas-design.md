@@ -1,18 +1,47 @@
-# Design: Consensus-Backed CAS (`internal/paxos`, planned `api` wiring)
+# Design: Consensus-Backed CAS (`internal/paxos`, `api`)
 
-> Implementation plan for replacing primary-serialized conditional writes
-> with a single-decree Paxos round per key, closing fault-harness finding #7.
-> The replica-side acceptor is implemented and tested; this documents the
-> protocol, the coordinator wiring that remains, and the test flips that
-> prove it.
+> The plan the implementation followed for replacing primary-serialized
+> conditional writes with a single-decree Paxos round per key, closing
+> fault-harness finding #7. Kept as the protocol's design record;
+> [Client Consistency](client-consistency.md) documents the shipped
+> behavior.
 
 ## Status
 
 | Piece | State |
 | ----- | ----- |
-| `internal/paxos` acceptor (ballots, prepare/accept/commit, persistent log with replay + compaction) | **implemented, tested** (`feat/paxos-cas`) |
-| Coordinator round, replica HTTP endpoints, serial reads (`api`) | designed below, not yet wired |
-| Fault/sim scenario flips to hard assertions | blocked on the wiring |
+| `internal/paxos` acceptor (ballots, prepare/accept/commit, persistent log with replay + compaction) | **implemented, tested** |
+| Coordinator round, replica HTTP endpoints, serial reads (`api/paxos.go`) | **implemented, tested** |
+| Fault/sim scenario flips to hard assertions | **done** — see the two implementation findings below |
+
+Three safety refinements were forced by the flipped scenarios themselves —
+all invisible to final-state checks and caught by the history checker
+within minutes of wiring:
+
+1. **Quorum denominators include dead members.** The majority is computed
+   over the replication factor capped by *total known membership including
+   dead members*, never by the locally resolvable replica set. An isolated
+   node that declared its peers dead had shrunk its replica set to itself
+   and decided rounds as a disjoint "majority of one".
+2. **A retry must recognize its own committed mutation, and a proposed
+   mutation forfeits 412.** The write's version is deterministic across
+   attempts; if a rival round resurrects and commits attempt one's proposal
+   while the coordinator saw only timeouts, the retry's prepare finds a
+   survivor with its exact version and value — that is success, not a
+   conflict. Symmetrically, once anything was proposed, a failed
+   precondition can no longer prove "no side effects" and degrades from 412
+   to a retryable 503.
+3. **Superseded debris must not be resurrected.** Acceptors track the
+   highest ballot they have seen commit, promises report it, and the
+   coordinator only "finishes" an accepted mutation whose ballot lies above
+   every commit any promise reports. Without the filter, a proposal
+   accepted by a sub-majority (typically only its own coordinator) whose
+   round then lost was later mistaken for an in-flight decision and
+   re-proposed — under a higher ballot, at acceptors that had since
+   committed a newer value — forking history. Debris above every visible
+   commit is genuinely undecidable-or-decided and safe to finish: if it was
+   decided, its accept majority intersects the prepare majority reporting
+   it.
 
 ## Why
 

@@ -33,7 +33,7 @@ Replicas that receive a write with `X-Proxied-From` set store it without further
 
 ### Vector Clocks
 
-Each write carries a `VectorClockVersion` - a map from node ID to a logical counter. The coordinator increments its own counter before storing and replicating.
+Each write carries a `VectorClockVersion` - a map from node ID to a logical counter. The coordinator raises its own counter to the highest value it has locally issued for the key, then increments it, before storing and replicating. The raise is a uniqueness guarantee: a client retrying from a stale clock base through the same coordinator must never receive the exact version of an earlier write for a different value — equal clocks are treated as idempotent duplicates everywhere (merge, repair, anti-entropy), so a collision leaves replicas permanently split on which value the version names (simulation finding #9).
 
 ```json
 { "clocks": { "node1": 3, "node2": 1 } }

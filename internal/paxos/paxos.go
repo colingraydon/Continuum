@@ -19,6 +19,7 @@ package paxos
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"sync"
 
 	"github.com/colingraydon/continuum/internal/wal"
@@ -56,19 +57,27 @@ type Mutation struct {
 }
 
 // keyState is one key's acceptor state. Promised gates prepares and accepts;
-// Accepted holds the round in flight, cleared by commit.
+// Accepted holds the round in flight, cleared by commit; Committed is the
+// highest ballot this replica has seen commit, which is what lets a
+// coordinator distinguish a possibly-decided in-flight round from the stale
+// debris of a superseded one.
 type keyState struct {
-	Promised Ballot    `json:"promised"`
-	Accepted *Mutation `json:"accepted,omitempty"`
+	Promised  Ballot    `json:"promised"`
+	Accepted  *Mutation `json:"accepted,omitempty"`
+	Committed Ballot    `json:"committed,omitzero"`
 }
 
 // Promise is a successful Prepare response: the acceptor will reject
 // anything below the promised ballot, and reports the accepted-uncommitted
-// mutation (if any) that the coordinator must finish before its own round.
+// mutation (if any) alongside the highest committed ballot it has seen. A
+// coordinator must finish an accepted mutation above every reported commit;
+// one at or below a commit is a dead round's leftover and must be ignored —
+// resurrecting it would overwrite the newer committed value.
 type Promise struct {
-	OK       bool      `json:"ok"`
-	Promised Ballot    `json:"promised"` // on !OK: the higher ballot that won
-	Accepted *Mutation `json:"accepted,omitempty"`
+	OK        bool      `json:"ok"`
+	Promised  Ballot    `json:"promised"` // on !OK: the higher ballot that won
+	Accepted  *Mutation `json:"accepted,omitempty"`
+	Committed Ballot    `json:"committed,omitzero"`
 }
 
 // Acceptor holds per-key Paxos state, durably when opened with a log
@@ -99,6 +108,9 @@ type logRecord struct {
 func OpenAcceptor(dir string) (*Acceptor, error) {
 	a := &Acceptor{keys: make(map[string]*keyState)}
 
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("paxos: create log dir: %w", err)
+	}
 	r, err := wal.NewReader(dir)
 	if err != nil {
 		return nil, fmt.Errorf("paxos: open log reader: %w", err)
@@ -194,7 +206,7 @@ func (a *Acceptor) Prepare(key string, b Ballot) (Promise, error) {
 	if b.Less(st.Promised) {
 		return Promise{OK: false, Promised: st.Promised}, nil
 	}
-	return Promise{OK: true, Promised: st.Promised, Accepted: st.Accepted}, nil
+	return Promise{OK: true, Promised: st.Promised, Accepted: st.Accepted, Committed: st.Committed}, nil
 }
 
 // Accept handles a coordinator's propose: accept the mutation unless a
@@ -219,18 +231,31 @@ func (a *Acceptor) Accept(m Mutation) (Promise, error) {
 	return Promise{OK: true, Promised: st.Promised}, nil
 }
 
-// Commit clears the accepted mutation for key if it belongs to ballot b (a
-// later round may already be in flight; its state must survive). The caller
-// applies the mutation to the store before calling Commit, so a crash
-// between the two only re-commits idempotently on the next round.
+// Commit records that ballot b's round committed and clears any accepted
+// mutation at or below it (a later round may already be in flight; its state
+// must survive). The caller applies the mutation to the store before calling
+// Commit, so a crash between the two only re-commits idempotently on the
+// next round.
 func (a *Acceptor) Commit(key string, b Ballot) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	st, ok := a.keys[key]
-	if !ok || st.Accepted == nil || st.Accepted.Ballot != b {
+	if !ok {
+		st = &keyState{}
+		a.keys[key] = st
+	}
+	changed := false
+	if st.Committed.Less(b) {
+		st.Committed = b
+		changed = true
+	}
+	if st.Accepted != nil && !b.Less(st.Accepted.Ballot) {
+		st.Accepted = nil
+		changed = true
+	}
+	if !changed {
 		return nil
 	}
-	st.Accepted = nil
 	return a.persistLocked(key, st)
 }
 

@@ -44,10 +44,11 @@ func (c *simCluster) get(n *simNode, key string) (nodeResponse, int, error) {
 	return nr, resp.StatusCode, nil
 }
 
-// getAll reads at ?consistency=all, returning the body, the merged clock from
-// X-Session-Clock, and the status.
-func (c *simCluster) getAll(n *simNode, key string) (nodeResponse, map[string]uint64, int, error) {
-	resp, err := c.client.Get("http://" + n.httpAddr + "/keys/" + key + "?consistency=all")
+// getSerial reads at ?consistency=serial (a linearizable paxos-prepare
+// read), returning the body, the merged clock from X-Session-Clock, and the
+// status.
+func (c *simCluster) getSerial(n *simNode, key string) (nodeResponse, map[string]uint64, int, error) {
+	resp, err := c.client.Get("http://" + n.httpAddr + "/keys/" + key + "?consistency=serial")
 	if err != nil {
 		return nodeResponse{}, nil, 0, err
 	}
@@ -214,8 +215,8 @@ func mergedClocks(nr nodeResponse) map[string]uint64 {
 // --- racing CAS workload (linearizability) -----------------------------------
 
 // casWorkload races clients over shared keys, every mutation a conditional
-// write chained off a ?consistency=all read, recording everything for the
-// porcupine check. Mirrors the fault harness's CAS workload.
+// write chained off a ?consistency=serial read, recording everything for
+// the porcupine check. Mirrors the fault harness's CAS workload.
 type casWorkload struct {
 	c        *simCluster
 	keys     []string
@@ -303,7 +304,7 @@ func (w *casWorkload) tally(s histcheck.Status) {
 
 func (w *casWorkload) readStep(id int, key string, n *simNode) (string, map[string]uint64, bool) {
 	call := w.rec.Now()
-	nr, session, code, err := w.c.getAll(n, key)
+	nr, session, code, err := w.c.getSerial(n, key)
 	ret := w.rec.Now()
 
 	op := histcheck.Op{Client: id, Key: key, Kind: histcheck.Read, Call: call, Return: ret}

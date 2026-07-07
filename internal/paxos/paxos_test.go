@@ -80,6 +80,51 @@ func TestAcceptRejectsSupersededBallot(t *testing.T) {
 	}
 }
 
+func TestCommitRecordsBallotAndDropsOlderDebris(t *testing.T) {
+	a := NewAcceptor()
+	if _, err := a.Prepare("k", b(5, "n1")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Accept(Mutation{Key: "k", Value: "old", Ballot: b(5, "n1")}); err != nil {
+		t.Fatal(err)
+	}
+	// A commit for a later round clears sub-committed debris and records the
+	// committed ballot for coordinators to filter against.
+	if err := a.Commit("k", b(9, "n2")); err != nil {
+		t.Fatal(err)
+	}
+	p, err := a.Prepare("k", b(12, "n1"))
+	if err != nil || !p.OK {
+		t.Fatalf("prepare: %+v err=%v", p, err)
+	}
+	if p.Accepted != nil {
+		t.Errorf("debris at ballot 5 must be cleared by a commit at 9, got %+v", p.Accepted)
+	}
+	if p.Committed != b(9, "n2") {
+		t.Errorf("promise must report committed ballot 9, got %v", p.Committed)
+	}
+}
+
+func TestCommittedBallotSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	a, err := OpenAcceptor(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Commit("k", b(9, "n2")); err != nil {
+		t.Fatal(err)
+	}
+	a2, err := OpenAcceptor(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a2.Close()
+	p, err := a2.Prepare("k", b(12, "n1"))
+	if err != nil || p.Committed != b(9, "n2") {
+		t.Fatalf("committed ballot lost across restart: %+v err=%v", p, err)
+	}
+}
+
 func TestCommitOnlyClearsItsOwnRound(t *testing.T) {
 	a := NewAcceptor()
 	if _, err := a.Accept(Mutation{Key: "k", Value: "v2", Ballot: b(20, "n2")}); err != nil {

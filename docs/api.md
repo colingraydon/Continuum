@@ -8,11 +8,11 @@ The API package is the integration point. Handlers are thin - they decode the re
 
 The API also owns two non-trivial behaviors that do not fit cleanly in a single internal package - read repair (which requires access to both the ring and the store) and data migration (which requires access to gossip, the ring, and the store simultaneously).
 
-## Internal Headers
+## Internal Headers and Endpoints
 
 `X-Proxied-From` - set on all replica sub-requests. When a handler receives a request with this header, it treats itself as a replica, not a coordinator. It stores the value directly without fan-out and without buffering hints. Used by coordinator fan-out, hinted handoff delivery, read repair, and anti-entropy sync pushes.
 
-`X-CAS-Forwarded-From` - set when a coordinator forwards a `?cas=true` write to the key's primary replica. The receiver executes the CAS as a full coordinator (precondition check, fan-out, hints) but will never forward again: if its ring view does not name it primary, it rejects with 503 instead of looping.
+`POST /paxos/prepare`, `POST /paxos/propose`, `POST /paxos/commit` - the replica-side phases of the per-key paxos round behind `?cas=true` writes and `?consistency=serial` reads. A prepare response carries the replica's committed state for the key plus any accepted-but-uncommitted mutation; propose records an accept; commit applies the decided mutation to the store before clearing the round.
 
 ## Endpoints
 
@@ -71,13 +71,15 @@ All three key endpoints accept an optional `?consistency=` query parameter that 
 | `one` | 1 | Fastest; the coordinator's own copy suffices |
 | `quorum` | RF/2 + 1 | Majority of the replication factor |
 | `all` | RF | Every current replica must respond |
+| `serial` | RF/2 + 1 | GET only: linearizable read via a paxos prepare round |
 
 ```
 PUT /keys/session-token?consistency=all
 GET /keys/profile?consistency=one
+GET /keys/lock-owner?consistency=serial
 ```
 
-An unrecognized level returns 400 without any side effect. Absent, the process default applies. Like the configured W/R, the level is clamped to the currently available replica set, so `all` means "all current replicas", not a hard durability floor — see [Replication](replication.md).
+An unrecognized level returns 400 without any side effect (`serial` on a write is rejected the same way — writes wanting serial semantics use `?cas=true`). Absent, the process default applies. Like the configured W/R, `one`/`quorum`/`all` are clamped to the currently available replica set, so `all` means "all current replicas", not a hard durability floor — see [Replication](replication.md). A `serial` read instead requires a true majority of the key's replica set and fails with a retryable 503 without one; it observes every decided CAS round through majority intersection and finishes any in-flight round before answering. See [Client Consistency](client-consistency.md).
 
 **Conditional writes (CAS)**
 ```
@@ -86,7 +88,7 @@ Content-Type: application/json
 
 {"value": "bob", "clocks": {"node1": 2}}
 ```
-`?cas=true` on PUT or DELETE makes the `clocks` field a precondition: the write is applied only if it causally dominates every existing sibling of the key, and otherwise rejected with 412 instead of creating a sibling. An empty or absent `clocks` field means "expect no current value", so a CAS PUT doubles as insert-if-absent. Whichever node receives the request, the check executes on the key's primary replica (non-primary coordinators forward and relay the verdict), so concurrent CAS writes to a key serialize cluster-wide: exactly one gets 204 and the rest get 412. If the primary is down or ring views disagree, CAS fails closed with a retryable 503 rather than risking a fork. Any `cas` value other than `true` or `false` returns 400 without side effects. See [Client Consistency](client-consistency.md) for semantics and the remaining membership-churn caveat.
+`?cas=true` on PUT or DELETE makes the `clocks` field a precondition: the write is applied only if it causally dominates every committed sibling of the key, and otherwise rejected with 412 instead of creating a sibling. An empty or absent `clocks` field means "expect no current value", so a CAS PUT doubles as insert-if-absent. Every CAS runs one single-decree paxos round among the key's replica set (prepare, propose, commit), so concurrent CAS writes to a key serialize cluster-wide no matter which coordinators they hit: for each generation of a value exactly one racing writer gets 204. Losers get 412 when the coordinator can prove the precondition failed with no side effects, or a retryable 503 when it cannot (quorum unavailable, round contended, or an in-flight round was finished first). Any `cas` value other than `true` or `false` returns 400 without side effects. See [Client Consistency](client-consistency.md) for the protocol and its guarantees.
 
 **Session reads**
 ```

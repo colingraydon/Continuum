@@ -3,18 +3,18 @@ package api
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/colingraydon/continuum/internal/gossip"
 	"github.com/colingraydon/continuum/internal/hintstore"
 	"github.com/colingraydon/continuum/internal/merkle"
+	"github.com/colingraydon/continuum/internal/paxos"
 	"github.com/colingraydon/continuum/internal/ring"
 	"github.com/colingraydon/continuum/internal/stats"
 	"github.com/colingraydon/continuum/internal/store"
@@ -26,7 +26,6 @@ const (
 	keysPrefix           = "/keys/"
 	headerXProxiedFrom   = "X-Proxied-From"
 	headerXSessionClock  = "X-Session-Clock"
-	headerXCASForwarded  = "X-CAS-Forwarded-From"
 	schemeHTTP           = "http://"
 	errKeyRequired       = "key is required"
 	errInvalidBody       = "invalid request body"
@@ -72,11 +71,18 @@ type Handler struct {
 	readQuorum        int
 	startTime         time.Time
 	replicaClient     *http.Client
-	// casClient forwards CAS requests to the key's primary. Separate from
-	// replicaClient because a forwarded CAS contains the primary's own
-	// replica fan-out, so its round trip is bounded by the replica timeout
-	// plus the primary's quorum wait, not by one replica hop.
+	// casClient carries paxos phase requests (prepare/propose/commit).
+	// Separate from replicaClient because a phase reply includes a
+	// replica-local store read, so its round trip is bounded by the replica
+	// timeout plus the peer's local work, not by one replica hop.
 	casClient *http.Client
+	// acceptor holds this node's replica-side paxos state for conditional
+	// writes. Defaults to memory-only; main installs a persistent one
+	// alongside a persistent store (see SetPaxosAcceptor).
+	acceptor *paxos.Acceptor
+	// ballotCounter is the high-water mark of paxos ballots minted or
+	// observed by this node's coordinator side.
+	ballotCounter atomic.Uint64
 }
 
 func NewHandler(r *ring.Ring, ml *gossip.MemberList, s *store.Store, cfg HandlerConfig, hs *hintstore.HintStore) *Handler {
@@ -93,6 +99,7 @@ func NewHandler(r *ring.Ring, ml *gossip.MemberList, s *store.Store, cfg Handler
 		startTime:         time.Now(),
 		replicaClient:     &http.Client{Timeout: cfg.ReplicaTimeout, Transport: cfg.Transport},
 		casClient:         &http.Client{Timeout: 2 * cfg.ReplicaTimeout, Transport: cfg.Transport},
+		acceptor:          paxos.NewAcceptor(),
 	}
 }
 
@@ -111,6 +118,10 @@ const (
 	consistencyOne    = "one"
 	consistencyQuorum = "quorum"
 	consistencyAll    = "all"
+	// consistencySerial is accepted on GET only: a linearizable read served
+	// by the paxos prepare phase (see serialRead). Writes wanting serial
+	// semantics use ?cas=true.
+	consistencySerial = "serial"
 )
 
 // requestedQuorum resolves the quorum size for one request: the ?consistency=
@@ -131,14 +142,14 @@ func (h *Handler) requestedQuorum(req *http.Request, dflt int) (int, error) {
 	case consistencyAll:
 		return h.replicationFactor, nil
 	default:
-		return 0, fmt.Errorf("unknown consistency level %q (want one, quorum, or all)", level)
+		return 0, fmt.Errorf("unknown consistency level %q (want one, quorum, or all; serial is GET-only)", level)
 	}
 }
 
 // casParam enables compare-and-set semantics on PUT/DELETE /keys/{key}:
-// the write is applied only if its clock dominates every sibling currently
-// held by the coordinator, and rejected with 412 instead of creating a
-// sibling otherwise.
+// the write runs a paxos round among the key's replicas and is applied only
+// if its clock dominates every committed sibling a majority can prove,
+// rejected with 412 instead of creating a sibling otherwise.
 const casParam = "cas"
 
 // requestedCAS reports whether the ?cas= query param asks for a conditional
@@ -152,77 +163,6 @@ func requestedCAS(req *http.Request) (bool, error) {
 		return true, nil
 	default:
 		return false, fmt.Errorf("invalid cas param %q (want true or false)", v)
-	}
-}
-
-// casRoutedElsewhere serializes CAS writes for a key through its primary
-// replica: the first node on the strict ring walk, which every coordinator
-// sharing the ring view resolves identically. It returns false when this
-// node is the primary and the caller should execute the CAS locally.
-// Otherwise it has already written the response: either the primary's reply,
-// relayed by forwardCAS, or a fail-closed 503 when the primary cannot be
-// reached or the forwarder's ring view disagrees with ours. Failing closed
-// keeps the CAS contract honest: a 204 means the precondition was checked
-// under the one mutex all CAS writes for the key serialize on, and an
-// ambiguous cluster state yields a retryable error, never a sibling.
-func (h *Handler) casRoutedElsewhere(w http.ResponseWriter, req *http.Request, key string, body any) bool {
-	nodes := h.ring.GetReplicationNodes(key, 1)
-	if len(nodes) == 0 {
-		http.Error(w, errNoNodes, http.StatusServiceUnavailable)
-		return true
-	}
-	primary := nodes[0]
-	if primary.ID == h.selfID {
-		return false
-	}
-	if req.Header.Get(headerXCASForwarded) != "" {
-		// The forwarder believed we were the primary but our ring view names
-		// someone else: membership is converging. Never forward again (no
-		// loops); make the client retry once the views agree.
-		http.Error(w, "cas primary mismatch, retry", http.StatusServiceUnavailable)
-		return true
-	}
-	if m, ok := h.memberList.Get(primary.ID); !ok || m.Status != gossip.MemberAlive {
-		http.Error(w, "cas primary unavailable", http.StatusServiceUnavailable)
-		return true
-	}
-	h.forwardCAS(w, req, primary.Address, body)
-	return true
-}
-
-// forwardCAS re-issues the client's CAS request against the primary and
-// relays the primary's verdict (status, session clock, and body) back to the
-// client unchanged, so 204/412 semantics are identical whichever coordinator
-// the client happened to hit.
-func (h *Handler) forwardCAS(w http.ResponseWriter, req *http.Request, address string, body any) {
-	payload, err := json.Marshal(body)
-	if err != nil {
-		http.Error(w, errFailedWrite, http.StatusInternalServerError)
-		return
-	}
-	fwd, err := http.NewRequest(req.Method, schemeHTTP+address+req.URL.RequestURI(), bytes.NewReader(payload))
-	if err != nil {
-		http.Error(w, errFailedWrite, http.StatusInternalServerError)
-		return
-	}
-	fwd.Header.Set(contentTypeHeader, contentTypeJSON)
-	fwd.Header.Set(headerXCASForwarded, h.selfID)
-	resp, err := h.casClient.Do(fwd)
-	if err != nil {
-		log.Printf("cas forward to %s: %v", address, err)
-		http.Error(w, "cas primary unreachable", http.StatusServiceUnavailable)
-		return
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if c := resp.Header.Get(headerXSessionClock); c != "" {
-		w.Header().Set(headerXSessionClock, c)
-	}
-	if ct := resp.Header.Get(contentTypeHeader); ct != "" {
-		w.Header().Set(contentTypeHeader, ct)
-	}
-	w.WriteHeader(resp.StatusCode)
-	if _, err := io.Copy(w, resp.Body); err != nil {
-		log.Printf("cas forward relay body: %v", err)
 	}
 }
 
@@ -793,6 +733,13 @@ func (h *Handler) GetNode(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// Serial reads take the paxos path: a majority prepare that finishes any
+	// in-flight round, giving linearizability instead of quorum freshness.
+	if req.URL.Query().Get(consistencyParam) == consistencySerial {
+		h.serialRead(w, key)
+		return
+	}
+
 	readQuorum, err := h.requestedQuorum(req, h.readQuorum)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -933,19 +880,16 @@ func (h *Handler) PutKey(w http.ResponseWriter, req *http.Request) {
 
 	h.coordinateWrite(w, req, key, incoming, keyWrite{
 		value:  body.Value,
-		body:   body,
 		errMsg: "store write failed",
 	})
 }
 
 // keyWrite describes one client mutation flowing through the coordinator
-// write path: a value write, or a tombstone when deleted is set. body is the
-// decoded request payload, re-marshaled when a CAS write is forwarded to the
-// key's primary; errMsg is the status text for local store failures.
+// write path: a value write, or a tombstone when deleted is set. errMsg is
+// the status text for local store failures.
 type keyWrite struct {
 	value   string
 	deleted bool
-	body    any
 	errMsg  string
 }
 
@@ -974,33 +918,37 @@ func (h *Handler) coordinateWrite(w http.ResponseWriter, req *http.Request, key 
 		return
 	}
 
-	// CAS mutations serialize through the key's primary replica so writers
-	// racing through different coordinators contend on one store mutex
-	// instead of forking into siblings.
-	if useCAS && h.casRoutedElsewhere(w, req, key, wr.body) {
+	// CAS mutations run a paxos round among the key's replicas: writers
+	// racing through any coordinators serialize on ballot order and majority
+	// intersection instead of forking into siblings. The clocks field is the
+	// client's precondition there — an absent one means "expect no current
+	// value" — so no bootstrap applies.
+	if useCAS {
+		h.paxosCAS(w, key, incoming, wr)
 		return
 	}
 
 	// Bootstrap clock from the current local entry if the client didn't
 	// provide one, so a blind overwrite dominates the existing value rather
 	// than equaling it (an equal clock would be dropped as an idempotent
-	// write). Never for CAS: there the clocks field is the client's
-	// precondition, and an absent one must mean "expect no current value"
-	// rather than silently adopting whatever the coordinator happens to hold.
-	if len(incoming.Clocks) == 0 && !useCAS {
+	// write). When the client did provide one, still raise this
+	// coordinator's own counter to its local high-water mark first: a
+	// client retrying from a stale base through the same coordinator would
+	// otherwise mint the exact version of the earlier attempt for a
+	// different value — replicas holding the first write drop the second as
+	// idempotent while the rest apply it, a divergence anti-entropy can
+	// never repair. Raising only the self component keeps sibling
+	// semantics: writes racing through different coordinators still
+	// surface as siblings.
+	if len(incoming.Clocks) == 0 {
 		incoming.Clocks = h.bootstrapClock(key)
+	} else {
+		h.raiseSelfCounter(key, incoming.Clocks)
 	}
 
-	// Primary write: increment self's counter and apply locally. In CAS mode
-	// the store applies the mutation only if this version dominates every
-	// existing sibling; a stale or concurrent precondition clock rejects the
-	// request with 412 and no side effects.
+	// Primary write: increment self's counter and apply locally.
 	version := incoming.Increment(h.selfID)
-	if err := h.applyLocalWrite(key, wr, version, useCAS); err != nil {
-		if errors.Is(err, store.ErrCASConflict) {
-			http.Error(w, "cas conflict: clocks do not dominate the current value", http.StatusPreconditionFailed)
-			return
-		}
+	if err := h.applyLocalWrite(key, wr, version); err != nil {
 		http.Error(w, wr.errMsg, http.StatusServiceUnavailable)
 		return
 	}
@@ -1034,23 +982,31 @@ func (h *Handler) coordinateWrite(w http.ResponseWriter, req *http.Request, key 
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// applyLocalWrite applies wr to the local store at version v, using the
-// compare-and-set variant when cas is set.
-func (h *Handler) applyLocalWrite(key string, wr keyWrite, v store.VectorClockVersion, cas bool) error {
-	switch {
-	case wr.deleted && cas:
-		return h.store.DeleteCAS(key, v)
-	case wr.deleted:
+// applyLocalWrite applies wr to the local store at version v.
+func (h *Handler) applyLocalWrite(key string, wr keyWrite, v store.VectorClockVersion) error {
+	if wr.deleted {
 		return h.store.Delete(key, v)
-	case cas:
-		return h.store.PutCAS(key, wr.value, v)
-	default:
-		return h.store.Put(key, wr.value, v)
 	}
+	return h.store.Put(key, wr.value, v)
 }
 
 type DeleteKeyRequest struct {
 	Clocks map[string]uint64 `json:"clocks,omitempty"`
+}
+
+// raiseSelfCounter lifts clocks' component for this coordinator to the
+// highest value any local sibling of key carries, so the subsequent
+// increment can never reissue a version this coordinator already minted.
+func (h *Handler) raiseSelfCounter(key string, clocks map[string]uint64) {
+	entry, ok, err := h.store.Get(key)
+	if err != nil || !ok {
+		return
+	}
+	for _, sib := range entry.Siblings {
+		if c := sib.Version.Clocks[h.selfID]; clocks[h.selfID] < c {
+			clocks[h.selfID] = c
+		}
+	}
 }
 
 // bootstrapClock returns a vector clock that takes the max of all sibling clocks
@@ -1103,7 +1059,6 @@ func (h *Handler) DeleteKey(w http.ResponseWriter, req *http.Request) {
 
 	h.coordinateWrite(w, req, key, incoming, keyWrite{
 		deleted: true,
-		body:    body,
 		errMsg:  "store delete failed",
 	})
 }

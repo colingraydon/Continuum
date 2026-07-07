@@ -18,6 +18,7 @@ import (
 	"github.com/colingraydon/continuum/internal/antientropy"
 	"github.com/colingraydon/continuum/internal/gossip"
 	"github.com/colingraydon/continuum/internal/hintstore"
+	"github.com/colingraydon/continuum/internal/paxos"
 	"github.com/colingraydon/continuum/internal/ring"
 	"github.com/colingraydon/continuum/internal/store"
 )
@@ -365,6 +366,20 @@ func main() {
 	// Serve anti-entropy sync state from the manager's incrementally-maintained
 	// Merkle trees instead of rescanning the store on every sync request.
 	h.SetSyncTreeProvider(ae)
+
+	// With persistence enabled, paxos promises for conditional writes must
+	// survive a crash: an acceptor that forgets a promise can let two
+	// majorities accept conflicting values. Memory-only mode keeps an
+	// in-memory acceptor, matching the store's durability.
+	acceptor := paxos.NewAcceptor()
+	if cfg.dataDir != "" {
+		a, err := paxos.OpenAcceptor(filepath.Join(cfg.dataDir, "paxos"))
+		if err != nil {
+			log.Fatalf("paxos: open acceptor log: %v", err)
+		}
+		acceptor = a
+	}
+	h.SetPaxosAcceptor(acceptor)
 	hptr.Store(h)
 
 	go runHintExpiry(ctx, hs)
@@ -439,6 +454,11 @@ func main() {
 	log.Printf("shutdown: finalizing persistence")
 	if err := persist.finalize(); err != nil {
 		log.Printf("shutdown: finalize error: %v", err)
+	}
+
+	// Requests are drained, so no paxos phase can be in flight.
+	if err := acceptor.Close(); err != nil {
+		log.Printf("shutdown: paxos acceptor close error: %v", err)
 	}
 
 	// Snapshot the Merkle trees so the next clean start skips the full store
