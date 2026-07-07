@@ -43,6 +43,11 @@ type HandlerConfig struct {
 	WriteQuorum       int
 	ReadQuorum        int
 	ReplicaTimeout    time.Duration
+	// Transport, when non-nil, replaces the default transport for all
+	// outbound node-to-node HTTP (replica fan-out, CAS forwarding, hint
+	// delivery, migration, scan scatter). The simulation harness injects an
+	// in-memory network with seeded faults here; production leaves it nil.
+	Transport http.RoundTripper
 }
 
 // SyncTreeProvider serves anti-entropy sync state for a vnode from a
@@ -86,8 +91,8 @@ func NewHandler(r *ring.Ring, ml *gossip.MemberList, s *store.Store, cfg Handler
 		writeQuorum:       cfg.WriteQuorum,
 		readQuorum:        cfg.ReadQuorum,
 		startTime:         time.Now(),
-		replicaClient:     &http.Client{Timeout: cfg.ReplicaTimeout},
-		casClient:         &http.Client{Timeout: 2 * cfg.ReplicaTimeout},
+		replicaClient:     &http.Client{Timeout: cfg.ReplicaTimeout, Transport: cfg.Transport},
+		casClient:         &http.Client{Timeout: 2 * cfg.ReplicaTimeout, Transport: cfg.Transport},
 	}
 }
 

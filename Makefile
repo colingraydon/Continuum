@@ -1,4 +1,4 @@
-.PHONY: build run test test-race e2e e2e-integration fault bench bench-ci bench-report lint docker clean
+.PHONY: build run test test-race e2e e2e-integration fault sim sim-race bench bench-ci bench-report lint docker clean
 
 build:
 	go build -o bin/continuum ./cmd/continuum
@@ -20,6 +20,16 @@ e2e-integration:
 
 fault:
 	go test -v -tags fault -timeout 900s ./tests/fault/...
+
+# Seeded in-process cluster simulation. SIM_SEEDS=n sweeps n seeds per
+# scenario (default 3); SIM_SEED=k replays one seed; SIM_LOG=1 keeps node logs.
+sim:
+	go test -v -tags sim -timeout 600s ./tests/sim/...
+
+# The whole cluster shares one process here, so -race sees cross-component
+# interleavings no per-package unit test can.
+sim-race:
+	go test -race -tags sim -timeout 900s ./tests/sim/...
 
 bench:
 	go test -bench=. -benchmem ./benchmarks/

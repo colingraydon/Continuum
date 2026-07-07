@@ -235,17 +235,24 @@ func (ml *MemberList) SetBootstrapping(id string, v bool) {
 	}
 }
 
+// GetAll returns a snapshot copy of every member. Copies, not the internal
+// structs: mutators write members in place under ml.mu, so a caller reading a
+// shared pointer outside the lock (the gossip round marshaling the list, the
+// stale checker, the ring health filter) would race with every status change.
 func (ml *MemberList) GetAll() []*Member {
 	ml.mu.RLock()
 	defer ml.mu.RUnlock()
 
 	members := make([]*Member, 0, len(ml.members))
 	for _, m := range ml.members {
-		members = append(members, m)
+		cp := *m
+		members = append(members, &cp)
 	}
 	return members
 }
 
+// GetAlive returns a snapshot copy of every alive member. See GetAll for why
+// copies.
 func (ml *MemberList) GetAlive() []*Member {
 	ml.mu.RLock()
 	defer ml.mu.RUnlock()
@@ -253,7 +260,8 @@ func (ml *MemberList) GetAlive() []*Member {
 	members := make([]*Member, 0)
 	for _, m := range ml.members {
 		if m.Status == MemberAlive {
-			members = append(members, m)
+			cp := *m
+			members = append(members, &cp)
 		}
 	}
 	return members
@@ -313,11 +321,17 @@ func (ml *MemberList) AddWithGossip(id, address, gossipAddr string) {
 	}
 }
 
+// Get returns a snapshot copy of the member with the given id. See GetAll
+// for why a copy.
 func (ml *MemberList) Get(id string) (*Member, bool) {
 	ml.mu.RLock()
 	defer ml.mu.RUnlock()
 	m, ok := ml.members[id]
-	return m, ok
+	if !ok {
+		return nil, false
+	}
+	cp := *m
+	return &cp, true
 }
 
 func (ml *MemberList) Size() int {

@@ -75,6 +75,13 @@ func (m *Manager) SetSyncInterval(d time.Duration) {
 	}
 }
 
+// SetHTTPTransport replaces the transport used for sync requests to replicas.
+// The simulation harness injects its in-memory network here; production
+// leaves the default. Call before Start.
+func (m *Manager) SetHTTPTransport(rt http.RoundTripper) {
+	m.client.Transport = rt
+}
+
 // rebuild replaces the trees and ranges for the given replicated ranges, sets
 // the sync order to the primary subset, and repopulates the trees from the
 // current store state (one full scan). Called at startup and whenever a sync
