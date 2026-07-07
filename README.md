@@ -146,6 +146,7 @@ make coverage  # HTML coverage report
 | [API Reference](docs/api.md) | All endpoints with request/response examples and internal headers |
 | [Operations](docs/operations.md) | Env vars, Docker setup, Makefile targets, Prometheus metrics |
 | [Benchmarks](docs/benchmarks.md) | Full-stack measurements: ring, LSM store, group commit, Merkle sync, gossip codec, quorum round trips |
+| [Design: Paxos CAS](docs/paxos-cas-design.md) | Implementation plan for consensus-backed conditional writes; the acceptor is built, the coordinator wiring is specified |
 
 ---
 
@@ -161,7 +162,7 @@ make coverage  # HTML coverage report
 
 **Correctness and verification**
 
-- **Linearizable CAS** - conditional writes already serialize through the key's primary replica; a consensus round (Paxos/Raft per key range) would close the membership-churn window that [history checking](docs/history-checking.md) reproduces as finding #7, and keep CAS available through primary failover
+- **Linearizable CAS** - conditional writes already serialize through the key's primary replica; a Paxos round per key closes the membership-churn window that [history checking](docs/history-checking.md) reproduces as finding #7. The replica-side acceptor (`internal/paxos`) is built and tested; the coordinator wiring and scenario flips are specified in [the design doc](docs/paxos-cas-design.md)
 - **TLA+ specification** - model the sloppy quorum, hinted handoff, read repair, and anti-entropy interaction and model-check the invariants the fault harness only samples (acknowledged writes survive F failures, tombstone GC never resurrects); stretch goal is trace conformance between harness events and the spec
 
 **Data model**
