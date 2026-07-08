@@ -139,6 +139,7 @@ make coverage  # HTML coverage report
 | [Backup and Restore](docs/backup-restore.md) | Hard-linked point-in-time table snapshots; restore through the existing recovery path |
 | [Data Migration](docs/data-migration.md) | Pull on join, push on leave, bootstrapping state machine |
 | [Fault Injection](docs/fault-injection.md) | Process-level fault harness: proxies, kill/hang/partition scenarios, durability and convergence invariants |
+| [History Checking](docs/history-checking.md) | Porcupine linearizability verification of CAS histories; the churn-window violation it surfaced as finding #7 |
 | [Testing](docs/testing.md) | The full test pyramid: unit and fault-seam tests, randomized store model, in-process clusters, process E2E, fault injection |
 | [API Reference](docs/api.md) | All endpoints with request/response examples and internal headers |
 | [Operations](docs/operations.md) | Env vars, Docker setup, Makefile targets, Prometheus metrics |
@@ -158,8 +159,7 @@ make coverage  # HTML coverage report
 
 **Correctness and verification**
 
-- **History checking on the fault harness** - the fault workload already records acknowledged-write histories; feed them through a consistency checker (porcupine-style) to upgrade durability assertions into formal history verification
-- **Linearizable CAS** - conditional writes already serialize through the key's primary replica; a consensus round (Paxos/Raft per key range) would close the remaining membership-churn window and keep CAS available through primary failover
+- **Linearizable CAS** - conditional writes already serialize through the key's primary replica; a consensus round (Paxos/Raft per key range) would close the membership-churn window that [history checking](docs/history-checking.md) reproduces as finding #7, and keep CAS available through primary failover
 - **Deterministic simulation testing** - FoundationDB-style: abstract time and the network behind seeded interfaces, run the whole cluster in one process under a controlled scheduler, and inject partitions, reordering, and crashes deterministically so any failure reproduces from a seed
 - **TLA+ specification** - model the sloppy quorum, hinted handoff, read repair, and anti-entropy interaction and model-check the invariants the fault harness only samples (acknowledged writes survive F failures, tombstone GC never resurrects); stretch goal is trace conformance between harness events and the spec
 

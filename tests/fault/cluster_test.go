@@ -459,6 +459,55 @@ func (c *cluster) put(n *node, key, value string, clocks map[string]uint64) (int
 	return resp.StatusCode, nil
 }
 
+// getAll reads key through n as coordinator at ?consistency=all, so the read
+// merges every live replica rather than stopping at R responses. The second
+// return value is the merged clock from the X-Session-Clock response header —
+// the context a client sends back to chain a CAS write off this read.
+func (c *cluster) getAll(n *node, key string) (nodeResponse, map[string]uint64, int, error) {
+	resp, err := c.client.Get(n.baseURL() + "/keys/" + key + "?consistency=all")
+	if err != nil {
+		return nodeResponse{}, nil, 0, err
+	}
+	defer resp.Body.Close()
+	var sessionClock map[string]uint64
+	if raw := resp.Header.Get("X-Session-Clock"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &sessionClock); err != nil {
+			return nodeResponse{}, nil, resp.StatusCode, err
+		}
+	}
+	var nr nodeResponse
+	if resp.StatusCode == http.StatusOK {
+		if err := json.NewDecoder(resp.Body).Decode(&nr); err != nil {
+			return nodeResponse{}, nil, resp.StatusCode, err
+		}
+	}
+	return nr, sessionClock, resp.StatusCode, nil
+}
+
+// casPut issues a conditional write (?cas=true) through n as coordinator.
+// clocks is the precondition context; nil means "expect no current value".
+func (c *cluster) casPut(n *node, key, value string, clocks map[string]uint64) (int, error) {
+	payload := struct {
+		Value  string            `json:"value"`
+		Clocks map[string]uint64 `json:"clocks,omitempty"`
+	}{Value: value, Clocks: clocks}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return 0, err
+	}
+	req, err := http.NewRequest(http.MethodPut, n.baseURL()+"/keys/"+key+"?cas=true", strings.NewReader(string(body)))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	resp.Body.Close()
+	return resp.StatusCode, nil
+}
+
 // putConsistency is put with a per-request ?consistency= level.
 func (c *cluster) putConsistency(n *node, key, value, consistency string) (int, error) {
 	body, err := json.Marshal(struct {
