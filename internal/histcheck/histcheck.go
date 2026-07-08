@@ -51,8 +51,8 @@ const (
 
 // Op is one recorded client operation. Call and Return are nanosecond
 // timestamps on a single monotonic scale shared by every recorded operation
-// (e.g. time.Since of a common base). The interval is closed: operations
-// whose intervals overlap are concurrent.
+// (e.g. time.Since of a common base), with Return >= Call. The interval is
+// closed: operations whose intervals overlap are concurrent.
 type Op struct {
 	Client int    // recording client, for visualization lanes
 	Key    string // histories are checked independently per key
@@ -192,13 +192,12 @@ func (r Result) Visualize(path string) error {
 // StatusUnknown have their return times pushed past the end of the history,
 // so they may linearize anywhere after their call, or effectively never.
 func Check(ops []Op, timeout time.Duration) Result {
+	// Return >= Call on every op, so the maximum return time bounds the
+	// whole history.
 	var maxTime int64
 	for _, op := range ops {
 		if op.Return > maxTime {
 			maxTime = op.Return
-		}
-		if op.Call > maxTime {
-			maxTime = op.Call
 		}
 	}
 	history := make([]porcupine.Operation, 0, len(ops))

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/anishathalye/porcupine"
 )
 
 const checkTimeout = 10 * time.Second
@@ -144,5 +146,49 @@ func TestVisualizeWritesFile(t *testing.T) {
 	}
 	if st, err := os.Stat(path); err != nil || st.Size() == 0 {
 		t.Fatalf("visualization file missing or empty: %v", err)
+	}
+}
+
+// TestVisualizeFailingHistory renders the case visualization exists for: a
+// violating history, exercising every operation description — absent reads,
+// conflict reads, unknown-outcome and rejected writes — and the absent state.
+func TestVisualizeFailingHistory(t *testing.T) {
+	ops := seqOps([]Op{
+		{Client: 0, Key: "k", Kind: Read, Found: false},
+		{Client: 0, Key: "k", Kind: CASPut, Expected: "", Value: "v1", Status: StatusUnknown},
+		{Client: 1, Key: "k", Kind: CASPut, Expected: "", Value: "v2", Status: StatusConflict},
+		{Client: 1, Key: "k", Kind: Read, Found: true, Conflict: true},
+	})
+	r := Check(ops, checkTimeout)
+	if r.Linearizable() {
+		t.Fatal("conflict-read history must not linearize")
+	}
+	path := filepath.Join(t.TempDir(), "failing.html")
+	if err := r.Visualize(path); err != nil {
+		t.Fatalf("visualize: %v", err)
+	}
+	if st, err := os.Stat(path); err != nil || st.Size() == 0 {
+		t.Fatalf("visualization file missing or empty: %v", err)
+	}
+}
+
+func TestResultAccessors(t *testing.T) {
+	ops := seqOps([]Op{
+		{Client: 0, Key: "k", Kind: CASPut, Expected: "", Value: "v1", Status: StatusOK},
+		{Client: 0, Key: "k", Kind: Read, Found: true, ReadValue: "v1"},
+	})
+	r := Check(ops, checkTimeout)
+	if r.Ops() != len(ops) {
+		t.Errorf("Ops() = %d, want %d", r.Ops(), len(ops))
+	}
+	if r.Undecided() {
+		t.Error("a decided check must not report Undecided")
+	}
+	// An exceeded search timeout is the one path that yields Undecided;
+	// porcupine reports it as the Unknown check result.
+	timedOut := Result{result: porcupine.Unknown, ops: 3}
+	if !timedOut.Undecided() || timedOut.Linearizable() {
+		t.Errorf("porcupine.Unknown must map to Undecided, got undecided=%v linearizable=%v",
+			timedOut.Undecided(), timedOut.Linearizable())
 	}
 }

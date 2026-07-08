@@ -251,50 +251,88 @@ func checkLinearizable(t *testing.T, w *casWorkload, timeout time.Duration) bool
 // something did.
 func diagnose(t *testing.T, hist []histcheck.Op) {
 	t.Helper()
-	okByExpected := make(map[string][]histcheck.Op) // key\x00expected -> acked CAS ops
-	conflictReads := 0
-	for _, op := range hist {
-		switch {
-		case op.Kind == histcheck.CASPut && op.Status == histcheck.StatusOK:
-			k := op.Key + "\x00" + op.Expected
-			okByExpected[k] = append(okByExpected[k], op)
-		case op.Kind == histcheck.Read && op.Conflict:
-			conflictReads++
-		}
-	}
-	forks := 0
-	for k, ops := range okByExpected {
-		if len(ops) > 1 {
-			forks++
-			key, expected, _ := strings.Cut(k, "\x00")
-			values := make([]string, len(ops))
-			for i, op := range ops {
-				values[i] = op.Value
-			}
-			t.Logf("forked CAS on %s: %d acknowledged writes from expected %q: %v", key, len(ops), expected, values)
-		}
-	}
+	acked := ackedCASByExpected(hist)
+	forks := reportForks(t, acked)
+	staleReads := reportStaleReads(t, hist, acked)
+	t.Logf("diagnosis: %d forked CAS generations, %d sibling-conflict reads, %d stale reads",
+		forks, countConflictReads(hist), staleReads)
+}
 
-	// Stale reads: in a pure-CAS history values never repeat, so once
-	// CAS(expected=v -> ...) is acknowledged, v is gone for good. A read
-	// that starts after that ack returns and still observes v proves the
-	// read set missed the newest state.
+// ackedCASByExpected groups the acknowledged CAS writes by (key, expected
+// value) — the generation each claims to have replaced.
+func ackedCASByExpected(hist []histcheck.Op) map[string][]histcheck.Op {
+	acked := make(map[string][]histcheck.Op) // key\x00expected -> acked CAS ops
+	for _, op := range hist {
+		if op.Kind == histcheck.CASPut && op.Status == histcheck.StatusOK {
+			k := op.Key + "\x00" + op.Expected
+			acked[k] = append(acked[k], op)
+		}
+	}
+	return acked
+}
+
+func countConflictReads(hist []histcheck.Op) int {
+	n := 0
+	for _, op := range hist {
+		if op.Kind == histcheck.Read && op.Conflict {
+			n++
+		}
+	}
+	return n
+}
+
+// reportForks logs every generation with more than one acknowledged CAS
+// write: a sequential register allows exactly one winner per expected value.
+func reportForks(t *testing.T, acked map[string][]histcheck.Op) int {
+	t.Helper()
+	forks := 0
+	for k, ops := range acked {
+		if len(ops) < 2 {
+			continue
+		}
+		forks++
+		key, expected, _ := strings.Cut(k, "\x00")
+		values := make([]string, len(ops))
+		for i, op := range ops {
+			values[i] = op.Value
+		}
+		t.Logf("forked CAS on %s: %d acknowledged writes from expected %q: %v", key, len(ops), expected, values)
+	}
+	return forks
+}
+
+// reportStaleReads logs reads that observed a value after the CAS replacing
+// it was acknowledged. In a pure-CAS history values never repeat, so once
+// CAS(expected=v -> ...) is acknowledged, v is gone for good; observing it
+// later proves the read set missed the newest state.
+func reportStaleReads(t *testing.T, hist []histcheck.Op, acked map[string][]histcheck.Op) int {
+	t.Helper()
 	staleReads := 0
 	for _, op := range hist {
 		if op.Kind != histcheck.Read || !op.Found {
 			continue
 		}
-		for _, w := range okByExpected[op.Key+"\x00"+op.ReadValue] {
-			if w.Return < op.Call {
-				staleReads++
-				if staleReads <= 3 {
-					t.Logf("stale read on %s: observed %q after CAS %q -> %q was acknowledged", op.Key, op.ReadValue, w.Expected, w.Value)
-				}
-				break
+		if w, ok := replacedBefore(acked[op.Key+"\x00"+op.ReadValue], op.Call); ok {
+			staleReads++
+			if staleReads <= 3 {
+				t.Logf("stale read on %s: observed %q after CAS %q -> %q was acknowledged",
+					op.Key, op.ReadValue, w.Expected, w.Value)
 			}
 		}
 	}
-	t.Logf("diagnosis: %d forked CAS generations, %d sibling-conflict reads, %d stale reads", forks, conflictReads, staleReads)
+	return staleReads
+}
+
+// replacedBefore returns an acknowledged CAS from the given generation that
+// returned before instant, if any: proof the generation's value was already
+// replaced by then.
+func replacedBefore(writes []histcheck.Op, instant int64) (histcheck.Op, bool) {
+	for _, w := range writes {
+		if w.Return < instant {
+			return w, true
+		}
+	}
+	return histcheck.Op{}, false
 }
 
 func visualizationPath(t *testing.T) string {
