@@ -112,11 +112,11 @@ func runSim(t *testing.T, seed int64, faults bool) (*simCluster, *rmwWorkload, *
 	if faults {
 		rng := rand.New(rand.NewSource(seed*31 + 7))
 		for _, ev := range schedule(rng, c, faultWindow) {
-			time.Sleep(time.Until(cas.rec.base.Add(ev.at)))
+			time.Sleep(time.Until(cas.rec.At(ev.at)))
 			t.Logf("t=%v %s", ev.at, ev.desc)
 			ev.do()
 		}
-		time.Sleep(time.Until(cas.rec.base.Add(faultWindow)))
+		time.Sleep(time.Until(cas.rec.At(faultWindow)))
 		c.net.healAll()
 		for _, n := range c.nodes {
 			if !n.running.Load() {

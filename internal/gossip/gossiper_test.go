@@ -34,6 +34,31 @@ func TestNewGossiper(t *testing.T) {
 	}
 }
 
+func TestSetTiming(t *testing.T) {
+	ml := newTestMemberList()
+	g, transport, err := newTestGossiper("self", ml)
+	if err != nil {
+		t.Fatalf("failed to create gossiper: %v", err)
+	}
+	defer transport.Stop()
+
+	// Defaults until overridden.
+	if g.interval != gossipInterval || g.stale != staleThreshold {
+		t.Fatalf("defaults: interval=%v stale=%v", g.interval, g.stale)
+	}
+
+	g.SetTiming(25*time.Millisecond, 250*time.Millisecond)
+	if g.interval != 25*time.Millisecond || g.stale != 250*time.Millisecond {
+		t.Fatalf("after SetTiming: interval=%v stale=%v", g.interval, g.stale)
+	}
+
+	// Non-positive values leave each field untouched.
+	g.SetTiming(0, -1)
+	if g.interval != 25*time.Millisecond || g.stale != 250*time.Millisecond {
+		t.Fatalf("non-positive values must not overwrite: interval=%v stale=%v", g.interval, g.stale)
+	}
+}
+
 func TestSelectPeersEmpty(t *testing.T) {
 	// Arrange
 	ml := newTestMemberList()

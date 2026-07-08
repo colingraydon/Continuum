@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -88,6 +90,44 @@ func syncAll(t *testing.T, mgr *Manager) {
 // TestAntiEntropyRepairsPrimaryFromReplica verifies that when a replica holds a
 // causally newer version of a key, the anti-entropy sync pulls it and applies it
 // to the primary's store.
+// recordingTransport is a RoundTripper that records every request URL and
+// returns a canned empty-body 200, so a test can prove which transport the
+// manager's client actually used.
+type recordingTransport struct {
+	mu   sync.Mutex
+	seen []string
+}
+
+func (rt *recordingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	rt.mu.Lock()
+	rt.seen = append(rt.seen, req.URL.String())
+	rt.mu.Unlock()
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader("{}")),
+		Header:     make(http.Header),
+		Request:    req,
+	}, nil
+}
+
+func TestSetHTTPTransportIsUsed(t *testing.T) {
+	r, s, _ := newSyncNode(t, "node1")
+	mgr := New(r, s, "node1", 2, time.Second)
+
+	rt := &recordingTransport{}
+	mgr.SetHTTPTransport(rt)
+
+	// A sync fetch must ride the installed transport rather than the default.
+	if _, err := mgr.fetchSyncState("replica:9999", 42); err != nil {
+		t.Fatalf("fetchSyncState: %v", err)
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if len(rt.seen) != 1 || !strings.Contains(rt.seen[0], "replica:9999") {
+		t.Fatalf("installed transport was not used, saw %v", rt.seen)
+	}
+}
+
 func TestAntiEntropyRepairsPrimaryFromReplica(t *testing.T) {
 	r1, s1, _ := newSyncNode(t, "node1")
 	r2, s2, srv2 := newSyncNode(t, "node2")

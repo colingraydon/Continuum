@@ -5,8 +5,6 @@ package sim
 import (
 	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -141,22 +139,14 @@ func canonicalEntry(e store.Entry) string {
 	return strings.Join(parts, ";")
 }
 
-type linVerdict int
-
-const (
-	linOK linVerdict = iota
-	linViolated
-	linUndecided
-)
-
 // verifyLinearizable runs the porcupine check as a hard assertion: the
 // history must be proven linearizable within the search timeout.
 func verifyLinearizable(t *testing.T, w *casWorkload, timeout time.Duration) {
 	t.Helper()
 	switch checkLinearizable(t, w, timeout) {
-	case linViolated:
+	case histcheck.VerdictNotLinearizable:
 		t.Errorf("history NOT linearizable: a CAS write forked or was lost")
-	case linUndecided:
+	case histcheck.VerdictUndecided:
 		t.Errorf("linearizability undecided after %v; shrink the workload or raise the timeout", timeout)
 	}
 }
@@ -167,33 +157,28 @@ func verifyLinearizable(t *testing.T, w *casWorkload, timeout time.Duration) {
 func expectKnownCASGap(t *testing.T, w *casWorkload, timeout time.Duration) {
 	t.Helper()
 	switch checkLinearizable(t, w, timeout) {
-	case linOK:
+	case histcheck.VerdictLinearizable:
 		t.Log("no CAS violation surfaced this run (churn window is timing-dependent)")
-	case linViolated:
+	case histcheck.VerdictNotLinearizable:
 		t.Log("known CAS gap reproduced under simulated churn (finding #7, docs/fault-injection.md)")
-	case linUndecided:
+	case histcheck.VerdictUndecided:
 		t.Logf("linearizability undecided after %v (fine in detector mode)", timeout)
 	}
 }
 
-func checkLinearizable(t *testing.T, w *casWorkload, timeout time.Duration) linVerdict {
+// checkLinearizable runs the shared check, logging the outcome (and the
+// visualization path on a violation) and returning the verdict for the
+// caller to act on.
+func checkLinearizable(t *testing.T, w *casWorkload, timeout time.Duration) histcheck.Verdict {
 	t.Helper()
-	res := histcheck.Check(w.rec.history(), timeout)
-	switch {
-	case res.Linearizable():
-		t.Logf("history linearizable: %d ops", res.Ops())
-		return linOK
-	case res.Undecided():
-		return linUndecided
-	default:
-		dir := os.Getenv("CONTINUUM_HISTORY_DIR")
-		if dir == "" {
-			dir = os.TempDir()
+	verdict, ops, path := histcheck.CheckAndVisualize(w.rec.History(), timeout, t.Name())
+	switch verdict {
+	case histcheck.VerdictLinearizable:
+		t.Logf("history linearizable: %d ops", ops)
+	case histcheck.VerdictNotLinearizable:
+		if path != "" {
+			t.Logf("linearization visualization: %s (%d ops)", path, ops)
 		}
-		path := filepath.Join(dir, strings.ReplaceAll(t.Name(), "/", "_")+".html")
-		if err := res.Visualize(path); err == nil {
-			t.Logf("linearization visualization: %s (%d ops)", path, res.Ops())
-		}
-		return linViolated
 	}
+	return verdict
 }

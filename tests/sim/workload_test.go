@@ -213,31 +213,6 @@ func mergedClocks(nr nodeResponse) map[string]uint64 {
 
 // --- racing CAS workload (linearizability) -----------------------------------
 
-// recorder collects a concurrent operation history on one monotonic scale.
-type recorder struct {
-	base time.Time
-	mu   sync.Mutex
-	ops  []histcheck.Op
-}
-
-func newRecorder() *recorder { return &recorder{base: time.Now()} }
-
-func (r *recorder) now() int64 { return time.Since(r.base).Nanoseconds() }
-
-func (r *recorder) add(op histcheck.Op) {
-	r.mu.Lock()
-	r.ops = append(r.ops, op)
-	r.mu.Unlock()
-}
-
-func (r *recorder) history() []histcheck.Op {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	out := make([]histcheck.Op, len(r.ops))
-	copy(out, r.ops)
-	return out
-}
-
 // casWorkload races clients over shared keys, every mutation a conditional
 // write chained off a ?consistency=all read, recording everything for the
 // porcupine check. Mirrors the fault harness's CAS workload.
@@ -246,7 +221,7 @@ type casWorkload struct {
 	keys     []string
 	clients  int
 	interval time.Duration
-	rec      *recorder
+	rec      *histcheck.Recorder
 
 	stop chan struct{}
 	wg   sync.WaitGroup
@@ -258,7 +233,7 @@ type casWorkload struct {
 }
 
 func newCASWorkload(c *simCluster, clients, keys int, interval time.Duration) *casWorkload {
-	w := &casWorkload{c: c, clients: clients, interval: interval, rec: newRecorder(), stop: make(chan struct{})}
+	w := &casWorkload{c: c, clients: clients, interval: interval, rec: histcheck.NewRecorder(), stop: make(chan struct{})}
 	for i := 0; i < keys; i++ {
 		w.keys = append(w.keys, fmt.Sprintf("cas-k%02d", i))
 	}
@@ -298,35 +273,38 @@ func (w *casWorkload) step(id, iter int, rng *rand.Rand) {
 	}
 
 	value := fmt.Sprintf("c%02d#%06d", id, iter)
-	call := w.rec.now()
+	call := w.rec.Now()
 	code, err := w.c.put(targets[rng.Intn(len(targets))], key, value, ctx, true)
-	ret := w.rec.now()
+	ret := w.rec.Now()
 
 	op := histcheck.Op{
 		Client: id, Key: key, Kind: histcheck.CASPut,
 		Expected: expected, Value: value,
-		Call: call, Return: ret,
+		Status: histcheck.CASStatus(err, code),
+		Call:   call, Return: ret,
 	}
+	w.tally(op.Status)
+	w.rec.Add(op)
+}
+
+// tally increments the per-outcome counters under the workload lock.
+func (w *casWorkload) tally(s histcheck.Status) {
 	w.mu.Lock()
-	switch {
-	case err == nil && code == http.StatusNoContent:
-		op.Status = histcheck.StatusOK
+	defer w.mu.Unlock()
+	switch s {
+	case histcheck.StatusOK:
 		w.acked++
-	case err == nil && code == http.StatusPreconditionFailed:
-		op.Status = histcheck.StatusConflict
+	case histcheck.StatusConflict:
 		w.conflict++
 	default:
-		op.Status = histcheck.StatusUnknown
 		w.unknown++
 	}
-	w.mu.Unlock()
-	w.rec.add(op)
 }
 
 func (w *casWorkload) readStep(id int, key string, n *simNode) (string, map[string]uint64, bool) {
-	call := w.rec.now()
+	call := w.rec.Now()
 	nr, session, code, err := w.c.getAll(n, key)
-	ret := w.rec.now()
+	ret := w.rec.Now()
 
 	op := histcheck.Op{Client: id, Key: key, Kind: histcheck.Read, Call: call, Return: ret}
 	switch {
@@ -334,7 +312,7 @@ func (w *casWorkload) readStep(id int, key string, n *simNode) (string, map[stri
 		if len(nr.Siblings) > 1 {
 			op.Found = true
 			op.Conflict = true
-			w.rec.add(op)
+			w.rec.Add(op)
 			return "\x00conflict", session, true
 		}
 		if len(nr.Siblings) == 1 {
@@ -343,10 +321,10 @@ func (w *casWorkload) readStep(id int, key string, n *simNode) (string, map[stri
 			op.ReadValue = nr.Value
 		}
 		op.Found = op.ReadValue != ""
-		w.rec.add(op)
+		w.rec.Add(op)
 		return op.ReadValue, session, true
 	case err == nil && code == http.StatusNotFound:
-		w.rec.add(op)
+		w.rec.Add(op)
 		return "", nil, true
 	default:
 		return "", nil, false
