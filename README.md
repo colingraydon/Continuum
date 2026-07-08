@@ -152,11 +152,16 @@ make coverage  # HTML coverage report
 
 - **Sharded store** - split the single store mutex into 256 shards; partially superseded by the LSM engine, so benchmark first to see whether it still pays
 - **Streaming bootstrap and decommission** - node join pulls keys as one JSON batch per bucket and graceful shutdown materializes the entire dataset in memory for a single push per successor; replace both with chunked, resumable streaming so migration survives datasets larger than RAM
+- **Read-time merge and leveled compaction** - the LSM currently folds older-generation state into the memtable on write so reads stop at the first generation hit, which forces size-tiered compaction over contiguous recency runs; moving the merge to the read path (k-way across tables) unlocks leveled compaction with bounded space amplification and early-terminating scans
+- **Key-value separation (WiscKey)** - store large values in a dedicated append-only value log with SSTables holding keys plus pointers, cutting compaction write amplification; the hard parts are value-log garbage collection against live pointers and crash recovery across two logs
+- **Backpressure and admission control** - nothing currently stops a compaction stall or slow replica from cascading; add write stalls with a real policy when flush falls behind, coordinator load shedding when fan-out queues grow, and overload signaling at the HTTP layer
 
 **Correctness and verification**
 
 - **History checking on the fault harness** - the fault workload already records acknowledged-write histories; feed them through a consistency checker (porcupine-style) to upgrade durability assertions into formal history verification
 - **Linearizable CAS** - conditional writes already serialize through the key's primary replica; a consensus round (Paxos/Raft per key range) would close the remaining membership-churn window and keep CAS available through primary failover
+- **Deterministic simulation testing** - FoundationDB-style: abstract time and the network behind seeded interfaces, run the whole cluster in one process under a controlled scheduler, and inject partitions, reordering, and crashes deterministically so any failure reproduces from a seed
+- **TLA+ specification** - model the sloppy quorum, hinted handoff, read repair, and anti-entropy interaction and model-check the invariants the fault harness only samples (acknowledged writes survive F failures, tombstone GC never resurrects); stretch goal is trace conformance between harness events and the spec
 
 **Data model**
 
@@ -167,4 +172,5 @@ make coverage  # HTML coverage report
 **Cluster and operations**
 
 - **Rack/DC-aware placement** - spread each key's replica set across failure domains instead of taking the next N distinct nodes on the ring
+- **Multi-DC replication** - per-DC replica placement and LOCAL_QUORUM consistency levels, with asynchronous cross-DC replication and its own repair story; stresses ring topology metadata, gossip, and quorum math at once
 - **Token-aware Go client** - a client library that hashes keys locally and talks directly to a replica, skipping the coordinator hop
