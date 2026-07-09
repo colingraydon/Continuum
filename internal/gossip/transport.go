@@ -27,6 +27,16 @@ type GossipMessage struct {
 	Members   []*Member `json:"members"`
 }
 
+// Conn is the datagram seam the Gossiper speaks through. The production
+// implementation is the UDP Transport below; the simulation harness provides
+// an in-memory one with seeded partitions, drops, and delays.
+type Conn interface {
+	Start()
+	Stop()
+	Send(address string, msg *GossipMessage) error
+	Incoming() <-chan *GossipMessage
+}
+
 type Transport struct {
 	conn     *net.UDPConn
 	port     string

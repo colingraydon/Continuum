@@ -17,17 +17,34 @@ const (
 
 type Gossiper struct {
 	memberList *MemberList
-	transport  *Transport
+	transport  Conn
 	selfID     string
 	gossipPort string
+	interval   time.Duration
+	stale      time.Duration
 }
 
-func NewGossiper(selfID string, gossipPort string, ml *MemberList, t *Transport) *Gossiper {
+func NewGossiper(selfID string, gossipPort string, ml *MemberList, t Conn) *Gossiper {
 	return &Gossiper{
 		memberList: ml,
 		transport:  t,
 		selfID:     selfID,
 		gossipPort: gossipPort,
+		interval:   gossipInterval,
+		stale:      staleThreshold,
+	}
+}
+
+// SetTiming overrides the gossip round interval and the staleness threshold
+// that drives the alive -> suspect -> dead ladder. Non-positive values keep
+// the defaults. Call before Start; the simulation harness uses this to
+// compress failure-detection convergence from seconds to milliseconds.
+func (g *Gossiper) SetTiming(interval, stale time.Duration) {
+	if interval > 0 {
+		g.interval = interval
+	}
+	if stale > 0 {
+		g.stale = stale
 	}
 }
 
@@ -43,7 +60,7 @@ func (g *Gossiper) Stop() {
 }
 
 func (g *Gossiper) gossipLoop(ctx context.Context) {
-	ticker := time.NewTicker(gossipInterval)
+	ticker := time.NewTicker(g.interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -146,7 +163,7 @@ func (g *Gossiper) senderGossipAddr(msg *GossipMessage) string {
 }
 
 func (g *Gossiper) staleLoop(ctx context.Context) {
-	ticker := time.NewTicker(gossipInterval)
+	ticker := time.NewTicker(g.interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -167,7 +184,7 @@ func (g *Gossiper) checkStale() {
 		if m.Status == MemberDead {
 			continue
 		}
-		if time.Since(m.UpdatedAt) > staleThreshold {
+		if time.Since(m.UpdatedAt) > g.stale {
 			switch m.Status {
 			case MemberAlive:
 				g.memberList.MarkSuspect(m.ID)

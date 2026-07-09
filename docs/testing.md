@@ -15,6 +15,7 @@ the heavier ones are opt-in behind build tags so the default loop stays fast.
 | In-process cluster tests | `make e2e` | multiple nodes, one process, real HTTP | seconds |
 | Process-based E2E | `make e2e-integration` | real binaries, real signals | ~10s |
 | Fault injection | `make fault` | real binaries + fault proxies | ~2-3 min |
+| Seeded simulation | `make sim` | whole cluster, one process, in-memory network | ~20s (scales with `SIM_SEEDS`) |
 | Benchmarks | `make bench` | micro | varies |
 
 Supporting passes: `make test-race` (race detector across all packages),
@@ -76,6 +77,17 @@ the recorded operation history through a porcupine linearizability checker
 CAS contract and reproduces the churn-window violation as finding #7. See
 [Fault Injection](fault-injection.md) for the architecture, the scenario
 catalog, and the system findings the harness surfaced.
+
+## Layer 6: seeded simulation (`tests/sim`, build tag `sim`)
+
+The volume layer: the whole cluster runs in one process behind a seeded
+in-memory network, with production timing compressed ~40x, so one run packs a
+generated fault schedule (partitions, isolation, drops, latency, crash with
+total state loss) and thousands of checked operations into a few seconds.
+Same invariants as the fault harness plus the porcupine check; failures
+replay by seed. Being in-process, `make sim-race` gives the race detector its
+only whole-system view — which is how finding #8 (shared member pointers) was
+caught. See [Simulation Testing](simulation.md).
 
 ## Benchmarks
 

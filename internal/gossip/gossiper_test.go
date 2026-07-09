@@ -34,6 +34,31 @@ func TestNewGossiper(t *testing.T) {
 	}
 }
 
+func TestSetTiming(t *testing.T) {
+	ml := newTestMemberList()
+	g, transport, err := newTestGossiper("self", ml)
+	if err != nil {
+		t.Fatalf("failed to create gossiper: %v", err)
+	}
+	defer transport.Stop()
+
+	// Defaults until overridden.
+	if g.interval != gossipInterval || g.stale != staleThreshold {
+		t.Fatalf("defaults: interval=%v stale=%v", g.interval, g.stale)
+	}
+
+	g.SetTiming(25*time.Millisecond, 250*time.Millisecond)
+	if g.interval != 25*time.Millisecond || g.stale != 250*time.Millisecond {
+		t.Fatalf("after SetTiming: interval=%v stale=%v", g.interval, g.stale)
+	}
+
+	// Non-positive values leave each field untouched.
+	g.SetTiming(0, -1)
+	if g.interval != 25*time.Millisecond || g.stale != 250*time.Millisecond {
+		t.Fatalf("non-positive values must not overwrite: interval=%v stale=%v", g.interval, g.stale)
+	}
+}
+
 func TestSelectPeersEmpty(t *testing.T) {
 	// Arrange
 	ml := newTestMemberList()
@@ -141,17 +166,22 @@ func TestHandleMessageMergesMembers(t *testing.T) {
 	}
 }
 
+// backdate ages a member's UpdatedAt past the stale threshold. Getters return
+// snapshot copies, so tests must reach the internal struct under the lock.
+func backdate(ml *MemberList, id string, by time.Duration) {
+	ml.mu.Lock()
+	defer ml.mu.Unlock()
+	if m, ok := ml.members[id]; ok {
+		m.UpdatedAt = time.Now().Add(-by)
+	}
+}
+
 func TestCheckStaleMarksSuspect(t *testing.T) {
 	// Arrange
 	ml := newTestMemberList()
 	ml.Add("node1", "10.0.0.2")
 
-	// manually set UpdatedAt to past stale threshold
-	for _, m := range ml.GetAll() {
-		if m.ID == "node1" {
-			m.UpdatedAt = time.Now().Add(-10 * time.Second)
-		}
-	}
+	backdate(ml, "node1", 10*time.Second)
 
 	g, transport, err := newTestGossiper("self", ml)
 	if err != nil {
@@ -179,11 +209,7 @@ func TestCheckStaleMarksDead(t *testing.T) {
 	ml.Add("node1", "10.0.0.2")
 	ml.MarkSuspect("node1")
 
-	for _, m := range ml.GetAll() {
-		if m.ID == "node1" {
-			m.UpdatedAt = time.Now().Add(-10 * time.Second)
-		}
-	}
+	backdate(ml, "node1", 10*time.Second)
 
 	g, transport, err := newTestGossiper("self", ml)
 	if err != nil {
@@ -208,11 +234,7 @@ func TestCheckStaleMarksDead(t *testing.T) {
 func TestCheckStaleSkipsSelf(t *testing.T) {
 	// Arrange
 	ml := newTestMemberList()
-	for _, m := range ml.GetAll() {
-		if m.ID == "self" {
-			m.UpdatedAt = time.Now().Add(-10 * time.Second)
-		}
-	}
+	backdate(ml, "self", 10*time.Second)
 
 	g, transport, err := newTestGossiper("self", ml)
 	if err != nil {
@@ -245,11 +267,7 @@ func TestCheckStaleSkipsDead(t *testing.T) {
 		callCount++
 	}
 
-	for _, m := range ml.GetAll() {
-		if m.ID == "node1" {
-			m.UpdatedAt = time.Now().Add(-10 * time.Second)
-		}
-	}
+	backdate(ml, "node1", 10*time.Second)
 
 	g, transport, err := newTestGossiper("self", ml)
 	if err != nil {

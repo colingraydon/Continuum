@@ -161,6 +161,10 @@ system behaviors, not test artifacts:
    visualization instead of failing — until a consensus round closes the
    window and they flip to hard assertions. See
    [History Checking](history-checking.md).
+8. **Member snapshots were shared pointers** — *fixed by copy-on-read;
+   surfaced by the simulation harness.* See the
+   [simulation findings](simulation.md#findings) for the full account: the
+   numbering continues here so findings stay one list.
 
 ## Extending the suite
 
