@@ -13,7 +13,7 @@
 
 A distributed key-value store implementing the core data layer patterns from Cassandra and Dynamo - written in Go.
 
-Continuum maps keys to nodes via a consistent hash ring, propagates cluster membership through a gossip protocol, fans writes to N replicas under a sloppy quorum whose consistency level is tunable per request from one to all, surfaces concurrent writes as vector clock siblings rather than discarding them, and repairs divergent replicas through a combination of inline read repair, event-driven hinted handoff, and background Merkle tree anti-entropy. With `DATA_DIR` set, the store runs as an LSM engine: every write goes through a CRC-checked write-ahead log whose fsyncs are batched across concurrent writers by group commit, the memtable flushes to immutable SSTables with bloom filters on a size threshold, and reads merge across generations, so state survives restart and the dataset is no longer RAM-bound on the write path. Buffered hints are persisted to their own append-only log, so undelivered writes survive a coordinator crash rather than depending on anti-entropy alone. Clients that want more than eventual consistency can opt in per request: conditional writes serialize through the key's primary replica and reject on clock mismatch instead of creating a sibling, and a session clock header buys read-your-writes and monotonic reads.
+Continuum maps keys to nodes via a consistent hash ring, propagates cluster membership through a gossip protocol, fans writes to N replicas under a sloppy quorum whose consistency level is tunable per request from one to all, surfaces concurrent writes as vector clock siblings rather than discarding them, and repairs divergent replicas through a combination of inline read repair, event-driven hinted handoff, and background Merkle tree anti-entropy. With `DATA_DIR` set, the store runs as an LSM engine: every write goes through a CRC-checked write-ahead log whose fsyncs are batched across concurrent writers by group commit, the memtable flushes to immutable SSTables with bloom filters on a size threshold, and reads merge across generations, so state survives restart and the dataset is no longer RAM-bound on the write path. Buffered hints are persisted to their own append-only log, so undelivered writes survive a coordinator crash rather than depending on anti-entropy alone. Clients that want more than eventual consistency can opt in per request: conditional writes run a single-decree Paxos round per key (Cassandra-LWT style, with promises fsynced to their own log) and reject on clock mismatch instead of creating a sibling, serial reads ride the prepare phase for linearizability, and a session clock header buys read-your-writes and monotonic reads. A porcupine-based checker holds the CAS path to that claim: racing-client histories must linearize per key, through kills, restarts, and asymmetric partitions, in both the process-level fault harness and a seeded in-process simulation.
 
 **18M** key routings/s &nbsp;·&nbsp; **7.6M** memtable reads/s &nbsp;·&nbsp; **1.4M** cached SSTable reads/s &nbsp;·&nbsp; **9.5K** quorum writes/s at **~100 µs** p50 &nbsp;·&nbsp; **7.5×** durable write throughput from group commit
 
@@ -70,6 +70,7 @@ flowchart TB
 | Gossip | `internal/gossip` | Cluster membership and failure detection over UDP without a central coordinator |
 | KV Store | `internal/store` | LSM engine: vector clock versioning, tombstone deletes, ordered skiplist memtable, flush, merged reads |
 | WAL + SSTables | `internal/wal`, `internal/sstable` | Crash-durable append-only log with CRC framing; immutable sorted tables with bloom filters, per-block compression, and a shared block cache |
+| Paxos CAS | `internal/paxos` | Single-decree consensus per key behind conditional writes and serial reads; promises persisted to their own log |
 | Anti-Entropy | `internal/antientropy` | Background Merkle-tree comparison and bidirectional repair of divergent replicas |
 | Hint Store | `internal/hintstore` | Durability buffer that replays missed writes when a down replica recovers |
 | HTTP API | `api` | Transport, quorum fan-out, read repair, data migration, Prometheus instrumentation |
@@ -135,7 +136,7 @@ make coverage  # HTML coverage report
 | [Persistence](docs/persistence.md) | WAL framing, snapshot format, recovery flow, downtime gate |
 | [SSTable](docs/sstable.md) | Immutable sorted table format: compressed data blocks, sparse index, bloom filter, shared block cache |
 | [Read Repair](docs/read-repair.md) | Async repair, always-repair-on-conflict, X-Proxied-From path reuse |
-| [Client Consistency](docs/client-consistency.md) | Conditional writes (CAS) and session guarantees: 412 on clock mismatch, X-Session-Clock, read escalation |
+| [Client Consistency](docs/client-consistency.md) | Paxos-backed conditional writes, linearizable serial reads, and session guarantees: 412 on clock mismatch, X-Session-Clock, read escalation |
 | [Range Scans](docs/range-scans.md) | Merged LSM prefix scan per node, scatter-gather coordinator, pagination horizon |
 | [Backup and Restore](docs/backup-restore.md) | Hard-linked point-in-time table snapshots; restore through the existing recovery path |
 | [Data Migration](docs/data-migration.md) | Pull on join, push on leave, bootstrapping state machine |
@@ -146,6 +147,7 @@ make coverage  # HTML coverage report
 | [API Reference](docs/api.md) | All endpoints with request/response examples and internal headers |
 | [Operations](docs/operations.md) | Env vars, Docker setup, Makefile targets, Prometheus metrics |
 | [Benchmarks](docs/benchmarks.md) | Full-stack measurements: ring, LSM store, group commit, Merkle sync, gossip codec, quorum round trips |
+| [Design: Paxos CAS](docs/paxos-cas-design.md) | The design doc the consensus-backed CAS implementation followed: protocol, safety notes, wiring plan |
 
 ---
 
@@ -161,7 +163,6 @@ make coverage  # HTML coverage report
 
 **Correctness and verification**
 
-- **Linearizable CAS** - conditional writes already serialize through the key's primary replica; a consensus round (Paxos/Raft per key range) would close the membership-churn window that [history checking](docs/history-checking.md) reproduces as finding #7, and keep CAS available through primary failover
 - **TLA+ specification** - model the sloppy quorum, hinted handoff, read repair, and anti-entropy interaction and model-check the invariants the fault harness only samples (acknowledged writes survive F failures, tombstone GC never resurrects); stretch goal is trace conformance between harness events and the spec
 
 **Data model**

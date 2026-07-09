@@ -89,3 +89,4 @@ nav:
       - history checking: history-checking.md
       - simulation testing: simulation.md
       - testing: testing.md
+      - 'design: paxos cas': paxos-cas-design.md

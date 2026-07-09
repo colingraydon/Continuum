@@ -44,7 +44,7 @@ type event struct {
 // crash per run: the store is memory-only, so a crash is total state loss for
 // that node, and two overlapping losses could legitimately destroy an
 // acknowledged W=2 write — that would test the schedule, not the system.
-func schedule(rng *rand.Rand, c *simCluster, window time.Duration) []event {
+func schedule(rng *rand.Rand, c *simCluster, window time.Duration) ([]event, bool) {
 	var events []event
 	crashUsed := false
 	t := 200 * time.Millisecond
@@ -95,13 +95,15 @@ func schedule(rng *rand.Rand, c *simCluster, window time.Duration) []event {
 		}
 		t += dur + time.Duration(200+rng.Intn(300))*time.Millisecond
 	}
-	return events
+	return events, crashUsed
 }
 
 // runSim executes one seeded simulation: start the cluster, run the RMW and
 // CAS workloads, fire the fault schedule, heal, and verify. Returns the
-// workloads for the caller's checks.
-func runSim(t *testing.T, seed int64, faults bool) (*simCluster, *rmwWorkload, *casWorkload) {
+// workloads for the caller's checks plus whether the schedule crashed a
+// node (total state loss, including its paxos promises — see the CAS check
+// in TestSimSeededFaults).
+func runSim(t *testing.T, seed int64, faults bool) (*simCluster, *rmwWorkload, *casWorkload, bool) {
 	t.Helper()
 	c := newSimCluster(t, simConfig{}, seed)
 	rmw := newRMWWorkload(c, 4, 3, workloadInterval)
@@ -109,9 +111,12 @@ func runSim(t *testing.T, seed int64, faults bool) (*simCluster, *rmwWorkload, *
 	rmw.run()
 	cas.run()
 
+	crashed := false
 	if faults {
 		rng := rand.New(rand.NewSource(seed*31 + 7))
-		for _, ev := range schedule(rng, c, faultWindow) {
+		var events []event
+		events, crashed = schedule(rng, c, faultWindow)
+		for _, ev := range events {
 			time.Sleep(time.Until(cas.rec.At(ev.at)))
 			t.Logf("t=%v %s", ev.at, ev.desc)
 			ev.do()
@@ -136,7 +141,7 @@ func runSim(t *testing.T, seed int64, faults bool) (*simCluster, *rmwWorkload, *
 	if ackedRMW == 0 || ackedCAS == 0 {
 		t.Fatal("workloads never acknowledged a write; harness is broken")
 	}
-	return c, rmw, cas
+	return c, rmw, cas, crashed
 }
 
 func rmwKeyNames(w *rmwWorkload) []string {
@@ -178,7 +183,7 @@ func seeds(t *testing.T, base int64) []int64 {
 func TestSimHealthy(t *testing.T) {
 	for _, seed := range seeds(t, 1) {
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
-			c, rmw, cas := runSim(t, seed, false)
+			c, rmw, cas, _ := runSim(t, seed, false)
 			verifyLinearizable(t, cas, linCheckTimeout)
 			verifyDurability(t, c, rmw, 3*time.Second)
 			verifyConvergence(t, c, rmwKeyNames(rmw), 5*time.Second)
@@ -188,16 +193,25 @@ func TestSimHealthy(t *testing.T) {
 
 // TestSimSeededFaults: the seed generates a fault schedule (partitions,
 // isolation, drops, latency, one crash+restart) fired under load. After
-// heal: no acknowledged write may be lost and replicas must converge — hard
-// assertions — while the CAS history check runs in detector mode for the
-// known churn gap (finding #7).
+// heal: no acknowledged write may be lost, replicas must converge, and CAS
+// histories must linearize — all hard assertions, except when the schedule
+// crashed a node. Simulated nodes are memory-only, so a crash erases the
+// acceptor's paxos promises along with everything else, and a forgotten
+// promise legitimately breaks the majority-intersection argument (in
+// production the acceptor log in DATA_DIR survives crashes; the fault
+// harness asserts that case). Crash schedules therefore run the CAS check
+// in detector mode.
 func TestSimSeededFaults(t *testing.T) {
 	for _, seed := range seeds(t, 42) {
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
-			c, rmw, cas := runSim(t, seed, true)
+			c, rmw, cas, crashed := runSim(t, seed, true)
 			verifyDurability(t, c, rmw, 6*time.Second)
 			verifyConvergence(t, c, rmwKeyNames(rmw), 8*time.Second)
-			expectKnownCASGap(t, cas, linCheckTimeout)
+			if crashed {
+				expectKnownCASGap(t, cas, linCheckTimeout)
+			} else {
+				verifyLinearizable(t, cas, linCheckTimeout)
+			}
 		})
 	}
 }

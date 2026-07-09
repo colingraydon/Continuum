@@ -83,9 +83,9 @@ porcupine checker verifies the history is per-key linearizable. See
 | `GossipPacketLossStability` | 40% gossip drop | No false death verdicts; data path unaffected |
 | `PeriodicHintDeliveryAcrossAsymmetricPartition` | inbound HTTP blackhole, gossip up, AE off | Periodic sweep delivers buffered hints with no dead→alive edge and no coordinator restart; failed sweeps re-buffer |
 | `SloppyQuorumAlwaysWritable` | SIGKILL 1 of 4, RF=3, AE off | Once the victim is suspect, a `consistency=all` write succeeds via the next healthy node; the skipped owner's hint repairs it after restart |
-| `LinearizableCASHealthy` | none | Racing CAS clients on shared keys produce a linearizable per-key history: one winner per generation, the rest 412 |
-| `LinearizableCASAcrossPrimaryFailover` | SIGKILL + restart mid-workload | Detector for finding #7: CAS histories fork and reads go stale across primary failover |
-| `LinearizableCASAcrossPartition` | inbound blackhole 6s | Detector for finding #7: same signatures across an asymmetric partition and heal |
+| `LinearizableCASHealthy` | none | Racing CAS clients on shared keys produce a linearizable per-key history: one winner per generation |
+| `LinearizableCASAcrossPrimaryFailover` | SIGKILL + restart mid-workload | The paxos round keeps CAS linearizable across the kill and restart; the outage window degrades to retryable 503s, never forks |
+| `LinearizableCASAcrossPartition` | inbound blackhole 6s | The isolated node cannot assemble a majority (quorum denominators include dead members), so its rounds fail closed; history stays linearizable through heal |
 
 ## Findings the harness surfaced
 
@@ -143,28 +143,59 @@ system behaviors, not test artifacts:
    once the deterministic sync cadence made convergence timing reliable
    enough to expose it; the entry hash now XORs each sibling's value hash
    with a canonical hash of its vector clock.
-7. **Primary-serialized CAS is not linearizable across membership churn** —
-   *open; the fix is consensus-backed CAS (see the roadmap).* Surfaced the
-   moment porcupine checking replaced spot assertions: under a node kill or
-   an asymmetric partition, racing CAS clients produce histories no
-   sequential CAS register can explain. The checker's diagnosis shows three
-   signatures with one root cause — CAS serializes against the *current
-   primary's local state* only, and membership churn changes which node that
-   is without moving the state along. A new primary that never received the
-   last acknowledged write both serves **stale reads** and accepts a CAS
-   from the superseded value, **forking** the history into siblings that
-   later surface as **conflict reads**
-   ([Client Consistency](client-consistency.md#primary-serialized-cas-not-consensus)
-   concedes exactly this window). `LinearizableCASAcrossPrimaryFailover` and
-   `LinearizableCASAcrossPartition` reproduce it reliably and run the
-   checker in detector mode — reporting the violation and its porcupine
-   visualization instead of failing — until a consensus round closes the
-   window and they flip to hard assertions. See
+7. **Primary-serialized CAS was not linearizable across membership churn** —
+   *fixed by paxos-backed CAS.* Surfaced the moment porcupine checking
+   replaced spot assertions: under a node kill or an asymmetric partition,
+   racing CAS clients produced histories no sequential CAS register could
+   explain. The checker's diagnosis showed three signatures with one root
+   cause — CAS serialized against the *current primary's local state* only,
+   and membership churn changed which node that was without moving the
+   state along. A new primary that never received the last acknowledged
+   write both served **stale reads** and accepted a CAS from the superseded
+   value, **forking** the history into siblings that later surfaced as
+   **conflict reads**. The fix is one single-decree paxos round per CAS
+   with serial reads through the prepare phase
+   ([Client Consistency](client-consistency.md#paxos-per-key-not-a-primary-and-not-raft)),
+   after which `LinearizableCASAcrossPrimaryFailover` and
+   `LinearizableCASAcrossPartition` flipped from detectors to hard
+   assertions. Getting them green surfaced three sub-findings the protocol
+   docs now carry: a partitioned node that declares its peers dead must not
+   shrink the paxos quorum to itself (disjoint majority-of-one); a retrying
+   coordinator must recognize its own mutation in the committed state after
+   a rival round resurrects it (a false 412 for a write that committed);
+   and accepted debris at or below a committed ballot is a dead round's
+   leftover that must never be "finished" over the newer commit (acceptors
+   track and report their highest committed ballot for exactly this). See
    [History Checking](history-checking.md).
 8. **Member snapshots were shared pointers** — *fixed by copy-on-read;
    surfaced by the simulation harness.* See the
    [simulation findings](simulation.md#findings) for the full account: the
    numbering continues here so findings stay one list.
+9. **Version collision on retry from a stale base** — *fixed by raising the
+   coordinator's own counter to its local high-water mark before
+   incrementing; surfaced by the simulation harness.* Two different values
+   could share one vector clock, a divergence anti-entropy can never
+   repair. See the [simulation findings](simulation.md#findings).
+10. **A downtime-gate wipe under-replicated committed CAS values** — *fixed
+    by bootstrapping rejoin.* Surfaced by the history checker the moment
+    finding #7's fix made the failover scenario a hard assertion. A
+    SIGKILLed node rejoined through the downtime gate with an empty store
+    but kept voting in paxos quorums immediately. Commit acks at majority,
+    so a committed value could be down to a single surviving store copy
+    after the wipe — and a serial read whose prepare majority was {the
+    wiped node, the replica that commit never reached} honestly merged to
+    stale or absent state, which the next CAS then chained from (one
+    forked generation, one stale read per occurrence). Ballot safety was
+    never the issue; the decided *value's* replication was. Now a node
+    whose gate discard actually threw away data rejoins as bootstrapping —
+    excluded from read sets and from paxos voting (while still counting in
+    the quorum denominator, like dead members) — waits for peers, pulls
+    its **entire replica set** back (`BootstrapReplicaRanges`, not just
+    the primary ranges a fresh joiner takes), and only then clears the
+    flag. A wiped node with no peers within a grace period serves
+    standalone. `LinearizableCASAcrossPrimaryFailover` asserts
+    linearizability again — the scenario that surfaced both #7 and #10 is
+    the regression test for both fixes.
 
 ## Extending the suite
 

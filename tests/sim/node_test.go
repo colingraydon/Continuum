@@ -200,17 +200,26 @@ func (c *simCluster) crash(n *simNode) {
 }
 
 // restart replaces a crashed node with a fresh, empty instance under the
-// same identity and re-meshes membership.
+// same identity, re-meshes membership, and bootstraps gossip from the
+// running peers. The bootstrap matters: peers hold the node's pre-crash
+// entry (dead, or alive with a high heartbeat) and stop gossiping to dead
+// members, so without the WantReply bootstrap the fresh incarnation-zero
+// node may never learn the stale claim it must refute — production restarts
+// do the same via SEED_NODES (gossip finding #3).
 func (c *simCluster) restart(n *simNode) *simNode {
 	fresh := c.startNode(n.id)
+	var peers []string
 	c.mu.Lock()
 	for i, existing := range c.nodes {
 		if existing.id == n.id {
 			c.nodes[i] = fresh
+		} else if existing.running.Load() {
+			peers = append(peers, existing.httpAddr)
 		}
 	}
 	c.mu.Unlock()
 	c.mesh()
+	fresh.gossiper.Bootstrap(peers)
 	return fresh
 }
 

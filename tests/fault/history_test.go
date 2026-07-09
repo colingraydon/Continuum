@@ -3,6 +3,7 @@
 package fault
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -43,11 +44,12 @@ func (r *recorder) history() []histcheck.Op {
 }
 
 // casWorkload races multiple clients over a small shared key set, every
-// mutation a conditional write: each client loops GET ?consistency=all (to
-// learn the current value and its clock) then PUT ?cas=true from that clock.
-// Contention on the same keys is the point: CAS serializes at the key's
-// primary, so exactly one of two racing writers may win each step. All
-// operations are recorded for a linearizability check.
+// mutation a conditional write: each client loops GET ?consistency=serial
+// (a linearizable paxos-prepare read that learns the current value and its
+// clock) then PUT ?cas=true from that clock. Contention on the same keys is
+// the point: CAS rounds serialize on ballot order and majority intersection,
+// so exactly one of two racing writers may win each step. All operations are
+// recorded for a linearizability check.
 type casWorkload struct {
 	c        *cluster
 	keys     []string
@@ -153,7 +155,7 @@ func (w *casWorkload) step(id, iter int, rng *rand.Rand) {
 // whether the read produced usable state at all.
 func (w *casWorkload) readStep(id int, key string, n *node) (string, map[string]uint64, bool) {
 	call := w.rec.now()
-	nr, sessionClock, code, err := w.c.getAll(n, key)
+	nr, sessionClock, code, err := w.c.getSerial(n, key)
 	ret := w.rec.now()
 
 	op := histcheck.Op{Client: id, Key: key, Kind: histcheck.Read, Call: call, Return: ret}
@@ -207,22 +209,6 @@ func verifyLinearizable(t *testing.T, w *casWorkload, timeout time.Duration) {
 	}
 }
 
-// expectKnownCASGap runs the linearizability check where the documented CAS
-// membership-churn window is in play: primary failover and partitions can
-// fork or lose CAS writes because the primary serializes against local state
-// only (no consensus round). A violation here is the known gap, reported but
-// not failed; a clean pass is logged too. When consensus-backed CAS closes
-// the window, callers switch to verifyLinearizable and the scenario becomes
-// a hard assertion.
-func expectKnownCASGap(t *testing.T, w *casWorkload, timeout time.Duration) {
-	t.Helper()
-	if checkLinearizable(t, w, timeout) {
-		t.Log("no violation surfaced this run; the churn window is timing-dependent")
-		return
-	}
-	t.Log("known CAS gap reproduced: primary-serialized CAS is not linearizable across membership churn (see docs/fault-injection.md finding #7)")
-}
-
 func checkLinearizable(t *testing.T, w *casWorkload, timeout time.Duration) bool {
 	t.Helper()
 	hist := w.rec.history()
@@ -240,6 +226,12 @@ func checkLinearizable(t *testing.T, w *casWorkload, timeout time.Duration) bool
 			t.Logf("visualization failed: %v", err)
 		} else {
 			t.Logf("linearization visualization: %s", path)
+		}
+		if raw, err := json.MarshalIndent(hist, "", " "); err == nil {
+			rawPath := strings.TrimSuffix(path, ".html") + ".json"
+			if err := os.WriteFile(rawPath, raw, 0o644); err == nil {
+				t.Logf("raw history: %s", rawPath)
+			}
 		}
 		diagnose(t, hist)
 		return false

@@ -459,12 +459,12 @@ func (c *cluster) put(n *node, key, value string, clocks map[string]uint64) (int
 	return resp.StatusCode, nil
 }
 
-// getAll reads key through n as coordinator at ?consistency=all, so the read
-// merges every live replica rather than stopping at R responses. The second
-// return value is the merged clock from the X-Session-Clock response header —
-// the context a client sends back to chain a CAS write off this read.
-func (c *cluster) getAll(n *node, key string) (nodeResponse, map[string]uint64, int, error) {
-	resp, err := c.client.Get(n.baseURL() + "/keys/" + key + "?consistency=all")
+// getSerial reads key through n as coordinator at ?consistency=serial: a
+// linearizable read served by the paxos prepare phase. The second return
+// value is the merged clock from the X-Session-Clock response header — the
+// context a client sends back to chain a CAS write off this read.
+func (c *cluster) getSerial(n *node, key string) (nodeResponse, map[string]uint64, int, error) {
+	resp, err := c.client.Get(n.baseURL() + "/keys/" + key + "?consistency=serial")
 	if err != nil {
 		return nodeResponse{}, nil, 0, err
 	}

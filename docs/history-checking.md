@@ -43,8 +43,9 @@ of operations into many small ones):
   create siblings, so siblings in a pure-CAS keyspace prove a forked write.
 
 The workload maps the protocol onto that model: each client loops
-`GET ?consistency=all` (learning the current value and its merged clock from
-`X-Session-Clock`), then `PUT ?cas=true` with that clock as precondition.
+`GET ?consistency=serial` (learning the current value and its merged clock
+from `X-Session-Clock`), then `PUT ?cas=true` with that clock as
+precondition.
 Because every value written is unique and each distinct state has a distinct
 vector clock, "the clock I read" and "the value I read" identify each other,
 so the clock-domination precondition the store actually checks and the
@@ -66,21 +67,17 @@ no such treatment: it guarantees no side effects.
 | Scenario | Faults | Expectation |
 | -------- | ------ | ----------- |
 | `LinearizableCASHealthy` | none | Hard assertion: the history linearizes |
-| `LinearizableCASAcrossPrimaryFailover` | SIGKILL + restart | Detector: reproduces finding #7 |
-| `LinearizableCASAcrossPartition` | asymmetric partition + heal | Detector: reproduces finding #7 |
+| `LinearizableCASAcrossPrimaryFailover` | SIGKILL + restart (downtime-gate wipe) | Hard assertion since bootstrapping rejoin (finding #10) |
+| `LinearizableCASAcrossPartition` | asymmetric partition + heal | Hard assertion since paxos-backed CAS |
 
-On a healthy cluster the property holds: CAS serializes through each key's
-primary, so racing writers get exactly one 204 per generation and the checker
-proves ~1,700-operation histories linearizable in seconds.
-
-Under membership churn it does not hold, and the checker made the documented
-concession concrete as [finding #7](fault-injection.md#findings-the-harness-surfaced):
-CAS serializes against the *current primary's local state*, and churn moves
-the primary role without moving the state. A new primary that missed the last
-acknowledged write (it was down, partitioned, or simply not yet repaired)
-serves stale reads and accepts a CAS from the superseded value, forking
-history. The detector scenarios report three mechanical signatures of that
-one root cause, plus the porcupine visualization:
+Under the original primary-serialized CAS design, the churn scenarios failed
+the moment they existed: the checker made the documented concession concrete
+as [finding #7](fault-injection.md#findings-the-harness-surfaced). CAS
+serialized against the *current primary's local state*, and churn moved the
+primary role without moving the state; a new primary that missed the last
+acknowledged write served stale reads and accepted a CAS from the superseded
+value, forking history. The diagnosis pass reports three mechanical
+signatures of that root cause alongside the porcupine visualization:
 
 - **forked generations** — two acknowledged CAS writes from the same expected
   value;
@@ -88,9 +85,20 @@ one root cause, plus the porcupine visualization:
   acknowledged (values never repeat, so this is unambiguous);
 - **conflict reads** — the forked siblings later surfacing to a client.
 
-The detectors log violations instead of failing while the gap is open;
-closing it is the roadmap's consensus-backed CAS, at which point they flip to
-the same hard assertion as the healthy scenario.
+The scenarios ran as detectors — logging violations instead of failing —
+until [paxos-backed CAS](client-consistency.md) closed the window; the
+partition scenario became a hard assertion, and the failover scenario
+immediately surfaced the *next* gap (finding #10: a downtime-gate wipe
+under-replicated committed values until repair), detected it while
+bootstrapping rejoin was built, and asserts linearizability again since.
+The checker also drove the paxos fix itself, catching three protocol bugs
+in the wiring that final-state checks cannot see:
+the isolated-node "majority of one" fork (quorum denominators must include
+dead members), the false 412 a retrying coordinator returned after a rival
+round resurrected and committed its own mutation, and the resurrection of
+superseded sub-majority debris over a newer commit (acceptors now track and
+report their highest committed ballot so coordinators can tell an in-flight
+round from a dead one's leftovers).
 
 ## Design Decisions
 
@@ -108,18 +116,23 @@ that design decision as a "violation".
 weaker-than-linearizable properties the checker does not yet model; they
 remain covered by unit tests only.
 
-### Detectors, not expected failures
+### Detectors for known gaps, hard assertions everywhere else
 
-**Choice:** Scenarios that reproduce finding #7 report the violation and keep
-the suite green, rather than failing or being skipped.
+**Choice:** A scenario that reproduces a *documented, open* gap reports the
+violation and keeps the suite green; once the gap is closed, one helper call
+flips it into the regression test for the fix. The churn scenarios lived as
+detectors for finding #7 and are hard assertions now; the simulation
+harness's crash schedules remain the one detector left, because its
+memory-only nodes legitimately lose their paxos promises with everything
+else.
 
 A permanently red test trains people to ignore the suite; a skipped test
 stops observing the behavior. The detector keeps the reproduction running on
-every fault pass — so the day consensus CAS lands, flipping one helper call
-turns the accumulated reproduction into the regression test for the fix.
+every pass, which is also what makes the flip trustworthy: the fix is
+verified against the exact workload that broke the predecessor.
 
-**Tradeoff:** A *new* CAS regression in the churn path would be reported but
-not fail CI until the flip. The healthy-cluster assertion bounds the
+**Tradeoff:** While a gap is open, a *new* regression in the same path is
+reported but does not fail CI. The healthy-cluster assertion bounds the
 exposure: any regression visible without churn still fails hard.
 
 ### Client-observed histories only
@@ -134,8 +147,11 @@ timestamps honest (one monotonic clock in the test process) and the checked
 system identical to the shipped one.
 
 **Tradeoff:** Diagnosis has to be reconstructed from the outside, which is
-why the harness pairs every violation with the fork/stale-read scan and the
-porcupine visualization.
+why the harness pairs every violation with the fork/stale-read scan, the
+porcupine visualization, and a raw JSON dump of the history —
+`go run ./cmd/histbisect <dump.json>` then binary-searches each key's
+subhistory for the minimal failing prefix, which is how the false-412
+retry bug in the paxos wiring was isolated.
 
 ## See Also
 

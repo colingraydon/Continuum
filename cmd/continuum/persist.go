@@ -55,6 +55,13 @@ type persistence struct {
 	nodeID  string
 	s       *store.Store
 	w       *wal.Writer
+	// discardedData is set when the downtime gate threw away non-empty
+	// local storage. The node then rejoins as bootstrapping: its store can
+	// no longer vouch for the keys it replicates, so it must stay out of
+	// read sets and CAS quorums until it has pulled its replica ranges back
+	// (fault-harness finding #10). A first-ever start (nothing to discard)
+	// does not set it.
+	discardedData bool
 }
 
 // recoverStore opens dataDir, applies the downtime gate, attaches SSTables
@@ -91,6 +98,7 @@ func recoverStore(dataDir, nodeID string, gcTTL time.Duration, memtableMaxBytes,
 
 	if downtimeGateFired(m, hasMeta, gcTTL) {
 		logDowntimeGate(m, hasMeta, gcTTL)
+		p.discardedData = dirsHaveFiles(snapDir, walDir, tablesDir)
 		if err := clearStorageFiles(snapDir, walDir, tablesDir); err != nil {
 			return nil, nil, err
 		}
@@ -403,6 +411,23 @@ func cleanupSnapTmp(snapDir string) error {
 		}
 	}
 	return nil
+}
+
+// dirsHaveFiles reports whether any of the directories contains at least one
+// regular file — i.e. whether a downtime-gate clear actually discards data.
+func dirsHaveFiles(dirs ...string) bool {
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func clearStorageFiles(dirs ...string) error {

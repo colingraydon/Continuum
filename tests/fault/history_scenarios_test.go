@@ -7,7 +7,10 @@ import (
 	"time"
 )
 
-const linCheckTimeout = 60 * time.Second
+// linCheckTimeout bounds the porcupine search. Generous because proving a
+// churn history linearizable explores many interleavings of unknown-outcome
+// ops, and the suite may be sharing the machine with the cluster processes.
+const linCheckTimeout = 180 * time.Second
 
 // Scenario 11: concurrent CAS writers on a healthy cluster. Conditional
 // writes serialize through each key's primary replica, so a history of
@@ -31,19 +34,20 @@ func TestFault_LinearizableCASHealthy(t *testing.T) {
 }
 
 // Scenario 12: concurrent CAS writers while a node is killed and later
-// restarted. While a key's primary is down, CAS for that key fails closed
-// with 503 (recorded as unknown-outcome ops); once gossip converges the ring
-// walk names a new primary and CAS resumes there. The check asserts that the
-// full history — across the kill, the failover, and the restart — still
-// linearizes per key.
+// restarted. While a replica is down the remaining two of three still form a
+// majority, so CAS stays available, and the full history — across the kill,
+// the downtime-gate wipe, and the repair — must linearize per key.
 //
-// This scenario reliably reproduces finding #7 (docs/fault-injection.md):
-// diverging ring views during churn can name two primaries and fork a CAS
-// history, and a new primary may also serve CAS from state that misses a
-// write it never received (delivered later by hints or anti-entropy). The
-// checker runs in detector mode — it reports the violation with a porcupine
-// visualization instead of failing — until consensus-backed CAS closes the
-// window, at which point this becomes a hard assertion (verifyLinearizable).
+// This scenario has earned its keep twice. Under the primary-serialized
+// design it reproduced finding #7 (churn moved the primary role without
+// moving the state). After paxos closed that, it surfaced finding #10: the
+// SIGKILL restart trips the downtime gate, so the node rejoined with an
+// empty store while still voting in CAS quorums — and with commits acked at
+// majority, a committed value could be down to one store copy, letting a
+// serial-read majority of {wiped node, the replica the commit never
+// reached} honestly merge to stale state. Wiped nodes now rejoin as
+// bootstrapping (out of read sets and paxos quorums) until they have pulled
+// their replica ranges back, so this asserts linearizability again.
 func TestFault_LinearizableCASAcrossPrimaryFailover(t *testing.T) {
 	c := newCluster(t, clusterConfig{})
 	w := newCASWorkload(c, 4, 3, nil)
@@ -65,7 +69,7 @@ func TestFault_LinearizableCASAcrossPrimaryFailover(t *testing.T) {
 	if acked == 0 {
 		t.Fatal("workload never acknowledged a CAS write; harness is broken")
 	}
-	expectKnownCASGap(t, w, linCheckTimeout)
+	verifyLinearizable(t, w, linCheckTimeout)
 }
 
 // Scenario 13: concurrent CAS writers across an asymmetric partition. The
@@ -74,8 +78,9 @@ func TestFault_LinearizableCASAcrossPrimaryFailover(t *testing.T) {
 // it: forwarded CAS requests fail closed with 503 until the survivors'
 // member lists mark it dead and the ring walk moves on. After heal, the
 // rejoining node must not serve CAS from its stale state in a way that loses
-// an acknowledged write. Like scenario 12 this runs the checker in detector
-// mode for finding #7 until consensus-backed CAS closes the churn window.
+// an acknowledged write. Like scenario 12 this reproduced finding #7 before
+// paxos-backed CAS; it asserts linearizability now — the isolated node
+// cannot assemble a majority, so its rounds fail closed instead of forking.
 func TestFault_LinearizableCASAcrossPartition(t *testing.T) {
 	c := newCluster(t, clusterConfig{})
 	w := newCASWorkload(c, 4, 3, nil)
@@ -97,5 +102,5 @@ func TestFault_LinearizableCASAcrossPartition(t *testing.T) {
 	if acked == 0 {
 		t.Fatal("workload never acknowledged a CAS write; harness is broken")
 	}
-	expectKnownCASGap(t, w, linCheckTimeout)
+	verifyLinearizable(t, w, linCheckTimeout)
 }

@@ -22,9 +22,12 @@ The same checks run as in the fault harness, at the same strength: no
 acknowledged write may be lost (durability), replicas must converge to
 identical sibling sets (convergence, checked by direct store access — free
 when the store is in-process), and CAS histories go through the porcupine
-checker from [History Checking](history-checking.md) — a hard assertion on
-healthy runs, detector mode for the known churn gap (finding #7) under
-faults.
+checker from [History Checking](history-checking.md). The linearizability
+check is a hard assertion everywhere except schedules that crash a node:
+simulated nodes are memory-only, so a crash erases the paxos acceptor's
+promises along with everything else, and a forgotten promise legitimately
+breaks the majority-intersection argument. In production the acceptor log in
+`DATA_DIR/paxos` survives crashes — the fault harness asserts that case.
 
 ## How it works
 
@@ -130,6 +133,19 @@ list](fault-injection.md#findings-the-harness-surfaced):
    process finally let the detector see gossip and the data path
    simultaneously); process-level tests could never have. The getters now
    return snapshot copies, pinned by a concurrent-hammer regression test.
+9. **Version collision on retry from a stale base** — *fixed by raising the
+   coordinator's counter to its local high-water mark before incrementing.*
+   A coordinator derived a write's version purely from the client-supplied
+   clocks plus its own increment, so a client retrying from a stale base
+   through the same coordinator minted the *exact version of the earlier
+   attempt* for a different value. Equal clocks are treated as idempotent
+   duplicates everywhere — merge, read repair, anti-entropy — so replicas
+   that held the first write dropped the second while the rest applied it:
+   a permanent divergence repair can never fix, and in the dominated
+   variant an acknowledged write was silently dropped cluster-wide. A
+   seeded convergence check caught it as two values sharing one clock
+   (`w03-k02#44` and `#45`, byte-identical versions). Pinned by
+   `TestPutKeyRetryFromStaleBaseMintsFreshVersion`.
 
 ## Running it
 
