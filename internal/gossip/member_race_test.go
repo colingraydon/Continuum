@@ -25,36 +25,49 @@ func TestMemberListConcurrentReadersAndMutators(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for {
-				select {
-				case <-stop:
-					return
-				default:
-				}
-				if _, err := json.Marshal(ml.GetAll()); err != nil {
-					t.Errorf("marshal: %v", err)
-					return
-				}
-				for _, m := range ml.GetAlive() {
-					_ = m.Status.String()
-				}
-				if m, ok := ml.Get("n3"); ok {
-					_ = m.Heartbeat
-				}
-			}
+			hammerReads(t, ml, stop)
 		}()
 	}
 
 	for i := 0; i < 500; i++ {
-		id := fmt.Sprintf("n%d", i%8)
-		ml.MarkSuspect(id)
-		ml.MarkDead(id)
-		ml.IncrementHeartbeat()
-		ml.Merge([]*Member{{ID: id, Address: id + ":80", Incarnation: uint64(i), Heartbeat: uint64(i), Status: MemberAlive}})
-		ml.SetBootstrapping(id, i%2 == 0)
+		mutateOnce(ml, i)
 	}
 	close(stop)
 	wg.Wait()
+}
+
+// hammerReads loops over every read accessor until stop closes, so the race
+// detector sees reads concurrent with mutations.
+func hammerReads(t *testing.T, ml *MemberList, stop <-chan struct{}) {
+	t.Helper()
+	for {
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		if _, err := json.Marshal(ml.GetAll()); err != nil {
+			t.Errorf("marshal: %v", err)
+			return
+		}
+		for _, m := range ml.GetAlive() {
+			_ = m.Status.String()
+		}
+		if m, ok := ml.Get("n3"); ok {
+			_ = m.Heartbeat
+		}
+	}
+}
+
+// mutateOnce applies every in-place mutator to one member, cycling through
+// the member set by iteration index.
+func mutateOnce(ml *MemberList, i int) {
+	id := fmt.Sprintf("n%d", i%8)
+	ml.MarkSuspect(id)
+	ml.MarkDead(id)
+	ml.IncrementHeartbeat()
+	ml.Merge([]*Member{{ID: id, Address: id + ":80", Incarnation: uint64(i), Heartbeat: uint64(i), Status: MemberAlive}})
+	ml.SetBootstrapping(id, i%2 == 0)
 }
 
 // TestMemberListGetReturnsCopy pins that mutating a returned member does not

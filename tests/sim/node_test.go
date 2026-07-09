@@ -297,27 +297,36 @@ func (c *simCluster) ringIDs(n *simNode) map[string]bool {
 func (c *simCluster) waitFullRing(timeout time.Duration) {
 	c.t.Helper()
 	deadline := time.Now().Add(timeout)
-	for {
-		ok := true
-		for _, a := range c.running() {
-			ids := c.ringIDs(a)
-			for _, b := range c.running() {
-				if !ids[b.id] {
-					ok = false
-				}
-			}
-		}
-		if ok {
-			return
-		}
+	for !c.ringsConverged() {
 		if time.Now().After(deadline) {
-			for _, n := range c.running() {
-				c.t.Logf("%s ring: %v", n.id, c.ringIDs(n))
-			}
+			c.dumpRings()
 			c.t.Fatalf("cluster did not converge to a full ring within %v", timeout)
 		}
 		c.mesh()
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// ringsConverged reports whether every running node's ring contains every
+// running node.
+func (c *simCluster) ringsConverged() bool {
+	running := c.running()
+	for _, a := range running {
+		ids := c.ringIDs(a)
+		for _, b := range running {
+			if !ids[b.id] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// dumpRings logs each running node's ring view, for diagnosing a convergence
+// failure.
+func (c *simCluster) dumpRings() {
+	for _, n := range c.running() {
+		c.t.Logf("%s ring: %v", n.id, c.ringIDs(n))
 	}
 }
 
