@@ -24,6 +24,15 @@ func TestBallotOrdering(t *testing.T) {
 	}
 }
 
+func TestBallotStringAndZero(t *testing.T) {
+	if got := b(7, "n1").String(); got != "7@n1" {
+		t.Errorf("String() = %q, want 7@n1", got)
+	}
+	if !(Ballot{}).IsZero() || b(1, "n1").IsZero() {
+		t.Error("IsZero must hold only for the zero ballot")
+	}
+}
+
 func TestPrepareAcceptCommitRound(t *testing.T) {
 	a := NewAcceptor()
 
