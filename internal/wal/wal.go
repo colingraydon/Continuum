@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -24,7 +25,16 @@ const DefaultMaxSegmentBytes int64 = 64 * 1024 * 1024
 const (
 	headerSize    = 16 // crc:4 | len:4 | seq:8
 	segmentSuffix = ".wal"
+	// maxPayloadBytes bounds a single record's payload. The on-disk length
+	// field is a uint32 holding 8 (the seq) plus the payload length, so a
+	// larger payload would truncate the length prefix and corrupt the frame.
+	// Real payloads are small store mutations; the bound is a safety floor.
+	maxPayloadBytes = math.MaxUint32 - 8
 )
+
+// ErrPayloadTooLarge is returned by Append when a record's payload exceeds
+// what the frame's uint32 length field can represent.
+var ErrPayloadTooLarge = errors.New("wal: payload exceeds maximum frame size")
 
 // On-disk frame layout:
 //
@@ -135,6 +145,9 @@ func (w *Writer) SetMaxSegmentBytes(n int64) {
 // Append writes payload with the next sequence number. The record is in
 // the OS write buffer after this returns; call Sync to make it durable.
 func (w *Writer) Append(payload []byte) (uint64, error) {
+	if len(payload) > maxPayloadBytes {
+		return 0, fmt.Errorf("%w: %d bytes (max %d)", ErrPayloadTooLarge, len(payload), maxPayloadBytes)
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	seq := w.nextSeq
@@ -400,6 +413,9 @@ var (
 	errCRC      = errors.New("wal: crc mismatch")
 )
 
+// encodeFrame builds one on-disk frame. The caller (Append) guarantees
+// len(payload) <= maxPayloadBytes, so headerSize+len(payload) cannot overflow
+// int and 8+len(payload) fits the uint32 length field.
 func encodeFrame(seq uint64, payload []byte) []byte {
 	frame := make([]byte, headerSize+len(payload))
 	binary.BigEndian.PutUint32(frame[4:8], uint32(8+len(payload)))

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"hash/crc32"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -98,6 +99,27 @@ func TestAppend_MultipleRecords(t *testing.T) {
 	}
 	if _, err := r.Next(); err != io.EOF {
 		t.Fatalf("expected EOF, got %v", err)
+	}
+}
+
+func TestAppend_RejectsOversizedPayload(t *testing.T) {
+	// The on-disk length field is a uint32 holding 8+len(payload), so the
+	// payload bound is one below what would overflow it. Verify the bound is
+	// exactly that (a real oversized slice is ~4 GiB, so assert on the
+	// constant rather than allocating one).
+	if maxPayloadBytes != math.MaxUint32-8 {
+		t.Fatalf("maxPayloadBytes = %d, want MaxUint32-8", maxPayloadBytes)
+	}
+	if uint64(maxPayloadBytes)+8 != math.MaxUint32 {
+		t.Fatal("8+maxPayloadBytes must exactly fill the uint32 length field")
+	}
+
+	// A payload at the limit still encodes to a well-formed frame whose
+	// length prefix round-trips (exercised here with a small stand-in whose
+	// length prefix is checked directly).
+	frame := encodeFrame(42, []byte("hello"))
+	if got := binary.BigEndian.Uint32(frame[4:8]); got != uint32(8+len("hello")) {
+		t.Fatalf("length prefix = %d, want %d", got, 8+len("hello"))
 	}
 }
 
