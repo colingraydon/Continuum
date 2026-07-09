@@ -106,17 +106,36 @@ type logRecord struct {
 // per key, then compacts it to one record per live key so the log does not
 // grow with CAS traffic across restarts.
 func OpenAcceptor(dir string) (*Acceptor, error) {
-	a := &Acceptor{keys: make(map[string]*keyState)}
-
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("paxos: create log dir: %w", err)
 	}
+	keys, lastSeq, replayed, err := replayLog(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	w, err := wal.Open(dir)
+	if err != nil {
+		return nil, fmt.Errorf("paxos: open log: %w", err)
+	}
+	a := &Acceptor{keys: keys, log: w}
+
+	if err := a.compact(replayed, lastSeq); err != nil {
+		return nil, err
+	}
+	return a, nil
+}
+
+// replayLog reads the append-only log in dir, keeping the last record per
+// key, and returns the recovered state along with the highest sequence read
+// and the number of records replayed (which compaction uses to decide
+// whether the log is worth rewriting).
+func replayLog(dir string) (keys map[string]*keyState, lastSeq uint64, replayed int, err error) {
 	r, err := wal.NewReader(dir)
 	if err != nil {
-		return nil, fmt.Errorf("paxos: open log reader: %w", err)
+		return nil, 0, 0, fmt.Errorf("paxos: open log reader: %w", err)
 	}
-	var lastSeq uint64
-	replayed := 0
+	keys = make(map[string]*keyState)
 	for {
 		rec, err := r.Next()
 		if err != nil {
@@ -127,36 +146,35 @@ func OpenAcceptor(dir string) (*Acceptor, error) {
 			continue // skip an undecodable record; the frame CRC already passed
 		}
 		st := lr.State
-		a.keys[lr.Key] = &st
+		keys[lr.Key] = &st
 		lastSeq = rec.Seq
 		replayed++
 	}
 	if err := r.Close(); err != nil {
-		return nil, fmt.Errorf("paxos: close log reader: %w", err)
+		return nil, 0, 0, fmt.Errorf("paxos: close log reader: %w", err)
 	}
+	return keys, lastSeq, replayed, nil
+}
 
-	w, err := wal.Open(dir)
-	if err != nil {
-		return nil, fmt.Errorf("paxos: open log: %w", err)
+// compact rewrites the log to one record per live key and drops the replayed
+// prefix, so the log does not grow with CAS traffic across restarts. It is a
+// no-op when the log is already minimal (one record per key or fewer).
+func (a *Acceptor) compact(replayed int, lastSeq uint64) error {
+	if replayed <= len(a.keys) {
+		return nil
 	}
-	a.log = w
-
-	// Compact: re-append one record per live key, then drop the replayed
-	// prefix. Skipped when the log is already minimal.
-	if replayed > len(a.keys) {
-		for key, st := range a.keys {
-			if err := a.appendLocked(key, st); err != nil {
-				return nil, fmt.Errorf("paxos: compact: %w", err)
-			}
-		}
-		if err := w.Sync(); err != nil {
-			return nil, fmt.Errorf("paxos: compact sync: %w", err)
-		}
-		if err := w.TruncateThrough(lastSeq); err != nil {
-			return nil, fmt.Errorf("paxos: compact truncate: %w", err)
+	for key, st := range a.keys {
+		if err := a.appendLocked(key, st); err != nil {
+			return fmt.Errorf("paxos: compact: %w", err)
 		}
 	}
-	return a, nil
+	if err := a.log.Sync(); err != nil {
+		return fmt.Errorf("paxos: compact sync: %w", err)
+	}
+	if err := a.log.TruncateThrough(lastSeq); err != nil {
+		return fmt.Errorf("paxos: compact truncate: %w", err)
+	}
+	return nil
 }
 
 // appendLocked writes key's current state to the log. Callers must hold a.mu

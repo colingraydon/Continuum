@@ -207,43 +207,58 @@ func (h *Handler) preparePhase(key string, b paxos.Ballot, replicas []*ring.Node
 	results := make(chan *prepareResponse, len(replicas))
 	rejected := make(chan paxos.Ballot, len(replicas))
 	for _, n := range replicas {
-		go func(n *ring.Node) {
-			var resp prepareResponse
-			var err error
-			if n.ID == h.selfID {
-				resp, err = h.localPrepare(key, b)
-			} else {
-				err = h.postPaxos(n.Address, pathPaxosPrepare, prepareRequest{Key: key, Ballot: b}, &resp)
-			}
-			if err != nil {
-				log.Printf("paxos prepare %s on %s: %v", key, n.ID, err)
-				results <- nil
-				return
-			}
-			if !resp.OK {
-				rejected <- resp.Promised
-				results <- nil
-				return
-			}
-			results <- &resp
-		}(n)
+		go h.prepareReplica(key, b, n, results, rejected)
 	}
 	for range replicas {
 		if r := <-results; r != nil {
-			promised = append(promised, *r)
-			if len(promised) >= majority {
+			if promised = append(promised, *r); len(promised) >= majority {
 				break
 			}
 		}
 	}
+	return promised, drainHighest(rejected)
+}
+
+// prepareReplica runs one replica's prepare and reports the result on the
+// channels: the promise on results (nil on error or rejection), and a
+// rejecting replica's higher ballot on rejected.
+func (h *Handler) prepareReplica(key string, b paxos.Ballot, n *ring.Node, results chan<- *prepareResponse, rejected chan<- paxos.Ballot) {
+	resp, err := h.sendPrepare(n, key, b)
+	switch {
+	case err != nil:
+		log.Printf("paxos prepare %s on %s: %v", key, n.ID, err)
+		results <- nil
+	case !resp.OK:
+		rejected <- resp.Promised
+		results <- nil
+	default:
+		results <- resp
+	}
+}
+
+// sendPrepare dispatches a prepare to n, short-circuiting to a local call for
+// self.
+func (h *Handler) sendPrepare(n *ring.Node, key string, b paxos.Ballot) (*prepareResponse, error) {
+	if n.ID == h.selfID {
+		resp, err := h.localPrepare(key, b)
+		return &resp, err
+	}
+	var resp prepareResponse
+	err := h.postPaxos(n.Address, pathPaxosPrepare, prepareRequest{Key: key, Ballot: b}, &resp)
+	return &resp, err
+}
+
+// drainHighest returns the greatest ballot buffered on ch (zero if none),
+// draining it without blocking.
+func drainHighest(ch <-chan paxos.Ballot) (higher paxos.Ballot) {
 	for {
 		select {
-		case b := <-rejected:
+		case b := <-ch:
 			if higher.Less(b) {
 				higher = b
 			}
 		default:
-			return promised, higher
+			return higher
 		}
 	}
 }
@@ -254,37 +269,38 @@ func (h *Handler) preparePhase(key string, b paxos.Ballot, replicas []*ring.Node
 func (h *Handler) proposePhase(m paxos.Mutation, replicas []*ring.Node, majority int) (acks int, higher paxos.Ballot) {
 	results := make(chan *paxos.Promise, len(replicas))
 	for _, n := range replicas {
-		go func(n *ring.Node) {
-			var p paxos.Promise
-			var err error
-			if n.ID == h.selfID {
-				p, err = h.acceptor.Accept(m)
-			} else {
-				err = h.postPaxos(n.Address, pathPaxosPropose, m, &p)
-			}
-			if err != nil {
-				log.Printf("paxos propose %s on %s: %v", m.Key, n.ID, err)
-				results <- nil
-				return
-			}
-			results <- &p
-		}(n)
+		go func(n *ring.Node) { results <- h.sendPropose(n, m) }(n)
 	}
 	for range replicas {
-		p := <-results
-		if p == nil {
-			continue
-		}
-		if p.OK {
-			acks++
-			if acks >= majority {
+		switch p := <-results; {
+		case p == nil:
+			// Transport or apply error: not a vote either way.
+		case p.OK:
+			if acks++; acks >= majority {
 				return acks, higher
 			}
-		} else if higher.Less(p.Promised) {
+		case higher.Less(p.Promised):
 			higher = p.Promised
 		}
 	}
 	return acks, higher
+}
+
+// sendPropose dispatches an accept to n (local call for self) and returns the
+// promise, or nil on error.
+func (h *Handler) sendPropose(n *ring.Node, m paxos.Mutation) *paxos.Promise {
+	var p paxos.Promise
+	var err error
+	if n.ID == h.selfID {
+		p, err = h.acceptor.Accept(m)
+	} else {
+		err = h.postPaxos(n.Address, pathPaxosPropose, m, &p)
+	}
+	if err != nil {
+		log.Printf("paxos propose %s on %s: %v", m.Key, n.ID, err)
+		return nil
+	}
+	return &p
 }
 
 // commitPhase applies the decided mutation on every replica, returning at
@@ -443,84 +459,104 @@ func (h *Handler) paxosCAS(w http.ResponseWriter, key string, incoming store.Vec
 		if attempt > 0 {
 			time.Sleep(time.Duration(10+attempt*20) * time.Millisecond)
 		}
-		ballot := h.nextBallot()
-		promises, higher := h.preparePhase(key, ballot, replicas, majority)
-		if len(promises) < majority {
-			if !higher.IsZero() {
-				h.observeBallot(higher)
-				continue // outpaced by a concurrent round, not unavailable
-			}
-			http.Error(w, errCASUnavailable, http.StatusServiceUnavailable)
+		if h.casAttempt(w, key, version, wr, replicas, majority, &proposed) {
 			return
 		}
-
-		// Finish an in-flight round first: its mutation may already hold a
-		// majority of accepts, i.e. be decided without having been applied.
-		// If it is this request's own mutation from an earlier attempt,
-		// finishing it *is* success; otherwise the client retries against
-		// the settled state.
-		if acc := pendingAccepted(promises); acc != nil {
-			ok := h.finishRound(*acc, ballot, replicas, majority)
-			if ok && mutationMatches(*acc, version, wr) {
-				setSessionClockHeader(w, version.Clocks)
-				w.WriteHeader(http.StatusNoContent)
-				return
-			}
-			http.Error(w, errCASInFlight, http.StatusServiceUnavailable)
-			return
-		}
-
-		survivors := committedSurvivors(promises)
-
-		// An earlier attempt's proposal may have been resurrected and
-		// committed by a rival round while this coordinator saw only
-		// timeouts. The committed sibling carries this request's exact
-		// version and value, so it is provably this write: report success.
-		if casCommittedHere(survivors, version, wr) {
-			setSessionClockHeader(w, version.Clocks)
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-
-		// Precondition: the write's version must strictly dominate every
-		// committed sibling the majority can prove — same client-facing
-		// semantics as before, but against quorum-merged state instead of
-		// one primary's local view.
-		if !casPreconditionHolds(survivors, version) {
-			if proposed {
-				// The mutation left this coordinator in an earlier attempt
-				// and may have committed and been superseded since; 412
-				// would promise "no side effects" that cannot be proven.
-				http.Error(w, errCASUnavailable, http.StatusServiceUnavailable)
-				return
-			}
-			http.Error(w, errCASConflict, http.StatusPreconditionFailed)
-			return
-		}
-
-		m := paxos.Mutation{Key: key, Value: wr.value, Deleted: wr.deleted, Clocks: version.Clocks, Ballot: ballot}
-		proposed = true
-		acks, higher := h.proposePhase(m, replicas, majority)
-		if acks < majority {
-			if !higher.IsZero() {
-				h.observeBallot(higher)
-				continue
-			}
-			http.Error(w, errCASUnavailable, http.StatusServiceUnavailable)
-			return
-		}
-
-		if h.commitPhase(m, replicas, majority) < majority {
-			// Decided but under-applied: a later round will finish it, but
-			// this client cannot be told it committed durably everywhere.
-			http.Error(w, errFailedWrite, http.StatusServiceUnavailable)
-			return
-		}
-		setSessionClockHeader(w, version.Clocks)
-		w.WriteHeader(http.StatusNoContent)
-		return
 	}
 	http.Error(w, errCASContended, http.StatusServiceUnavailable)
+}
+
+// casAttempt runs one paxos round for a conditional write. It returns true
+// once it has written the client response (success or a terminal error), and
+// false when the round was outpaced by a higher ballot and should be retried
+// with a fresh one. proposed is threaded across attempts so a precondition
+// failure after this request has ever proposed degrades to a retryable 503.
+func (h *Handler) casAttempt(w http.ResponseWriter, key string, version store.VectorClockVersion, wr keyWrite, replicas []*ring.Node, majority int, proposed *bool) (done bool) {
+	ballot := h.nextBallot()
+	promises, higher := h.preparePhase(key, ballot, replicas, majority)
+	if len(promises) < majority {
+		return h.retryOrFail(w, higher)
+	}
+
+	// Finish an in-flight round first: its mutation may already hold a
+	// majority of accepts, i.e. be decided without having been applied. If
+	// it is this request's own mutation from an earlier attempt, finishing
+	// it is success; otherwise the client retries against the settled state.
+	if acc := pendingAccepted(promises); acc != nil {
+		if h.finishRound(*acc, ballot, replicas, majority) && mutationMatches(*acc, version, wr) {
+			h.casSucceeded(w, version)
+		} else {
+			http.Error(w, errCASInFlight, http.StatusServiceUnavailable)
+		}
+		return true
+	}
+
+	survivors := committedSurvivors(promises)
+
+	// An earlier attempt's proposal may have been resurrected and committed
+	// by a rival round while this coordinator saw only timeouts. The
+	// committed sibling carries this request's exact version and value, so
+	// it is provably this write: report success.
+	if casCommittedHere(survivors, version, wr) {
+		h.casSucceeded(w, version)
+		return true
+	}
+
+	// Precondition: the write's version must strictly dominate every
+	// committed sibling the majority can prove — same client-facing
+	// semantics as before, but against quorum-merged state instead of one
+	// primary's local view.
+	if !casPreconditionHolds(survivors, version) {
+		h.casPreconditionFailed(w, *proposed)
+		return true
+	}
+
+	m := paxos.Mutation{Key: key, Value: wr.value, Deleted: wr.deleted, Clocks: version.Clocks, Ballot: ballot}
+	*proposed = true
+	acks, higher := h.proposePhase(m, replicas, majority)
+	if acks < majority {
+		return h.retryOrFail(w, higher)
+	}
+
+	if h.commitPhase(m, replicas, majority) < majority {
+		// Decided but under-applied: a later round will finish it, but this
+		// client cannot be told it committed durably everywhere.
+		http.Error(w, errFailedWrite, http.StatusServiceUnavailable)
+		return true
+	}
+	h.casSucceeded(w, version)
+	return true
+}
+
+// retryOrFail handles a phase that fell short of majority: a higher observed
+// ballot means a concurrent round outpaced us, so observe it and signal a
+// retry (done=false); otherwise the quorum is genuinely unavailable and we
+// write a retryable 503 (done=true).
+func (h *Handler) retryOrFail(w http.ResponseWriter, higher paxos.Ballot) (done bool) {
+	if !higher.IsZero() {
+		h.observeBallot(higher)
+		return false
+	}
+	http.Error(w, errCASUnavailable, http.StatusServiceUnavailable)
+	return true
+}
+
+// casSucceeded writes the 204 for a committed conditional write, returning
+// the write's clock so the client can chain the next CAS or session read.
+func (h *Handler) casSucceeded(w http.ResponseWriter, version store.VectorClockVersion) {
+	setSessionClockHeader(w, version.Clocks)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// casPreconditionFailed reports a failed precondition: 412 when no side
+// effect is possible, or a retryable 503 once this request has proposed and
+// its mutation may have committed and been superseded since.
+func (h *Handler) casPreconditionFailed(w http.ResponseWriter, proposed bool) {
+	if proposed {
+		http.Error(w, errCASUnavailable, http.StatusServiceUnavailable)
+		return
+	}
+	http.Error(w, errCASConflict, http.StatusPreconditionFailed)
 }
 
 // mutationMatches reports whether an accepted mutation is this request's
