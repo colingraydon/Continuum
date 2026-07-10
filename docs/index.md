@@ -1,6 +1,6 @@
 ---
 template: home.html
-title: continuum — a distributed key-value store in Go
+title: continuum
 hide:
   - navigation
   - toc

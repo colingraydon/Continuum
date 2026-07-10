@@ -68,7 +68,7 @@ for CI - they remain in `make bench` for local measurement.
 | AddNode (150 vnodes) | 121 µs/op |
 | RemoveNode | 108 µs/op |
 
-Vnode count barely moves lookup latency — the RBT `Ceiling()` is O(log n)
+Vnode count barely moves lookup latency - the RBT `Ceiling()` is O(log n)
 with a small constant:
 
 | Vnodes per node | Latency |
@@ -82,7 +82,7 @@ Mixed read/write workloads pay for the write lock: pure concurrent reads run
 at 177 ns/op, reads mixed with topology churn at 874 ns/op. In a stable
 cluster the ring lives in the pure-read regime.
 
-## KV store — in-memory path
+## KV store - in-memory path
 
 | Operation | Latency |
 | --------- | ------- |
@@ -94,7 +94,7 @@ cluster the ring lives in the pure-read regime.
 | Vector clock Increment | 116 ns/op |
 | Vector clock HappensBefore | 65 ns/op |
 
-## KV store — durable path (WAL + SSTables)
+## KV store - durable path (WAL + SSTables)
 
 **Group commit.** A single sequential writer pays a full fsync per write;
 concurrent writers share fsyncs through `SyncUpTo` batching:
@@ -104,7 +104,7 @@ concurrent writers share fsyncs through `SyncUpTo` batching:
 | 1 writer (fsync per write) | 4.30 ms/op | ~230 writes/s |
 | 8 parallel writers (group commit) | 0.57 ms/op | ~1,740 writes/s |
 
-Group commit buys **~7.5×** aggregate write throughput at 8 workers — the
+Group commit buys **~7.5×** aggregate write throughput at 8 workers - the
 "before/after" the group-commit work promised. The ceiling is the device
 fsync rate; more concurrency amortizes each fsync over more writes.
 
@@ -149,7 +149,7 @@ known follow-up if scan volume grows.
 | Full tree rebuild on membership change (10k keys) | 2.4 ms/op |
 
 Serving `GET /sync` from maintained trees is **~26× cheaper** than the
-scan-and-hash fallback at 10k keys — and the gap grows linearly with data
+scan-and-hash fallback at 10k keys - and the gap grows linearly with data
 size, since the scan is O(total data) while the tree read is O(range). This
 is the before/after for the incremental-Merkle work; the fallback path still
 exists (and is benchmarked) because a vnode without a tree falls back to it.
@@ -188,7 +188,7 @@ fan-out, quorum wait, and (for reads) sibling merge.
 | GET `consistency=all` | 110 µs/op |
 | Scan page (100 keys, scatter-gather across 3 nodes) | 1.5 ms/op |
 
-Waiting on one extra replica costs ~40 µs over loopback — on a real network
+Waiting on one extra replica costs ~40 µs over loopback - on a real network
 this becomes the inter-node RTT, which is the point of per-request
 consistency: the client chooses how many RTTs each operation is worth.
 `one` still fans out to all replicas (they must receive the write); it just

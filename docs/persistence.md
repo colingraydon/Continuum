@@ -10,7 +10,7 @@ Today every layer holds state in memory only. A graceful single-node restart sur
 
 | Layer | Persists? | Why |
 | ----- | --------- | --- |
-| `internal/store` | **Yes** | Authoritative KV data. Vector clocks live inside `Sibling.Version`, so they ride along with entries. `tombstoneAges` persists too — restart must not reset TTL. |
+| `internal/store` | **Yes** | Authoritative KV data. Vector clocks live inside `Sibling.Version`, so they ride along with entries. `tombstoneAges` persists too - restart must not reset TTL. |
 | `internal/hintstore` | **Yes (v2)** | Currently lost on crash. Anti-entropy backstops it for keys that achieved quorum elsewhere. Deferred to a follow-up PR. |
 | `internal/gossip` | No | MemberList reconstructs by gossiping with seed nodes. |
 | `internal/ring` | No | Derived from gossip membership + config. |
@@ -32,7 +32,7 @@ DATA_DIR/
                              first startup, then removed
 ```
 
-Segmented WAL: rotate at 64 MB. When the memtable exceeds `MEMTABLE_MAX_BYTES` (default 16 MiB) it is flushed to a new SSTable; segments fully covered by the flush get deleted. Tables are named by the WAL sequence they cover, so the set of live tables is derivable from a directory listing — no manifest file until compaction (which must atomically swap N tables for one) requires it. Because the table rename is atomic and sibling-set merging is idempotent, a crash anywhere in the flush sequence is safe: either the WAL still covers the data, or the table and WAL briefly overlap and replay re-merges harmlessly.
+Segmented WAL: rotate at 64 MB. When the memtable exceeds `MEMTABLE_MAX_BYTES` (default 16 MiB) it is flushed to a new SSTable; segments fully covered by the flush get deleted. Tables are named by the WAL sequence they cover, so the set of live tables is derivable from a directory listing - no manifest file until compaction (which must atomically swap N tables for one) requires it. Because the table rename is atomic and sibling-set merging is idempotent, a crash anywhere in the flush sequence is safe: either the WAL still covers the data, or the table and WAL briefly overlap and replay re-merges harmlessly.
 
 ## WAL record format
 
@@ -42,7 +42,7 @@ Length-prefixed, CRC32-checked binary frames. Fixed header so torn-tail detectio
 [crc32: 4][len: 4][seq: 8][payload: len-8]
 ```
 
-CRC covers `len | seq | payload`. `len` includes the seq plus payload bytes, so total on-disk record size is `8 + len`. On replay, any record whose CRC fails or whose `len` runs past EOF marks the tail of the newest segment; truncate there. CRC mismatch mid-stream (older segment) is corruption — bail and require operator intervention.
+CRC covers `len | seq | payload`. `len` includes the seq plus payload bytes, so total on-disk record size is `8 + len`. On replay, any record whose CRC fails or whose `len` runs past EOF marks the tail of the newest segment; truncate there. CRC mismatch mid-stream (older segment) is corruption - bail and require operator intervention.
 
 The `internal/wal` package is type-agnostic: `Append([]byte)` takes an opaque payload. The first byte of the payload is the record-type tag, defined in `internal/store`. This keeps WAL framing free of store-specific concerns and lets the store evolve record formats without touching the WAL.
 
@@ -52,12 +52,12 @@ First byte of payload is the type tag. Remaining bytes are the type-specific enc
 
 - **PUT**: `key_len(2) | key | value_len(4) | value | n(2) | (id_len(2) | id | counter(8))×n`
 - **DELETE**: `key_len(2) | key | tombstone_at_ns(8) | n(2) | (id_len(2) | id | counter(8))×n`
-- **EVICT**: `key_len(2) | key` — local-only cleanup for keys outside this node's primary range
-- **GC**: `n(4) | (key_len(2) | key)×n` — purged tombstones; emitted by the GC pass so replay across a GC boundary doesn't resurrect
-- **CHECKPOINT**: `snapshot_seq(8)` — written after a snapshot lands; lets replay skip ahead
+- **EVICT**: `key_len(2) | key` - local-only cleanup for keys outside this node's primary range
+- **GC**: `n(4) | (key_len(2) | key)×n` - purged tombstones; emitted by the GC pass so replay across a GC boundary doesn't resurrect
+- **CHECKPOINT**: `snapshot_seq(8)` - written after a snapshot lands; lets replay skip ahead
 
 Notes:
-- `tombstone_at_ns` is the original wall time when the Delete was first accepted. Never `time.Now()` at replay — that would reset TTL and break GC safety.
+- `tombstone_at_ns` is the original wall time when the Delete was first accepted. Never `time.Now()` at replay - that would reset TTL and break GC safety.
 - Concurrent siblings: each sibling is its own logical record. Replay re-runs `applySibling` and they re-converge.
 
 ## SSTable contents
@@ -67,7 +67,7 @@ Tables store `(key, value)` byte pairs in the format described in
 
 ```
 ENTRY (0x00): sib_count(2) | siblings | has_tomb(1) | tomb_at_ns(8)?
-EVICT (0x01): nothing — the key was migrated away; shadows older tables
+EVICT (0x01): nothing - the key was migrated away; shadows older tables
 ```
 
 `tomb_at` rides along so compaction can apply tombstone GC later. The legacy
@@ -91,15 +91,15 @@ return nil
 
 **Key invariants:**
 - Ack to caller only after `Sync()` returns. Reads never see writes that aren't on disk.
-- If `Append` or `Sync` fails, memory is **not** modified. The WAL is the source of truth; memory catches up on replay. A partial fsync that left a record on disk but didn't ack is fine — replay will apply it.
+- If `Append` or `Sync` fails, memory is **not** modified. The WAL is the source of truth; memory catches up on replay. A partial fsync that left a record on disk but didn't ack is fine - replay will apply it.
 - Dominated and idempotent writes are dropped **before** the WAL append, so the log only contains writes that changed state.
-- **Read-merge-write invariant**: a write merges any older-generation (frozen/table) state for its key into the memtable. A generation that holds a key therefore holds its complete merged sibling set, and reads stop at the first generation hit — no read-time multi-table merging.
+- **Read-merge-write invariant**: a write merges any older-generation (frozen/table) state for its key into the memtable. A generation that holds a key therefore holds its complete merged sibling set, and reads stop at the first generation hit - no read-time multi-table merging.
 - `Put`, `Delete`, `Evict` return `error`; `Get` and `KeyHashes` do too, since reads can now touch disk. Callers (handler, anti-entropy apply path) propagate or log.
 
 ## Recovery flow
 
 1. Read `meta.json`. Refuse to start if `node_id != SELF_ID` (prevents accidental data-dir reuse across nodes).
-2. **Downtime gate**: if `now - last_clean_shutdown > gcTTL` OR meta is missing → skip steps 3–6. Clear data files and return an empty store. When the clear actually discarded data, the node rejoins as **bootstrapping** — excluded from read sets and from paxos CAS voting — waits for peers, pulls its entire replica set back via `BootstrapReplicaRanges()`, and only then clears the flag (a wiped node that still voted with absent state let serial reads merge to stale history — fault-harness finding #10; a wiped node with no peers within a grace period serves standalone). A crash does not update `last_clean_shutdown`, so a crashed node recovers normally as long as its last clean shutdown is within `gcTTL`. See "Tombstone GC safety" below.
+2. **Downtime gate**: if `now - last_clean_shutdown > gcTTL` OR meta is missing → skip steps 3–6. Clear data files and return an empty store. When the clear actually discarded data, the node rejoins as **bootstrapping** - excluded from read sets and from paxos CAS voting - waits for peers, pulls its entire replica set back via `BootstrapReplicaRanges()`, and only then clears the flag (a wiped node that still voted with absent state let serial reads merge to stale history - fault-harness finding #10; a wiped node with no peers within a grace period serves standalone). A crash does not update `last_clean_shutdown`, so a crashed node recovers normally as long as its last clean shutdown is within `gcTTL`. See "Tombstone GC safety" below.
 3. Clean up any `*.sst.tmp` (and legacy `*.snap.tmp`) left from a crashed flush.
 4. Open every `tables/*.sst`, newest first. Set `applied_seq` to the highest table name. **Legacy migration**: if there are no tables but a v1 snapshot exists, load it as memtable contents and use its `sequence_at` instead; after step 6 it is flushed out as the first SSTable and the snap files are removed.
 5. Walk `wal/` segments in sequence order. For each record:
@@ -110,7 +110,7 @@ return nil
    - `EVICT` → eviction path: leaves an evict marker if the key is still visible in a table.
    - `GC` → remove keys + `tombstoneAges` directly.
    - `CHECKPOINT` → legacy v1 record, decoded and ignored.
-6. Open the next WAL segment for writes; install the flush policy. After recovery: the Merkle trees restore from `merkle.json` when its stamped WAL sequence matches the recovered `LastSeq` (a clean restart); otherwise `ae.rebuild()` repopulates them from `store.KeyHashes()` (a merged scan across memtable + tables — the crash-recovery path, since WAL replay suppresses tree callbacks). Only now does startup proceed — gossip stays in bootstrapping until recovery is done. (`meta.json` is rewritten only at the next clean shutdown.)
+6. Open the next WAL segment for writes; install the flush policy. After recovery: the Merkle trees restore from `merkle.json` when its stamped WAL sequence matches the recovered `LastSeq` (a clean restart); otherwise `ae.rebuild()` repopulates them from `store.KeyHashes()` (a merged scan across memtable + tables - the crash-recovery path, since WAL replay suppresses tree callbacks). Only now does startup proceed - gossip stays in bootstrapping until recovery is done. (`meta.json` is rewritten only at the next clean shutdown.)
 
 ## Flush flow
 
@@ -124,7 +124,7 @@ Triggered by the write that pushes the memtable past `MEMTABLE_MAX_BYTES`
 
 A failed flush leaves the frozen memtable in place; the next write retries.
 Only one flush runs at a time. The triggering writer pays the flush latency
-inline — a deliberate simplification over a background flush thread; the
+inline - a deliberate simplification over a background flush thread; the
 group-commit PR is the natural place to move it off the write path.
 
 ## Shutdown flow
@@ -137,7 +137,7 @@ After `FlushHints` and HTTP drain, `finalize()`:
 
 ## Tombstone GC safety
 
-Persistence breaks the implicit assumption behind the current 1-hour `gcTTL`: that no node is down longer than the anti-entropy propagation window. Once data survives restart, a node can come back days later carrying a write that was tombstoned + GC'd elsewhere — and resurrect it.
+Persistence breaks the implicit assumption behind the current 1-hour `gcTTL`: that no node is down longer than the anti-entropy propagation window. Once data survives restart, a node can come back days later carrying a write that was tombstoned + GC'd elsewhere - and resurrect it.
 
 ### Mechanism: self-enforcing downtime gate
 
@@ -147,7 +147,7 @@ Rather than rely on an operator invariant (Cassandra's `gc_grace_seconds` approa
 - On startup, compare against `gcTTL`. If exceeded (or meta is missing), refuse to load local data. The node clears its data files, re-enters bootstrapping, and pulls fresh primary ranges from current replicas via the existing `Bootstrap()` path.
 - Bump `gcTTL` from 1 h → 24 h. Covers realistic outages without letting tombstones accumulate indefinitely.
 
-Trade-off: a node down longer than `gcTTL` loses any writes it accepted that hadn't reached quorum. Same risk Cassandra has when `nodetool repair` is forgotten — we just fail closed automatically instead of resurrecting.
+Trade-off: a node down longer than `gcTTL` loses any writes it accepted that hadn't reached quorum. Same risk Cassandra has when `nodetool repair` is forgotten - we just fail closed automatically instead of resurrecting.
 
 ### Alternatives considered
 
@@ -166,7 +166,7 @@ Trade-off: a node down longer than `gcTTL` loses any writes it accepted that had
 - Crash after rename but before WAL truncation → the table and WAL overlap; replay re-merges the covered records idempotently.
 - WAL retention rule: segments are only deleted **after** the covering table is fsynced and renamed. The currently-open segment is never deleted.
 - Identity check: two nodes pointed at the same `DATA_DIR` would silently clobber each other. `meta.json` carries `node_id`; mismatch → refuse to start.
-- A tombstone GC pass skips tombstones whose key is still visible in a table — purging only the memtable copy would resurrect the older table value on read. Table-resident tombstones are reclaimed at compaction.
+- A tombstone GC pass skips tombstones whose key is still visible in a table - purging only the memtable copy would resurrect the older table value on read. Table-resident tombstones are reclaimed at compaction.
 
 **Replay:**
 - `Delete` records must replay with their original `tombstone_at_ns`, not `time.Now()`.
@@ -180,11 +180,11 @@ Trade-off: a node down longer than `gcTTL` loses any writes it accepted that had
 **Ring topology shifted while down:**
 - Already handled by `Bootstrap()` and `CleanupStaleKeys()`. With persistence, very long downtime triggers the bootstrap-fresh path; shorter downtime trusts the local tables and lets anti-entropy + stale-key cleanup converge. `CleanupStaleKeys` uses the eviction path, so keys already flushed to tables get shadowed by evict markers until compaction drops them.
 
-## v1 PR scope (historical — superseded by the LSM phases in docs/sstable.md)
+## v1 PR scope (historical - superseded by the LSM phases in docs/sstable.md)
 
 ### In
 
-1. New package `internal/wal` — `Writer` (Append, Sync, Rotate, Close), `Reader` (Next iterator with tail truncation), record types, framing, tests for round-trip / torn tail / multi-segment replay / mid-stream corruption.
+1. New package `internal/wal` - `Writer` (Append, Sync, Rotate, Close), `Reader` (Next iterator with tail truncation), record types, framing, tests for round-trip / torn tail / multi-segment replay / mid-stream corruption.
 2. Snapshot read+write in `internal/store/snapshot.go`. Identity check. Header CRC.
 3. `Store` gains optional `wal *wal.Writer` and `seq uint64`. `Put`/`Delete`/`Evict` append before applying and return `error`. `GCTombstones` emits a `GC` record. Replay path bypasses WAL and suppresses callbacks.
 4. `meta.json` read/write.
@@ -204,7 +204,7 @@ Trade-off: a node down longer than `gcTTL` loses any writes it accepted that had
 
 - **Group commit.** Per-write fsync in v1. Add a `wal_fsync_seconds` histogram so the next PR has a baseline.
 - **Hint store persistence.** AE backstops it for quorum-acked writes; document the gap.
-- **Sharded store.** Single mutex; works for the current benchmark. Sharding is a separate PR — touches every store call site.
+- **Sharded store.** Single mutex; works for the current benchmark. Sharding is a separate PR - touches every store call site.
 - **Periodic / threshold-based snapshots.** Shutdown-only in v1. ~~WAL grows unbounded until the next restart.~~ **Done in v2**: memtable flushes to SSTables on a size threshold.
 - **Bounded write queue / backpressure.** Doesn't exist today; not regressing.
 - **Parallel replay.** Unlocked by the sharded-store PR.

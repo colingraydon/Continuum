@@ -46,7 +46,7 @@ When bootstrapping clears, each peer that receives the `MemberBootstrapped` goss
 
 ### Rejoin After a Downtime-Gate Wipe
 
-The same state machine covers a second entry point: a node whose [downtime gate](persistence.md) discarded non-empty local storage. It marks itself bootstrapping even without `SEED_NODES`, waits for membership (peers arrive via seeds, gossip, or re-registration; a node still alone after a grace period serves standalone), and pulls with `BootstrapReplicaRanges()` instead of `Bootstrap()` — the **entire replica set**, not just primary ranges. A fresh joiner starts owning nothing, but a wiped rejoiner previously vouched for everything it replicates, and letting it vote in read sets or CAS quorums with absent state serves stale history (fault-harness finding #10).
+The same state machine covers a second entry point: a node whose [downtime gate](persistence.md) discarded non-empty local storage. It marks itself bootstrapping even without `SEED_NODES`, waits for membership (peers arrive via seeds, gossip, or re-registration; a node still alone after a grace period serves standalone), and pulls with `BootstrapReplicaRanges()` instead of `Bootstrap()` - the **entire replica set**, not just primary ranges. A fresh joiner starts owning nothing, but a wiped rejoiner previously vouched for everything it replicates, and letting it vote in read sets or CAS quorums with absent state serves stale history (fault-harness finding #10).
 
 ### Leave - Push-Based Migration
 

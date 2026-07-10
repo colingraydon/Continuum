@@ -92,7 +92,7 @@ porcupine checker verifies the history is per-key linearizable. See
 Things learned building and running this suite, kept here because they are
 system behaviors, not test artifacts:
 
-1. **Anti-entropy repaired one random vnode per sync round** — *fixed by
+1. **Anti-entropy repaired one random vnode per sync round** - *fixed by
    deterministic round-robin.* Random sampling gave keyspace coverage a
    coupon-collector expected time with an unbounded tail; `syncRound` now
    cycles through the sorted primary vnode ends, bounding a full pass at
@@ -100,13 +100,13 @@ system behaviors, not test artifacts:
    vnodes at the 30s default is 75 minutes), so the harness keeps running
    `REPLICAS=8` with a 2s interval to make convergence observable within
    test deadlines. See [Anti-Entropy](antientropy.md#one-vnode-per-tick-round-robin).
-2. **Anti-entropy primary ranges were computed once at startup** — *fixed by
+2. **Anti-entropy primary ranges were computed once at startup** - *fixed by
    rebuild-on-membership-change.* Each sync tick re-derives the primary
    ranges from the ring (a cheap comparison) and rebuilds the Merkle trees
    with one store scan only when membership actually changed them. A node
    that starts alone no longer considers itself primary for the whole
    keyspace forever.
-3. **A rejoining node's heartbeat restarts at zero** — *fixed by SWIM-style
+3. **A rejoining node's heartbeat restarts at zero** - *fixed by SWIM-style
    incarnation numbers.* Previously peers that remembered a node's pre-crash
    heartbeat ignored its gossip until the counter caught up (roughly its
    previous uptime in seconds). Now each node carries an incarnation epoch that
@@ -123,7 +123,7 @@ system behaviors, not test artifacts:
    to it is a conscious one. Since sloppy quorum, the clamp engages at the
    suspect verdict (the healthy walk excludes suspects from the fan-out set)
    rather than waiting for the dead verdict to remove the node from the ring.
-5. **Hints were only delivered on an alive *transition*** — *fixed by a
+5. **Hints were only delivered on an alive *transition*** - *fixed by a
    periodic delivery sweep.* During an asymmetric partition the isolated node
    never looks dead to its peers (its outbound gossip still flows), so hints
    buffered for it were never triggered for delivery and repair fell to
@@ -134,7 +134,7 @@ system behaviors, not test artifacts:
    it, preserving its original timestamp so its TTL keeps counting from the
    original write; anti-entropy remains the backstop for hints that age out
    before the target becomes reachable.
-6. **Merkle hashes were clock-blind** — *fixed by folding vector clocks into
+6. **Merkle hashes were clock-blind** - *fixed by folding vector clocks into
    entry hashes.* Two replicas holding the same value at different clocks
    (e.g. one received an earlier write attempt via a hint, the other holds
    the final acknowledged one) produced identical Merkle roots, so
@@ -143,12 +143,12 @@ system behaviors, not test artifacts:
    once the deterministic sync cadence made convergence timing reliable
    enough to expose it; the entry hash now XORs each sibling's value hash
    with a canonical hash of its vector clock.
-7. **Primary-serialized CAS was not linearizable across membership churn** —
+7. **Primary-serialized CAS was not linearizable across membership churn** -
    *fixed by paxos-backed CAS.* Surfaced the moment porcupine checking
    replaced spot assertions: under a node kill or an asymmetric partition,
    racing CAS clients produced histories no sequential CAS register could
    explain. The checker's diagnosis showed three signatures with one root
-   cause — CAS serialized against the *current primary's local state* only,
+   cause - CAS serialized against the *current primary's local state* only,
    and membership churn changed which node that was without moving the
    state along. A new primary that never received the last acknowledged
    write both served **stale reads** and accepted a CAS from the superseded
@@ -167,34 +167,34 @@ system behaviors, not test artifacts:
    leftover that must never be "finished" over the newer commit (acceptors
    track and report their highest committed ballot for exactly this). See
    [History Checking](history-checking.md).
-8. **Member snapshots were shared pointers** — *fixed by copy-on-read;
+8. **Member snapshots were shared pointers** - *fixed by copy-on-read;
    surfaced by the simulation harness.* See the
    [simulation findings](simulation.md#findings) for the full account: the
    numbering continues here so findings stay one list.
-9. **Version collision on retry from a stale base** — *fixed by raising the
+9. **Version collision on retry from a stale base** - *fixed by raising the
    coordinator's own counter to its local high-water mark before
    incrementing; surfaced by the simulation harness.* Two different values
    could share one vector clock, a divergence anti-entropy can never
    repair. See the [simulation findings](simulation.md#findings).
-10. **A downtime-gate wipe under-replicated committed CAS values** — *fixed
+10. **A downtime-gate wipe under-replicated committed CAS values** - *fixed
     by bootstrapping rejoin.* Surfaced by the history checker the moment
     finding #7's fix made the failover scenario a hard assertion. A
     SIGKILLed node rejoined through the downtime gate with an empty store
     but kept voting in paxos quorums immediately. Commit acks at majority,
     so a committed value could be down to a single surviving store copy
-    after the wipe — and a serial read whose prepare majority was {the
+    after the wipe - and a serial read whose prepare majority was {the
     wiped node, the replica that commit never reached} honestly merged to
     stale or absent state, which the next CAS then chained from (one
     forked generation, one stale read per occurrence). Ballot safety was
     never the issue; the decided *value's* replication was. Now a node
-    whose gate discard actually threw away data rejoins as bootstrapping —
+    whose gate discard actually threw away data rejoins as bootstrapping -
     excluded from read sets and from paxos voting (while still counting in
-    the quorum denominator, like dead members) — waits for peers, pulls
+    the quorum denominator, like dead members) - waits for peers, pulls
     its **entire replica set** back (`BootstrapReplicaRanges`, not just
     the primary ranges a fresh joiner takes), and only then clears the
     flag. A wiped node with no peers within a grace period serves
     standalone. `LinearizableCASAcrossPrimaryFailover` asserts
-    linearizability again — the scenario that surfaced both #7 and #10 is
+    linearizability again - the scenario that surfaced both #7 and #10 is
     the regression test for both fixes.
 
 ## Extending the suite

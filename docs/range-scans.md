@@ -8,9 +8,9 @@
 Point reads answer "what is key K"; range scans answer "what keys start with
 P". Two layers cooperate:
 
-1. **Node-local merged scan** (`store.Scan`) — one node's ordered, visible
+1. **Node-local merged scan** (`store.Scan`) - one node's ordered, visible
    view of a prefix range across its memtable, frozen memtable, and SSTables.
-2. **Scatter-gather coordinator** (`GET /keys?prefix=`) — fans the local scan
+2. **Scatter-gather coordinator** (`GET /keys?prefix=`) - fans the local scan
    to every alive node and merges per-key sibling sets with the same vector
    clock dominance rules as point reads.
 
@@ -135,7 +135,7 @@ keys per page would turn a read into a write storm; anti-entropy covers it).
 ### Ordered Skiplist Memtable
 
 The memtable is an ordered skiplist (`internal/store/skiplist.go`), so a scan
-seeks to the range start and walks only the matching keys — the same bounded
+seeks to the range start and walks only the matching keys - the same bounded
 walk the table scan uses, since keys with a given prefix form a contiguous
 range. Point writes stay O(log m); the overlay no longer sweeps and sorts the
 whole memtable on every scan. A narrow-prefix page over a 10k-key memtable
