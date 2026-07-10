@@ -144,7 +144,7 @@ Persistence breaks the implicit assumption behind the current 1-hour `gcTTL`: th
 Rather than rely on an operator invariant (Cassandra's `gc_grace_seconds` approach), the recovery flow enforces it in code:
 
 - On graceful shutdown, write `last_clean_shutdown` into `meta.json`.
-- On startup, compare against `gcTTL`. If exceeded (or meta is missing), refuse to load local data. The node clears its data files, re-enters bootstrapping, and pulls fresh primary ranges from current replicas via the existing `Bootstrap()` path.
+- On startup, compare against `gcTTL`. If exceeded (or meta is missing), refuse to load local data. The node clears its data files and re-enters bootstrapping, staying excluded from read sets and paxos CAS voting until it has pulled its **entire replica set** back via `BootstrapReplicaRanges()`, not just its primary ranges. A wiped node vouches for every key it replicates, so voting with absent state would merge reads to stale history (fault-harness finding #10).
 - Bump `gcTTL` from 1 h → 24 h. Covers realistic outages without letting tombstones accumulate indefinitely.
 
 Trade-off: a node down longer than `gcTTL` loses any writes it accepted that hadn't reached quorum. Same risk Cassandra has when `nodetool repair` is forgotten - we just fail closed automatically instead of resurrecting.
