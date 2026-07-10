@@ -10,7 +10,7 @@ With RF=3 and W=2, a write returns 204 once two replicas acknowledge it. If the 
 
 ### What Gets Buffered
 
-Hints are buffered in the coordinator's local hint store in two cases: a replica call in the fan-out fails, or the sloppy-quorum walk skipped an unhealthy home replica upfront and wrote to a substitute instead (see [Replication](replication.md#sloppy-quorum-over-strict)) - the skipped node is the intended owner and its hint carries the full write:
+Hints are buffered in the coordinator's local hint store in two cases: a replica call in the fan-out fails, or the sloppy-quorum walk skipped an unhealthy home replica upfront and wrote to a substitute instead (see [Replication](replication.md#sloppy-quorum-over-strict)). In the second case the skipped node is the intended owner, and its hint carries the full write:
 
 ```
 hint {
@@ -26,7 +26,7 @@ The hint is tagged with the intended recipient node ID. Hints are not writes - t
 
 ### Hint Delivery
 
-Delivery is primarily event-driven: the gossip `onChange` callback fires `handler.DeliverHints(nodeID, address)` the moment a node transitions to alive (either recovering from dead or joining fresh). A background sweep (`runHintDelivery`, 30s tick) calls `DeliverPendingHints`, which delivers buffered hints to any currently-alive target regardless of any membership edge, backstops the callback for a target that never presents a dead→alive transition - most importantly an asymmetric partition, where the isolated node keeps gossiping (so it never looks dead) while inbound writes are dropped.
+Delivery is primarily event-driven: the gossip `onChange` callback fires `handler.DeliverHints(nodeID, address)` the moment a node transitions to alive (either recovering from dead or joining fresh). A background sweep (`runHintDelivery`, 30s tick) backs it up by calling `DeliverPendingHints`, which delivers buffered hints to any currently-alive target regardless of any membership edge. The sweep is what covers a target that never presents a dead→alive transition. The important case is an asymmetric partition: the isolated node keeps gossiping, so it never looks dead, while its inbound writes are dropped.
 
 `DeliverHints` drains all hints tagged for that node from the hint store and replays each one as a normal replica sub-write (`X-Proxied-From` set to the coordinator's ID). The receiving node applies them through the standard vector clock conflict resolution path:
 
@@ -64,7 +64,7 @@ With `DATA_DIR` set, the hint store is backed by its own append-only log (layere
 
 **Choice:** Deliver primarily on the gossip `onChange` alive transition, with a periodic sweep as a backstop.
 
-Event-driven delivery is the fast path: polling alone adds latency proportional to the poll interval - if a node recovers at t=0 and the poll runs at t=29s, hints sit undelivered for 29 seconds, whereas the callback delivers within the same second gossip detects the recovery. But a pure alive-transition trigger has a blind spot the fault-injection harness surfaced: during an asymmetric partition the isolated node never looks dead (its outbound gossip still flows), so it never presents a dead→alive edge and its hints are never triggered - repair falls entirely to anti-entropy. The 30s sweep closes that gap by delivering to any alive target on a timer, independent of membership edges, while the callback still handles the common recover-from-dead case with no added latency.
+Event-driven delivery is the fast path: polling alone adds latency proportional to the poll interval - if a node recovers at t=0 and the poll runs at t=29s, hints sit undelivered for 29 seconds, whereas the callback delivers within the same second gossip detects the recovery. But a pure alive-transition trigger has a blind spot the fault-injection harness surfaced. During an asymmetric partition the isolated node never looks dead, because its outbound gossip still flows, so it never presents a dead→alive edge and its hints are never triggered. Repair then falls entirely to anti-entropy. The 30s sweep closes that gap by delivering to any alive target on a timer, independent of membership edges, while the callback still handles the common recover-from-dead case with no added latency.
 
 **Tradeoff:** The sweep retries against targets that may still be unreachable, so `DeliverHints` re-buffers failed deliveries (preserving the hint's timestamp so its TTL is not reset) rather than dropping them. The event-driven path keeps its tight coupling between gossip and the handler: the `onChange` callback is wired in `main.go` and passes a delivery function through to the handler, so neither package imports the other directly.
 

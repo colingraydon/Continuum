@@ -93,7 +93,7 @@ Several background loops run on every node:
 
 **Tombstone GC** - every 5 minutes, uncontested tombstones older than 24 hours are purged from the store and from the Merkle trees.
 
-Two more hint loops run per node: **hint expiry** checks every 5 minutes for hints older than 1 hour and discards them, deferring to anti-entropy for any keys that were not replayed in time, and the **hint delivery sweep** (`HINT_DELIVERY_INTERVAL_MS`, default 30 seconds) delivers buffered hints to any currently-alive target, backstopping the event-driven alive-transition delivery for targets that never present that edge (e.g. an asymmetric partition). With `DATA_DIR` set, a **compaction loop** (30 seconds) additionally merges SSTables per the size-tiered policy.
+Two more hint loops run per node. **Hint expiry** checks every 5 minutes for hints older than 1 hour and discards them, deferring to anti-entropy for any keys that were not replayed in time. The **hint delivery sweep** (`HINT_DELIVERY_INTERVAL_MS`, default 30 seconds) delivers buffered hints to any currently-alive target, backstopping the event-driven alive-transition delivery for targets that never present that edge (e.g. an asymmetric partition). With `DATA_DIR` set, a **compaction loop** (30 seconds) additionally merges SSTables per the size-tiered policy.
 
 ## Dependency Rules
 

@@ -250,7 +250,7 @@ Applies a batch of entries to the local store. The replica merges each entry thr
 
 ### Hinted Handoff
 
-Hint delivery has no HTTP endpoint. It is triggered internally - by the gossip `onChange` callback when a node transitions to alive, and by a periodic sweep (`HINT_DELIVERY_INTERVAL_MS`) that delivers to any currently-alive target: the coordinator drains its buffered hints for that node and replays them as replica sub-writes (`PUT`/`DELETE /keys/:key` with `X-Proxied-From` set). Hints that fail to deliver are re-buffered with their original TTL.
+Hint delivery has no HTTP endpoint. It is triggered internally two ways: by the gossip `onChange` callback when a node transitions to alive, and by a periodic sweep (`HINT_DELIVERY_INTERVAL_MS`) that delivers to any currently-alive target. In either case the coordinator drains its buffered hints for that node and replays them as replica sub-writes (`PUT`/`DELETE /keys/:key` with `X-Proxied-From` set). Hints that fail to deliver are re-buffered with their original TTL.
 
 ## Prometheus Metrics
 
