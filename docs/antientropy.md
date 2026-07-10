@@ -20,7 +20,7 @@ Comparing two Merkle trees requires sending 16 bucket hashes (64 bytes) plus the
 
 ### Precomputed Value Hashes
 
-Each store entry carries a `Hash uint32` - a murmur3 hash of the value computed at write time. The entry hash fed to the trees XORs each sibling's value hash with a canonical hash of its vector clock, so two replicas holding the same value at different clocks still hash differently - without the clock component, that divergence would be invisible to sync forever (a fault-harness finding). When the anti-entropy manager registers an `onUpdate` callback with the store, it is notified of every accepted write with the key and its new entry hash. The Merkle tree is updated incrementally - no full scan needed after each write.
+Each store entry carries a `Hash uint32` - a murmur3 hash of the value computed at write time. The entry hash fed to the trees XORs each sibling's value hash with a canonical hash of its vector clock, so two replicas holding the same value at different clocks still hash differently. Without the clock component, that divergence would be invisible to sync forever (a fault-harness finding). When the anti-entropy manager registers an `onUpdate` callback with the store, it is notified of every accepted write with the key and its new entry hash. The Merkle tree is updated incrementally - no full scan needed after each write.
 
 ### Sync Cycle
 

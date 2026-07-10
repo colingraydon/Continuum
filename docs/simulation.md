@@ -10,7 +10,7 @@ The fault harness proves the system survives real process faults, but each
 scenario costs tens of seconds (real sockets, real SIGKILLs, real gossip
 timers) and its faults are hand-written. The simulation harness inverts the
 trade: every node runs in one test process, wired together by an in-memory
-network that decides each message's fate — partitions, drops, added latency —
+network that decides each message's fate - partitions, drops, added latency -
 from a single seeded RNG, with production timing intervals compressed from
 seconds to milliseconds. One seeded run packs a fault schedule, ~2,000
 verified operations, and full repair convergence into a few seconds of wall
@@ -20,14 +20,14 @@ ten-minute soak instead of an overnight job.
 
 The same checks run as in the fault harness, at the same strength: no
 acknowledged write may be lost (durability), replicas must converge to
-identical sibling sets (convergence, checked by direct store access — free
+identical sibling sets (convergence, checked by direct store access - free
 when the store is in-process), and CAS histories go through the porcupine
 checker from [History Checking](history-checking.md). The linearizability
 check is a hard assertion everywhere except schedules that crash a node:
 simulated nodes are memory-only, so a crash erases the paxos acceptor's
 promises along with everything else, and a forgotten promise legitimately
 breaks the majority-intersection argument. In production the acceptor log in
-`DATA_DIR/paxos` survives crashes — the fault harness asserts that case.
+`DATA_DIR/paxos` survives crashes - the fault harness asserts that case.
 
 ## How it works
 
@@ -41,7 +41,7 @@ whose payloads are JSON round-tripped like the real UDP codec. Each message
 consults the seeded RNG and the current fault state for its (from, to) edge:
 
 - **blocked** (partition/isolation): the sender waits until its own timeout
-  fires, exactly like a real blackhole — hint buffering, quorum clamping, and
+  fires, exactly like a real blackhole - hint buffering, quorum clamping, and
   CAS fail-closed all key off timeouts, not instant errors;
 - **dropped** (seeded probability): same, or silently vanished for UDP;
 - **delayed**: delivered after the configured latency, which also reorders
@@ -52,13 +52,13 @@ must observe cluster state, not get lucky with the fault schedule.
 
 ### Real nodes, compressed time
 
-Each node is the production wiring from `cmd/continuum` — real store, ring,
-member list, gossiper, anti-entropy manager, hint store, HTTP handler — with
+Each node is the production wiring from `cmd/continuum` - real store, ring,
+member list, gossiper, anti-entropy manager, hint store, HTTP handler - with
 three injected seams (`api.HandlerConfig.Transport`, `gossip.Conn` +
 `Gossiper.SetTiming`, `antientropy.SetHTTPTransport`) and second-scale
 intervals shrunk ~40x: gossip every 25ms, suspicion at 250ms, anti-entropy
-every 100ms. A full fault cycle — fault, suspect verdict, dead verdict, ring
-re-route, heal, hint replay, Merkle repair — fits in under a second.
+every 100ms. A full fault cycle - fault, suspect verdict, dead verdict, ring
+re-route, heal, hint replay, Merkle repair - fits in under a second.
 
 ### Seeded schedules
 
@@ -68,7 +68,7 @@ and crash+restart, each with random targets, timing, and duration. Failures
 report the seed; `SIM_SEED=k make sim` replays that schedule. At most one
 crash per run: the store is memory-only in simulation, so a crash is total
 state loss, and two overlapping losses could legitimately destroy an
-acknowledged W=2 write — that would blame the schedule, not the system.
+acknowledged W=2 write - that would blame the schedule, not the system.
 
 ## Design Decisions
 
@@ -78,8 +78,8 @@ acknowledged W=2 write — that would blame the schedule, not the system.
 fault decisions all derive from the seed; the Go scheduler and wall-clock
 timing stay real.
 
-Full determinism — FoundationDB-style virtual time under a single-threaded
-event loop — requires every component to take a logical clock and yield
+Full determinism - FoundationDB-style virtual time under a single-threaded
+event loop - requires every component to take a logical clock and yield
 points, a rewrite this codebase doesn't need to buy its value: what makes
 seeds useful is that a seed reproduces the *shape* of a run (which faults,
 where, in what order) and runs are cheap enough to retry a flaky
@@ -88,7 +88,7 @@ visualization and node logs (`SIM_LOG=1`) carry the diagnosis from there.
 
 **Tradeoff:** A race between the schedule and goroutine timing can make a
 specific interleaving intermittent under one seed. The harness compensates
-with volume — more seeds, not more precision per seed.
+with volume - more seeds, not more precision per seed.
 
 ### In-process on purpose
 
@@ -102,7 +102,7 @@ caught a production bug that had survived every other layer of the pyramid
 (finding #8 below).
 
 **Tradeoff:** No process boundary means no coverage of SIGTERM shutdown
-ordering, WAL crash recovery, or the downtime gate — that stays the fault
+ordering, WAL crash recovery, or the downtime gate - that stays the fault
 harness's and E2E layer's job. The two harnesses are complements, not
 alternatives.
 
@@ -112,7 +112,7 @@ alternatives.
 the node's entire dataset, and its restart rejoins empty under the same
 identity.
 
-That is the harshest recovery scenario replication ever faces — everything
+That is the harshest recovery scenario replication ever faces - everything
 must come back through quorum intersection, hinted handoff, and anti-entropy,
 with SWIM incarnation refutation reclaiming the node's identity. Disk
 recovery paths are already covered at high volume by the store's randomized
@@ -123,23 +123,23 @@ model test and end-to-end by the fault harness.
 Kept here in the spirit of the [fault harness's findings
 list](fault-injection.md#findings-the-harness-surfaced):
 
-8. **Member snapshots were shared pointers** — *fixed by copy-on-read.*
+8. **Member snapshots were shared pointers** - *fixed by copy-on-read.*
    `MemberList.Get/GetAll/GetAlive` returned pointers to the internal member
    structs, which every mutator (heartbeat increments, suspect/dead verdicts,
-   merges) writes in place under the list's lock. Readers outside the lock —
+   merges) writes in place under the list's lock. Readers outside the lock -
    the gossip round marshaling the member list, the stale checker, the ring's
-   health filter, coordinator handlers — raced with every status change. The
+   health filter, coordinator handlers - raced with every status change. The
    simulation harness's first `-race` run caught it (goroutine counts in one
    process finally let the detector see gossip and the data path
    simultaneously); process-level tests could never have. The getters now
    return snapshot copies, pinned by a concurrent-hammer regression test.
-9. **Version collision on retry from a stale base** — *fixed by raising the
+9. **Version collision on retry from a stale base** - *fixed by raising the
    coordinator's counter to its local high-water mark before incrementing.*
    A coordinator derived a write's version purely from the client-supplied
    clocks plus its own increment, so a client retrying from a stale base
    through the same coordinator minted the *exact version of the earlier
    attempt* for a different value. Equal clocks are treated as idempotent
-   duplicates everywhere — merge, read repair, anti-entropy — so replicas
+   duplicates everywhere - merge, read repair, anti-entropy - so replicas
    that held the first write dropped the second while the rest applied it:
    a permanent divergence repair can never fix, and in the dominated
    variant an acknowledged write was silently dropped cluster-wide. A

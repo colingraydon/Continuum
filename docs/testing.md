@@ -86,7 +86,7 @@ generated fault schedule (partitions, isolation, drops, latency, crash with
 total state loss) and thousands of checked operations into a few seconds.
 Same invariants as the fault harness plus the porcupine check; failures
 replay by seed. Being in-process, `make sim-race` gives the race detector its
-only whole-system view — which is how finding #8 (shared member pointers) was
+only whole-system view - which is how finding #8 (shared member pointers) was
 caught. See [Simulation Testing](simulation.md).
 
 ## Benchmarks

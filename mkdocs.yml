@@ -1,10 +1,10 @@
 site_name: continuum
-site_description: A leaderless distributed key-value store in Go — consistent hashing, SWIM gossip, vector-clock replication, and an LSM engine. Built to be read.
+site_description: A leaderless distributed key-value store in Go - consistent hashing, SWIM gossip, vector-clock replication, and an LSM engine. Built to be read.
 site_url: https://colingraydon.github.io/Continuum/
 repo_url: https://github.com/colingraydon/Continuum
 repo_name: colingraydon/Continuum
 edit_uri: edit/main/docs/
-copyright: continuum — a distributed KV store in Go, for learning. MIT licensed.
+copyright: continuum - a distributed KV store in Go, for learning. MIT licensed.
 
 theme:
   name: material

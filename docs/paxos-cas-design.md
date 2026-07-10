@@ -12,9 +12,9 @@
 | ----- | ----- |
 | `internal/paxos` acceptor (ballots, prepare/accept/commit, persistent log with replay + compaction) | **implemented, tested** |
 | Coordinator round, replica HTTP endpoints, serial reads (`api/paxos.go`) | **implemented, tested** |
-| Fault/sim scenario flips to hard assertions | **done** — see the two implementation findings below |
+| Fault/sim scenario flips to hard assertions | **done** - see the two implementation findings below |
 
-Three safety refinements were forced by the flipped scenarios themselves —
+Three safety refinements were forced by the flipped scenarios themselves -
 all invisible to final-state checks and caught by the history checker
 within minutes of wiring:
 
@@ -27,7 +27,7 @@ within minutes of wiring:
    mutation forfeits 412.** The write's version is deterministic across
    attempts; if a rival round resurrects and commits attempt one's proposal
    while the coordinator saw only timeouts, the retry's prepare finds a
-   survivor with its exact version and value — that is success, not a
+   survivor with its exact version and value - that is success, not a
    conflict. Symmetrically, once anything was proposed, a failed
    precondition can no longer prove "no side effects" and degrades from 412
    to a retryable 503.
@@ -37,8 +37,8 @@ within minutes of wiring:
    every commit any promise reports. Without the filter, a proposal
    accepted by a sub-majority (typically only its own coordinator) whose
    round then lost was later mistaken for an in-flight decision and
-   re-proposed — under a higher ballot, at acceptors that had since
-   committed a newer value — forking history. Debris above every visible
+   re-proposed - under a higher ballot, at acceptors that had since
+   committed a newer value - forking history. Debris above every visible
    commit is genuinely undecidable-or-decided and safe to finish: if it was
    decided, its accept majority intersects the prepare majority reporting
    it.
@@ -59,7 +59,7 @@ The fix is the one Cassandra chose for lightweight transactions: no
 long-lived leader to fail over at all. Each CAS runs one **single-decree
 Paxos round** among the key's replica set. Any two rounds for a key must
 each gather a majority, and two majorities always share an acceptor, so no
-ring-view disagreement about *who coordinates* can fork history — the
+ring-view disagreement about *who coordinates* can fork history - the
 intersection property replaces the "everyone agrees on the primary"
 assumption. (Multi-Raft per token range was considered and rejected: leader
 lifecycles would have to be reconciled with vnode ownership churn, which is
@@ -72,7 +72,7 @@ system doesn't otherwise need.)
 
 `paxos.Ballot{Counter, Node}`, ordered by counter then node id (so two
 coordinators can never mint equal ballots). Coordinators mint counters from
-`max(unix-nanos, last-seen+1)` — a per-handler `atomic.Uint64` high-water
+`max(unix-nanos, last-seen+1)` - a per-handler `atomic.Uint64` high-water
 mark, folded with every rejection's ballot (`observeBallot`) so retries
 leapfrog the round that beat them.
 
@@ -97,7 +97,7 @@ replicas, count acks, self short-circuits to local calls.
    mutation on top of an unfinished decision is how updates get lost. The
    client's retry then observes the settled state.
 3. **Precondition.** Dominance-merge the committed entries from the
-   promises (`mergeResponses` — the freshest state any majority can
+   promises (`mergeResponses` - the freshest state any majority can
    prove). The write's version is `client clocks + coordinator's own
    increment`; it must strictly dominate (`HappensBefore`) every merged
    sibling, else 412 with no side effects (a persisted promise is the only
@@ -106,8 +106,8 @@ replicas, count acks, self short-circuits to local calls.
 4. **Propose** `Mutation{key, value, deleted, version.Clocks, ballot}` to
    all replicas; majority accepts required (rejection → observe ballot,
    retry loop).
-5. **Commit**: apply on every replica — a plain `store.Put/Delete` at the
-   mutation's version, which dominates and merges to one sibling — then
+5. **Commit**: apply on every replica - a plain `store.Put/Delete` at the
+   mutation's version, which dominates and merges to one sibling - then
    clear the acceptor's round. Failures get hints (anti-entropy is the
    backstop); **majority commit acks required before the 204** so serial
    reads can rely on intersection. Partial commit → 503 (outcome unknown,
@@ -124,7 +124,7 @@ session clock header).
 The in-flight completion is not optional. A round accepted by a majority
 but committed to one replica is *decided*; a plain quorum read that
 happens to include that replica shows the new value, and a later one that
-misses it shows the old — a read regression porcupine will flag. Prepare
+misses it shows the old - a read regression porcupine will flag. Prepare
 intersects the accept majority, so the serial read always learns of the
 decision and finishes it before answering.
 
@@ -141,7 +141,7 @@ clock merges as an idempotent write and is dropped.
   replying (own append-only log via the `wal` package, replayed and
   compacted to one record per key on open). A promise a crash can revoke
   is how two disjoint majorities accept conflicting values. Memory-only
-  acceptors are only safe where the store is memory-only too — which is
+  acceptors are only safe where the store is memory-only too - which is
   why the *simulation* harness (crash = total state loss by design) keeps
   its post-crash CAS check in detector mode, while the fault harness
   (DATA_DIR set) flips to a hard assertion.
@@ -152,12 +152,12 @@ clock merges as an idempotent write and is dropped.
 - **412 vs races.** The precondition check runs between prepare and
   propose with no lock; the ballot machinery is what serializes. A rival
   that prepares a higher ballot in that window makes our propose fail, and
-  the retry re-reads state — the check never needs the store mutex.
+  the retry re-reads state - the check never needs the store mutex.
 - **Remaining (narrower) window.** Majorities are taken over each
   coordinator's *view* of the replica set. Two views that disagree so much
   that disjoint "majorities" exist (e.g. `{A,B,C}` vs `{B,C,D}` picking
   `{A,B}` and `{C,D}`) could still fork. This needs simultaneous ring-view
-  divergence *and* pathological quorum selection inside one round — far
+  divergence *and* pathological quorum selection inside one round - far
   narrower than disagreeing about a single primary. State it honestly in
   the docs; the detector scenarios are the empirical check.
 - **Mixed workloads.** Non-CAS writes to a CAS key still merge as
@@ -194,7 +194,7 @@ was reverted in favor of this document; it re-derives in a session.
    `internal/store/cas_test.go` (the precondition moves to the
    coordinator against quorum-merged state).
 6. **Test rework**: `api/cas_session_test.go` rewrites to paxos semantics
-   — a single-node RF=1 handler is a majority of one, so
+   - a single-node RF=1 handler is a majority of one, so
    insert/overwrite/412/delete flows test the full round in-process;
    forwarding/mismatch tests are deleted with the code. New unit tests:
    ballot dueling (two handlers, shared acceptors), resurrection of an

@@ -79,7 +79,7 @@ GET /keys/profile?consistency=one
 GET /keys/lock-owner?consistency=serial
 ```
 
-An unrecognized level returns 400 without any side effect (`serial` on a write is rejected the same way — writes wanting serial semantics use `?cas=true`). Absent, the process default applies. Like the configured W/R, `one`/`quorum`/`all` are clamped to the currently available replica set, so `all` means "all current replicas", not a hard durability floor — see [Replication](replication.md). A `serial` read instead requires a true majority of the key's replica set and fails with a retryable 503 without one; it observes every decided CAS round through majority intersection and finishes any in-flight round before answering. See [Client Consistency](client-consistency.md).
+An unrecognized level returns 400 without any side effect (`serial` on a write is rejected the same way - writes wanting serial semantics use `?cas=true`). Absent, the process default applies. Like the configured W/R, `one`/`quorum`/`all` are clamped to the currently available replica set, so `all` means "all current replicas", not a hard durability floor - see [Replication](replication.md). A `serial` read instead requires a true majority of the key's replica set and fails with a retryable 503 without one; it observes every decided CAS round through majority intersection and finishes any in-flight round before answering. See [Client Consistency](client-consistency.md).
 
 **Conditional writes (CAS)**
 ```
@@ -114,7 +114,7 @@ Ordered prefix enumeration across the whole cluster: the coordinator fans a loca
 }
 ```
 
-An empty `next` means the scan is complete. If any alive node fails to respond the scan returns 503 rather than a partial result. With `X-Proxied-From` set, the endpoint returns the node-local scan (raw sibling sets, tombstones included) — the internal format the coordinator consumes. See [Range Scans](range-scans.md) for the merge and pagination semantics.
+An empty `next` means the scan is complete. If any alive node fails to respond the scan returns 503 rather than a partial result. With `X-Proxied-From` set, the endpoint returns the node-local scan (raw sibling sets, tombstones included) - the internal format the coordinator consumes. See [Range Scans](range-scans.md) for the merge and pagination semantics.
 
 ### Nodes
 
@@ -250,7 +250,7 @@ Applies a batch of entries to the local store. The replica merges each entry thr
 
 ### Hinted Handoff
 
-Hint delivery has no HTTP endpoint. It is triggered internally - by the gossip `onChange` callback when a node transitions to alive, and by a periodic sweep (`HINT_DELIVERY_INTERVAL_MS`) that delivers to any currently-alive target: the coordinator drains its buffered hints for that node and replays them as replica sub-writes (`PUT`/`DELETE /keys/:key` with `X-Proxied-From` set). Hints that fail to deliver are re-buffered with their original TTL.
+Hint delivery has no HTTP endpoint. It is triggered internally two ways: by the gossip `onChange` callback when a node transitions to alive, and by a periodic sweep (`HINT_DELIVERY_INTERVAL_MS`) that delivers to any currently-alive target. In either case the coordinator drains its buffered hints for that node and replays them as replica sub-writes (`PUT`/`DELETE /keys/:key` with `X-Proxied-From` set). Hints that fail to deliver are re-buffered with their original TTL.
 
 ## Prometheus Metrics
 

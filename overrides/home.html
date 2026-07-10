@@ -7,6 +7,10 @@
   use Material's default templates. Everything is scoped under `.cx-home`.
 #}
 
+{# the landing page is the brand itself, so the browser tab is just the name,
+   not Material's default "{page title} - {site name}" (which doubles it up). #}
+{% block htmltitle %}<title>continuum</title>{% endblock %}
+
 {% block styles %}
   {{ super() }}
   <style>
@@ -163,7 +167,11 @@
     .cx-home .legend { display: flex; gap: 0.9rem; font-family: var(--cx-font-mono); font-size: 0.7rem; color: var(--cx-ink-soft); }
     .cx-home .legend span { display: inline-flex; align-items: center; gap: 0.35rem; }
     .cx-home .legend i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-    .cx-home .readout { font-family: var(--cx-font-mono); font-size: 0.72rem; color: var(--cx-ink-faint); min-height: 1.1em; }
+    /* fixed two-line height: the readout text changes every animation cycle, and on
+       narrower widths the longer routes wrap to a second line. Because the figure sits
+       in a vertically centered hero grid, a height change here re-centers the whole
+       figure and the ring appears to jump. Reserving two lines keeps it stable. */
+    .cx-home .readout { font-family: var(--cx-font-mono); font-size: 0.72rem; color: var(--cx-ink-faint); line-height: 1.35; height: 2.7em; overflow: hidden; }
     .cx-home .readout b { color: var(--cx-signal); font-weight: 600; }
     .cx-home .readout .k { color: var(--cx-ink); }
 
@@ -353,7 +361,7 @@
           <p>Read repair fixes stale replicas inline; hinted handoff replays missed writes; Merkle-tree anti-entropy is the slow, thorough backstop.</p>
         </div>
       </div>
-      <p class="path-note">Reads run the same ring in reverse: fan out to the replicas, wait for <b>R</b> responses, merge siblings, and repair any replica that came back stale. Clients that need more can opt into <b>conditional writes</b> or a <b>session clock</b> for read-your-writes.</p>
+      <p class="path-note">Reads run the same ring in reverse: fan out to the replicas, wait for <b>R</b> responses, merge siblings, and repair any replica that came back stale. Clients that need more can opt into <b>linearizable conditional writes</b>, each a per-key <b>Paxos round</b>, or a <b>session clock</b> for read-your-writes.</p>
     </section>
 
     <section class="wrap band" id="docs">
@@ -403,7 +411,10 @@
             <li><a href="{{ 'operations/' | url }}"><span class="t">Operations</span><span class="f">operations.md</span></a></li>
             <li><a href="{{ 'benchmarks/' | url }}"><span class="t">Benchmarks</span><span class="f">benchmarks.md</span></a></li>
             <li><a href="{{ 'fault-injection/' | url }}"><span class="t">Fault Injection</span><span class="f">fault-injection.md</span></a></li>
+            <li><a href="{{ 'history-checking/' | url }}"><span class="t">History Checking</span><span class="f">history-checking.md</span></a></li>
+            <li><a href="{{ 'simulation/' | url }}"><span class="t">Simulation Testing</span><span class="f">simulation.md</span></a></li>
             <li><a href="{{ 'testing/' | url }}"><span class="t">Testing</span><span class="f">testing.md</span></a></li>
+            <li><a href="{{ 'paxos-cas-design/' | url }}"><span class="t">Design: Paxos CAS</span><span class="f">paxos-cas-design.md</span></a></li>
           </ul>
         </div>
       </div>

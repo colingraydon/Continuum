@@ -10,12 +10,12 @@
 The fault harness's original invariants sample the system's final state:
 after faults heal, the last acknowledged write per key must be visible
 (durability) and replicas must agree (convergence). Those checks say nothing
-about what clients *observed while the fault was live* — a history can end
+about what clients *observed while the fault was live* - a history can end
 converged and still have served an unserializable interleaving along the way.
 
 History checking closes that gap for the one code path that claims strong
 semantics: conditional writes. A workload of racing CAS clients records every
-operation — input, output, invocation time, response time — and a
+operation - input, output, invocation time, response time - and a
 linearizability checker then searches for a sequential ordering of those
 operations, consistent with real time, that a CAS register could have
 executed. If none exists, the history is a proof of a consistency violation,
@@ -53,12 +53,12 @@ value-equality precondition the model checks coincide.
 
 ### Unknown outcomes
 
-A CAS that times out or returns 5xx may still have committed — a 503 for
+A CAS that times out or returns 5xx may still have committed - a 503 for
 missed write quorum is returned *after* the primary's local commit, and a
 request stuck in a hung node's kernel buffer can apply seconds later. The
 checker handles these with the standard open-interval technique: the
 operation's return time is pushed past the end of the history, so the search
-may linearize it at any point after its call — including after every observed
+may linearize it at any point after its call - including after every observed
 read, which is observationally identical to it never happening. A 412 needs
 no such treatment: it guarantees no side effects.
 
@@ -79,13 +79,13 @@ acknowledged write served stale reads and accepted a CAS from the superseded
 value, forking history. The diagnosis pass reports three mechanical
 signatures of that root cause alongside the porcupine visualization:
 
-- **forked generations** — two acknowledged CAS writes from the same expected
+- **forked generations** - two acknowledged CAS writes from the same expected
   value;
-- **stale reads** — a value observed after the CAS that replaced it was
+- **stale reads** - a value observed after the CAS that replaced it was
   acknowledged (values never repeat, so this is unambiguous);
-- **conflict reads** — the forked siblings later surfacing to a client.
+- **conflict reads** - the forked siblings later surfacing to a client.
 
-The scenarios ran as detectors — logging violations instead of failing —
+The scenarios ran as detectors - logging violations instead of failing -
 until [paxos-backed CAS](client-consistency.md) closed the window; the
 partition scenario became a hard assertion, and the failover scenario
 immediately surfaced the *next* gap (finding #10: a downtime-gate wipe
@@ -109,7 +109,7 @@ round from a dead one's leftovers).
 Linearizability is the contract CAS implies and the strongest claim the
 system makes; checking it there turns "CAS gives lock-like semantics" into a
 machine-verified property. The default path deliberately trades that for
-availability — checking it against a register model would only re-discover
+availability - checking it against a register model would only re-discover
 that design decision as a "violation".
 
 **Tradeoff:** Session guarantees (read-your-writes, monotonic reads) are
@@ -137,8 +137,8 @@ exposure: any regression visible without churn still fails hard.
 
 ### Client-observed histories only
 
-**Choice:** The checker sees exactly what clients saw — status codes, bodies,
-and wall-clock windows — with no instrumentation inside the store or the
+**Choice:** The checker sees exactly what clients saw - status codes, bodies,
+and wall-clock windows - with no instrumentation inside the store or the
 coordinator.
 
 That is what makes a violation meaningful: it is a client-visible consistency
@@ -148,7 +148,7 @@ system identical to the shipped one.
 
 **Tradeoff:** Diagnosis has to be reconstructed from the outside, which is
 why the harness pairs every violation with the fork/stale-read scan, the
-porcupine visualization, and a raw JSON dump of the history —
+porcupine visualization, and a raw JSON dump of the history -
 `go run ./cmd/histbisect <dump.json>` then binary-searches each key's
 subhistory for the minimal failing prefix, which is how the false-412
 retry bug in the paxos wiring was isolated.
