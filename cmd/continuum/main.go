@@ -38,6 +38,7 @@ type config struct {
 	syncInterval         time.Duration
 	hintDeliveryInterval time.Duration
 	selfWeight           float64
+	selfZone             string
 	dataDir              string
 	memtableMaxBytes     int64
 	blockCacheBytes      int64
@@ -122,6 +123,7 @@ func loadConfig() config {
 		syncInterval:         getEnvDurationMs("SYNC_INTERVAL_MS", 30*time.Second),
 		hintDeliveryInterval: getEnvDurationMs("HINT_DELIVERY_INTERVAL_MS", 30*time.Second),
 		selfWeight:           getEnvFloat64("SELF_WEIGHT", 1.0),
+		selfZone:             getEnvString("SELF_ZONE", ""),
 		dataDir:              getEnvString("DATA_DIR", ""),
 		memtableMaxBytes:     int64(getEnvPositiveInt("MEMTABLE_MAX_BYTES", 16<<20)),
 		blockCacheBytes:      int64(getEnvInt("BLOCK_CACHE_BYTES", 16<<20)), // <= 0 disables the cache
@@ -146,7 +148,7 @@ func makeMemberChangeCallback(r *ring.Ring, hptr *atomic.Pointer[api.Handler]) f
 		log.Printf("member %s status changed to %s", m.ID, status)
 		switch status {
 		case gossip.MemberAlive:
-			r.AddWeightedNode(m.ID, m.Address, m.Weight)
+			r.AddZonedNode(m.ID, m.Address, m.Zone, m.Weight)
 			if h := hptr.Load(); h != nil {
 				go h.DeliverHints(m.ID, m.Address)
 			}
@@ -328,6 +330,9 @@ func main() {
 
 	ml := gossip.NewMemberList(cfg.selfID, cfg.selfAddress, makeMemberChangeCallback(r, &hptr))
 	ml.SetSelfWeight(cfg.selfWeight)
+	if cfg.selfZone != "" {
+		ml.SetSelfZone(cfg.selfZone)
+	}
 	ml.SetSelfGossipAddr(cfg.gossipAdvertise)
 	if cfg.dataDir != "" {
 		restorePersistedIncarnation(cfg.dataDir, ml)
@@ -365,7 +370,7 @@ func main() {
 	}
 
 	// add self to ring
-	r.AddWeightedNode(cfg.selfID, cfg.selfAddress, cfg.selfWeight)
+	r.AddZonedNode(cfg.selfID, cfg.selfAddress, cfg.selfZone, cfg.selfWeight)
 
 	_, httpPort, err := net.SplitHostPort(cfg.selfAddress)
 	if err != nil {

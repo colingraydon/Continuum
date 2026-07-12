@@ -49,7 +49,7 @@ flowchart TD
 
 | Layer | Package | Role |
 | ----- | ------- | ---- |
-| Hash Ring | `internal/ring` | Routes keys to nodes via consistent hashing |
+| Hash Ring | `internal/ring` | Routes keys to nodes via consistent hashing, spreading replicas across failure-domain zones |
 | Gossip | `internal/gossip` | Membership, failure detection, cluster convergence |
 | KV Store | `internal/store` | LSM storage engine: memtable with vector clock versioning, flushes to SSTables, merged reads across generations |
 | WAL + SSTables | `internal/wal`, `internal/sstable` | Append-only log with CRC framing + immutable sorted tables with bloom filters; recovery opens tables and replays the WAL tail |
@@ -67,7 +67,7 @@ A `PUT /keys/:key` call flows like this:
 1. `metricsMiddleware` records latency and request count
 2. `PutKey` handler decodes `{"value": "...", "clocks": {...}}`
 3. The handler increments its own vector clock entry and writes to the local `Store`. With `DATA_DIR` set, the write is appended to the WAL and fsynced before the in-memory state is modified; a fsync failure returns 503 without fan-out.
-4. `ring.GetHealthyReplicationNodes(key, factor)` returns the first N *healthy* nodes clockwise (sloppy quorum): unhealthy home replicas are skipped in favor of substitutes, and each skipped intended owner gets a hint
+4. `ring.GetHealthyReplicationNodes(key, factor)` returns the first N *healthy* nodes clockwise, spread across failure-domain zones when nodes advertise `SELF_ZONE` (sloppy quorum): unhealthy home replicas are skipped in favor of substitutes, and each skipped intended owner gets a hint
 5. Goroutines fan the write to each non-self replica with `X-Proxied-From` set
 6. The coordinator waits for W acks - self counts as one; W is the process default or the request's `?consistency=` level - and returns 204 on quorum or 503 if quorum cannot be reached
 7. In-flight goroutines that hadn't reported when quorum was met are drained by a background goroutine, which records hints for any failures

@@ -5,6 +5,7 @@ import "math"
 type NodeStats struct {
 	NodeID     string  `json:"node_id"`
 	Address    string  `json:"address"`
+	Zone       string  `json:"zone,omitempty"`
 	VNodeCount int     `json:"vnode_count"`
 	KeyCount   int     `json:"key_count"`
 	Percentage float64 `json:"percentage"`
@@ -52,6 +53,7 @@ func (r *Ring) GetStats() RingStats {
 		distribution = append(distribution, NodeStats{
 			NodeID:     id,
 			Address:    node.Address,
+			Zone:       node.Zone,
 			VNodeCount: count,
 			KeyCount:   keyCount,
 			Percentage: percentage,
