@@ -161,7 +161,7 @@ func (ml *MemberList) SetIncarnationSink(fn func(uint64)) {
 // via POST /nodes, or an entry from a peer that has not yet heard the member's
 // own gossip) would otherwise keep its empty zone and default weight on the
 // ring forever.
-func (ml *MemberList) notifyMemberChange(m *Member, prev *Member) {
+func (ml *MemberList) notifyMemberChange(m, prev *Member) {
 	if ml.onChange == nil {
 		return
 	}

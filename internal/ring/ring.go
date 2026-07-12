@@ -144,6 +144,15 @@ func (r *Ring) walkDistinct(start uint32, visit func(*Node) bool) {
 // shrinks just because the cluster has fewer zones than replicas. Unzoned
 // nodes (Zone == "") never conflict. Must be called with r.mu held.
 func (r *Ring) walkRing(hash uint32, factor int) []*Node {
+	// Callers clamp factor, but re-clamp here: factor originates in request
+	// bodies (POST /replicate), and this bounds the allocation below even if
+	// a future caller forgets.
+	if factor <= 0 {
+		return nil
+	}
+	if factor > len(r.nodes) {
+		factor = len(r.nodes)
+	}
 	result := make([]*Node, 0, factor)
 	usedZones := make(map[string]bool)
 	var zoneSkipped []*Node
@@ -240,9 +249,6 @@ func (r *Ring) GetHealthyReplicationNodes(key string, factor int) (nodes, skippe
 	}
 
 	hash := computeHash(key)
-	healthy := func(n *Node) bool {
-		return r.healthFilter == nil || r.healthFilter(n.ID)
-	}
 
 	// Intended owners come from the zone-aware walk, ignoring health: the
 	// owner set must be what every node would compute, so hints buffered for
@@ -252,7 +258,7 @@ func (r *Ring) GetHealthyReplicationNodes(key string, factor int) (nodes, skippe
 	taken := make(map[string]bool, len(owners))
 	for _, n := range owners {
 		taken[n.ID] = true
-		if healthy(n) {
+		if r.isHealthy(n) {
 			nodes = append(nodes, n)
 			usedZones[n.Zone] = true
 		} else {
@@ -262,20 +268,30 @@ func (r *Ring) GetHealthyReplicationNodes(key string, factor int) (nodes, skippe
 	if len(skipped) == 0 {
 		return nodes, nil
 	}
+	return r.fillSubstitutes(hash, factor, nodes, taken, usedZones), skipped
+}
 
-	// Substitutes for the unhealthy owners: healthy non-owners in ring order,
-	// zones the healthy set does not already cover first, so a rack outage
-	// does not collapse the write set into the surviving owners' zones.
+// isHealthy reports whether n passes the health filter; a ring without a
+// filter treats every node as healthy. Must be called with r.mu held.
+func (r *Ring) isHealthy(n *Node) bool {
+	return r.healthFilter == nil || r.healthFilter(n.ID)
+}
+
+// fillSubstitutes tops nodes up to factor with healthy non-owners in ring
+// order, zones the healthy set does not already cover first, so a rack outage
+// does not collapse the write set into the surviving owners' zones. Must be
+// called with r.mu held.
+func (r *Ring) fillSubstitutes(hash uint32, factor int, nodes []*Node, taken, usedZones map[string]bool) []*Node {
 	var candidates []*Node
 	r.walkDistinct(hash, func(n *Node) bool {
-		if !taken[n.ID] && healthy(n) {
+		if !taken[n.ID] && r.isHealthy(n) {
 			candidates = append(candidates, n)
 		}
 		return true
 	})
 	for _, n := range candidates {
 		if len(nodes) == factor {
-			return nodes, skipped
+			return nodes
 		}
 		if n.Zone == "" || !usedZones[n.Zone] {
 			usedZones[n.Zone] = true
@@ -292,7 +308,7 @@ func (r *Ring) GetHealthyReplicationNodes(key string, factor int) (nodes, skippe
 			nodes = append(nodes, n)
 		}
 	}
-	return nodes, skipped
+	return nodes
 }
 
 func (r *Ring) NodeCount() int {
