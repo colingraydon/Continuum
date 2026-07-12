@@ -10,7 +10,7 @@ The replication layer coordinates writes and reads across multiple nodes. Any no
 
 ### Replica Set Selection (Sloppy Quorum)
 
-`ring.GetHealthyReplicationNodes(key, replicationFactor)` walks clockwise from the key's ring position collecting the first N distinct nodes that gossip currently considers alive. When a strict replica is suspect or dead-but-still-seated, the walk skips it and pulls in the next healthy node as a substitute - Dynamo's sloppy quorum. Each skipped node is reported as an intended owner so the coordinator can buffer a hint for it. With every strict replica healthy, the result is exactly the strict set. Bootstrapping nodes are excluded from the read replica set but still accept replica sub-requests.
+`ring.GetHealthyReplicationNodes(key, replicationFactor)` walks clockwise from the key's ring position collecting the first N distinct nodes that gossip currently considers alive. When nodes advertise a failure-domain zone (`SELF_ZONE`), the walk spreads the intended owners across distinct zones first, so losing one rack or availability zone costs at most one replica of any key (see [Ring](ring.md)). When a strict replica is suspect or dead-but-still-seated, the walk skips it and pulls in the next healthy node as a substitute - Dynamo's sloppy quorum - preferring a substitute from a zone the healthy set does not already cover. Each skipped node is reported as an intended owner so the coordinator can buffer a hint for it. With every strict replica healthy, the result is exactly the strict set. Bootstrapping nodes are excluded from the read replica set but still accept replica sub-requests.
 
 ### Write Path
 

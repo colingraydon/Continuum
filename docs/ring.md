@@ -6,7 +6,7 @@
 
 The ring owns one responsibility - mapping keys to nodes with O(log n) lookups and minimal key movement when the cluster topology changes. It has no knowledge of HTTP, gossip, or storage.
 
-Membership is driven entirely by the gossip layer through a callback registered in `main.go`. The ring is never mutated directly by any other package. When a node joins, dies, or recovers, gossip fires `AddWeightedNode` or `RemoveNode` on the ring - the ring has no opinion on why.
+Membership is driven entirely by the gossip layer through a callback registered in `main.go`. The ring is never mutated directly by any other package. When a node joins, dies, or recovers, gossip fires `AddZonedNode` or `RemoveNode` on the ring - the ring has no opinion on why.
 
 ## How It Works
 
@@ -42,7 +42,15 @@ A node with `SELF_WEIGHT=2.0` gets twice as many vnodes as a default node and ha
 
 `GetReplicationNodes(key, n)` returns N distinct physical nodes clockwise from a key's ring position. It walks forward through vnodes, collecting physical nodes, skipping vnodes that belong to already-collected nodes, until N distinct nodes are found or the ring is exhausted.
 
-`GetHealthyReplicationNodes(key, n)` is the sloppy-quorum variant the coordinator read/write paths use: the same walk, but nodes failing the health filter are skipped in favor of the next healthy nodes, and the skipped nodes are returned separately as the intended owners to hint. With no health filter installed it behaves identically to `GetReplicationNodes`.
+When nodes carry zones (see below), the walk is zone-aware: a node whose zone is already represented in the set is passed over while unvisited nodes might still bring new zones. The first clockwise owner is always taken, so the primary for a key never changes because of zones. If the walk exhausts every node before the set fills - fewer zones than replicas - the passed-over nodes take the remaining slots in ring order, so the replica set never shrinks below `min(n, nodeCount)`.
+
+`GetHealthyReplicationNodes(key, n)` is the sloppy-quorum variant the coordinator read/write paths use. The intended owners come from the zone-aware walk ignoring health, so every node agrees on who owns a key and hints land on real owners. Unhealthy owners are then replaced by healthy substitutes drawn from the rest of the ring in walk order, preferring zones the healthy set does not already cover, and the unhealthy owners are returned separately as the nodes to hint. With no health filter installed it behaves identically to `GetReplicationNodes`.
+
+### Zones
+
+`AddZonedNode(id, address, zone, weight)` labels a node with the failure domain it lives in - a rack, an availability zone, or a data center, whatever granularity a deployment cares about losing at once. The label comes from the node's own `SELF_ZONE` setting and travels to every other node through gossip membership, so each node's local ring computes the same zone-aware placement without any coordination.
+
+An empty zone means unzoned: the node fills any slot and never conflicts with another node. A cluster that sets no zones anywhere gets exactly the pre-zone placement, and a mixed cluster (some nodes zoned, some not) degrades gracefully rather than failing.
 
 ### Key Counters
 
@@ -50,7 +58,13 @@ Each physical node carries an atomic `int64` key counter. It increments on each 
 
 ## Design Decisions
 
-### Red-Black Tree over a Sorted Slice
+### Zone Spreading in the Walk over a Placement Table
+
+**Choice:** Zone awareness is a filter applied during the clockwise walk - defer nodes whose zone is already represented, fall back to them if zones run out - rather than a separately maintained placement table.
+
+This is the shape of Cassandra's NetworkTopologyStrategy: placement stays a pure function of the ring plus membership metadata, so any node can compute any key's replica set locally and all nodes agree as long as gossip has converged. A placement table (explicit key-range-to-replica assignments) would allow more balanced placement but needs its own replication, versioning, and repair story - the class of problem the consistent hash ring exists to avoid.
+
+**Tradeoff:** Zone-aware placement changes which nodes own which keys the moment zones are configured, exactly like adding a node does. Enabling zones on an existing cluster shifts replica sets, and anti-entropy must repair the moved ranges before the old copies are only found on non-owners. Deferred-then-fallback selection can also skew load toward zones with fewer nodes, since a small zone is picked once per set regardless of its size; balanced zones keep this moot.
 
 **Choice:** `emirpasic/gods` Red-Black Tree, keyed by vnode hash.
 
@@ -92,7 +106,7 @@ The ring receives a callback at construction time. On every topology change, it 
 
 ## See Also
 
-- [Gossip](gossip.md) - fires `AddWeightedNode` and `RemoveNode` on membership changes
+- [Gossip](gossip.md) - fires `AddZonedNode` and `RemoveNode` on membership changes
 - [Replication](replication.md) - calls `GetHealthyReplicationNodes` to build replica sets for reads and writes
 - [Anti-Entropy](antientropy.md) - queries the ring for vnode ranges to sync
-- [Operations](operations.md) - `REPLICAS` and `SELF_WEIGHT` env vars
+- [Operations](operations.md) - `REPLICAS`, `SELF_WEIGHT`, and `SELF_ZONE` env vars

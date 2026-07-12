@@ -52,6 +52,11 @@ type Member struct {
 	Status        MemberStatus
 	Bootstrapping bool
 	Weight        float64 // relative capacity; 0 is treated as 1.0 by the ring
+	// Zone is the failure domain (rack, availability zone, DC) this member
+	// lives in; replica placement spreads each key's replicas across zones.
+	// Empty means unzoned. Older nodes drop the field from gossip, so a mixed
+	// cluster degrades to per-node placement rather than failing.
+	Zone string
 }
 
 type MemberList struct {
@@ -105,6 +110,18 @@ func (ml *MemberList) SetSelfWeight(weight float64) {
 	ml.self.UpdatedAt = time.Now()
 }
 
+// SetSelfZone sets this node's failure-domain zone and increments its
+// heartbeat so the change propagates to peers on the next gossip round. Other
+// nodes use the zone to spread replica sets across failure domains on their
+// local rings.
+func (ml *MemberList) SetSelfZone(zone string) {
+	ml.mu.Lock()
+	defer ml.mu.Unlock()
+	ml.self.Zone = zone
+	ml.self.Heartbeat++
+	ml.self.UpdatedAt = time.Now()
+}
+
 func (ml *MemberList) IncrementHeartbeat() {
 	ml.mu.Lock()
 	defer ml.mu.Unlock()
@@ -136,13 +153,27 @@ func (ml *MemberList) SetIncarnationSink(fn func(uint64)) {
 	ml.persistIncarnation = fn
 }
 
-func (ml *MemberList) notifyMemberChange(m *Member, ok bool, prevStatus MemberStatus, wasBootstrapping bool) {
+// notifyMemberChange fires the onChange callback for a merged member. prev is
+// a snapshot of the entry the merge replaced, nil for a first sighting. Beyond
+// status transitions, a metadata change (zone, weight, address) on a member
+// that stays alive re-fires Alive: the ring only learns about members through
+// this callback, and a member first registered without metadata (a mesh stub
+// via POST /nodes, or an entry from a peer that has not yet heard the member's
+// own gossip) would otherwise keep its empty zone and default weight on the
+// ring forever.
+func (ml *MemberList) notifyMemberChange(m *Member, prev *Member) {
 	if ml.onChange == nil {
 		return
 	}
-	if !ok || prevStatus != m.Status {
+	if prev == nil || prev.Status != m.Status {
 		ml.onChange(m, m.Status)
-	} else if wasBootstrapping && !m.Bootstrapping {
+		return
+	}
+	if m.Status == MemberAlive &&
+		(prev.Zone != m.Zone || prev.Weight != m.Weight || prev.Address != m.Address) {
+		ml.onChange(m, MemberAlive)
+	}
+	if prev.Bootstrapping && !m.Bootstrapping {
 		ml.onChange(m, MemberBootstrapped)
 	}
 }
@@ -190,16 +221,16 @@ func (ml *MemberList) Merge(incoming []*Member) {
 		}
 		existing, ok := ml.members[m.ID]
 		if !ok || supersedes(m, existing) {
-			wasBootstrapping := ok && existing.Bootstrapping
-			prevStatus := MemberAlive
+			var prev *Member
 			if ok {
-				prevStatus = existing.Status
+				cp := *existing
+				prev = &cp
 			}
 			// Stamp with the local clock: the wire value is the sender's wall
 			// time, and the stale checker compares against our own clock.
 			m.UpdatedAt = time.Now()
 			ml.members[m.ID] = m
-			ml.notifyMemberChange(m, ok, prevStatus, wasBootstrapping)
+			ml.notifyMemberChange(m, prev)
 		}
 	}
 	afterInc := ml.self.Incarnation

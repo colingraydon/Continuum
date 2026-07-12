@@ -10,6 +10,7 @@ services:
       - SELF_ID=node1
       - SELF_ADDRESS=node1:8080
       - GOSSIP_PORT=8081
+      - SELF_ZONE=rack1
     networks:
       - continuum
 
@@ -22,6 +23,7 @@ services:
       - SELF_ID=node2
       - SELF_ADDRESS=node2:8080
       - GOSSIP_PORT=8081
+      - SELF_ZONE=rack2
       - SEED_NODES=node1:8080
     depends_on:
       - node1
@@ -37,6 +39,7 @@ services:
       - SELF_ID=node3
       - SELF_ADDRESS=node3:8080
       - GOSSIP_PORT=8081
+      - SELF_ZONE=rack3
       - SEED_NODES=node1:8080
     depends_on:
       - node1

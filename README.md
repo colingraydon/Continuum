@@ -13,7 +13,7 @@
 
 A distributed key-value store implementing the core data layer patterns from Cassandra and Dynamo - written in Go.
 
-Continuum maps keys to nodes with a consistent hash ring and tracks cluster membership through a gossip protocol, so there is no coordinator to elect or lose. Writes fan out to N replicas under a sloppy quorum whose consistency level is tunable per request, from one replica to all. Concurrent writes surface as vector clock siblings instead of being silently overwritten, and divergent replicas heal through three layers: inline read repair, event-driven hinted handoff, and background Merkle-tree anti-entropy.
+Continuum maps keys to nodes with a consistent hash ring and tracks cluster membership through a gossip protocol, so there is no coordinator to elect or lose. Writes fan out to N replicas spread across failure-domain zones (rack, AZ, DC) under a sloppy quorum whose consistency level is tunable per request, from one replica to all. Concurrent writes surface as vector clock siblings instead of being silently overwritten, and divergent replicas heal through three layers: inline read repair, event-driven hinted handoff, and background Merkle-tree anti-entropy.
 
 Set `DATA_DIR` and the store becomes an LSM engine. Every write goes through a CRC-checked write-ahead log whose fsyncs are batched across concurrent writers by group commit. The memtable flushes to immutable, bloom-filtered SSTables once it crosses a size threshold, and reads merge across generations. State survives restart, and the write path is no longer bound by RAM. Buffered hints get their own append-only log too, so writes owed to a down replica outlive a coordinator crash rather than leaning on anti-entropy alone.
 
@@ -134,7 +134,7 @@ make coverage  # HTML coverage report
 | Doc | Contents |
 | --- | -------- |
 | [Architecture](docs/architecture.md) | System diagram, layer map, write and read path narratives |
-| [Hash Ring](docs/ring.md) | RBT, murmur3, virtual nodes, weighted allocation, health filter |
+| [Hash Ring](docs/ring.md) | RBT, murmur3, virtual nodes, weighted allocation, zone-aware placement, health filter |
 | [Gossip](docs/gossip.md) | UDP transport, membership lifecycle, failure detection, convergence |
 | [Replication](docs/replication.md) | Vector clocks, sloppy quorum, per-request consistency levels, sibling surfacing, fan-out implementation |
 | [Anti-Entropy](docs/antientropy.md) | Merkle trees, bidirectional sync, tombstone GC safety argument, tree snapshots on clean shutdown |
@@ -179,6 +179,5 @@ make coverage  # HTML coverage report
 
 **Cluster and operations**
 
-- **Rack/DC-aware placement** - spread each key's replica set across failure domains instead of taking the next N distinct nodes on the ring
-- **Multi-DC replication** - per-DC replica placement and LOCAL_QUORUM consistency levels, with asynchronous cross-DC replication and its own repair story; stresses ring topology metadata, gossip, and quorum math at once
+- **Multi-DC replication** - building on zone-aware placement: per-DC replica counts and LOCAL_QUORUM consistency levels, with asynchronous cross-DC replication and its own repair story; stresses ring topology metadata, gossip, and quorum math at once
 - **Token-aware Go client** - a client library that hashes keys locally and talks directly to a replica, skipping the coordinator hop
