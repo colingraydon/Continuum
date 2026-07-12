@@ -33,6 +33,11 @@ const (
 	errNodeBootstrapping = "node is bootstrapping"
 	errNoNodes           = "no nodes available"
 	errLocalRead         = "local store read failed"
+	// maxReplicationFactor bounds the client-supplied factor on /replicate
+	// before it reaches the ring's slice allocation. The ring itself clamps
+	// to the node count, but that bound is not a constant, so this is the
+	// explicit ceiling for a value that arrives in a request body.
+	maxReplicationFactor = 1024
 )
 
 // HandlerConfig holds the scalar settings for a Handler.
@@ -1144,6 +1149,10 @@ func (h *Handler) GetReplicationNodes(w http.ResponseWriter, req *http.Request) 
 	}
 	if body.Factor < 1 {
 		http.Error(w, "factor must be at least 1", http.StatusBadRequest)
+		return
+	}
+	if body.Factor > maxReplicationFactor {
+		http.Error(w, "factor exceeds maximum allowed value", http.StatusBadRequest)
 		return
 	}
 	nodes := h.ring.GetReplicationNodes(body.Key, body.Factor)

@@ -376,6 +376,22 @@ func TestGetReplicationNodesInvalidFactor(t *testing.T) {
 	}
 }
 
+func TestGetReplicationNodesFactorAboveCap(t *testing.T) {
+	// Arrange
+	h := newTestHandler(t)
+	body := `{"key": "somekey", "factor": 1025}`
+	req := httptest.NewRequest(http.MethodPost, "/replicate", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+
+	// Act
+	h.GetReplicationNodes(w, req)
+
+	// Assert
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
 func TestGetReplicationNodesEmptyRing(t *testing.T) {
 	// Arrange
 	h := newTestHandler(t)
