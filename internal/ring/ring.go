@@ -49,6 +49,14 @@ func (r *Ring) AddNode(id, address string) {
 // count. A weight of 2.0 gives twice as many vnodes as the default; 0.5 gives half.
 // Weights <= 0 are treated as 1.0. The vnode count is always at least 1.
 func (r *Ring) AddWeightedNode(id, address string, weight float64) {
+	r.AddZonedNode(id, address, "", weight)
+}
+
+// AddZonedNode adds a node labeled with the failure-domain zone it lives in
+// (rack, availability zone, DC). Replica placement spreads each key's replica
+// set across distinct zones when it can; an empty zone leaves the node out of
+// that spreading entirely. Weight semantics match AddWeightedNode.
+func (r *Ring) AddZonedNode(id, address, zone string, weight float64) {
 	if weight <= 0 {
 		weight = 1.0
 	}
@@ -60,7 +68,14 @@ func (r *Ring) AddWeightedNode(id, address string, weight float64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	node := NewNode(id, address)
+	// Re-adding an existing node (a metadata refresh from gossip) must clear
+	// its old vnodes first: a lowered weight would otherwise leave orphaned
+	// vnodes in the tree beyond the new count.
+	if old, exists := r.nodes[id]; exists {
+		r.tree.Remove(old, r.vnodeCounts[id])
+	}
+
+	node := &Node{ID: id, Address: address, Zone: zone}
 	r.nodes[id] = node
 	r.vnodeCounts[id] = vnodes
 	r.keyCounts[id] = &atomic.Int64{}
@@ -84,68 +99,27 @@ func (r *Ring) RemoveNode(id string) {
 	r.onUpdate(len(r.nodes), r.tree.Tree.Size())
 }
 
-// walkRing walks the ring clockwise from hash, collecting up to factor unique
-// nodes. Must be called with r.mu held.
-func (r *Ring) walkRing(hash uint32, factor int) []*Node {
+// walkDistinct visits each distinct node in clockwise ring order, starting at
+// the first vnode with hash >= start and wrapping around, until visit returns
+// false or every node has been seen. Must be called with r.mu held.
+func (r *Ring) walkDistinct(start uint32, visit func(*Node) bool) {
 	seen := make(map[string]bool)
-	var result []*Node
 	it := r.tree.Tree.Iterator()
 
 	// Advance to the ceiling vnode (first hash >= target).
 	for it.Next() {
 		vnode := it.Value().(*VNode)
-		if vnode.Hash < hash {
-			continue
-		}
-		if !seen[vnode.Node.ID] {
-			seen[vnode.Node.ID] = true
-			result = append(result, vnode.Node)
-			if len(result) == factor {
-				return result
-			}
-		}
-		break
-	}
-
-	// Continue clockwise, wrapping around, until factor nodes are collected.
-	for len(result) < factor {
-		if !it.Next() {
-			// First() positions the iterator ON the lowest-hash vnode.
-			it.First()
-		}
-		vnode := it.Value().(*VNode)
-		if seen[vnode.Node.ID] {
+		if vnode.Hash < start {
 			continue
 		}
 		seen[vnode.Node.ID] = true
-		result = append(result, vnode.Node)
-	}
-	return result
-}
-
-// walkRingHealthy walks the ring clockwise from hash, returning the first
-// node that passes the health filter. Must be called with r.mu held.
-func (r *Ring) walkRingHealthy(hash uint32) (*Node, bool) {
-	seen := make(map[string]bool)
-	it := r.tree.Tree.Iterator()
-
-	// Advance to the ceiling vnode (first hash >= target).
-	for it.Next() {
-		vnode := it.Value().(*VNode)
-		if vnode.Hash < hash {
-			continue
-		}
-		if !seen[vnode.Node.ID] {
-			seen[vnode.Node.ID] = true
-			if r.healthFilter(vnode.Node.ID) {
-				r.keyCounts[vnode.Node.ID].Add(1)
-				return vnode.Node, true
-			}
+		if !visit(vnode.Node) {
+			return
 		}
 		break
 	}
 
-	// Continue clockwise, wrapping around, until a healthy node is found.
+	// Continue clockwise, wrapping around, until every node has been visited.
 	for len(seen) < len(r.nodes) {
 		if !it.Next() {
 			// First() positions the iterator ON the lowest-hash vnode.
@@ -156,12 +130,68 @@ func (r *Ring) walkRingHealthy(hash uint32) (*Node, bool) {
 			continue
 		}
 		seen[vnode.Node.ID] = true
-		if r.healthFilter(vnode.Node.ID) {
-			r.keyCounts[vnode.Node.ID].Add(1)
-			return vnode.Node, true
+		if !visit(vnode.Node) {
+			return
 		}
 	}
-	return nil, false
+}
+
+// walkRing walks the ring clockwise from hash, collecting up to factor unique
+// nodes spread across failure-domain zones: a node whose zone is already
+// represented in the set is passed over as long as unvisited nodes might still
+// bring new zones. If the walk exhausts every node before the set fills, the
+// passed-over nodes take the remaining slots in ring order, so the set never
+// shrinks just because the cluster has fewer zones than replicas. Unzoned
+// nodes (Zone == "") never conflict. Must be called with r.mu held.
+func (r *Ring) walkRing(hash uint32, factor int) []*Node {
+	// Callers clamp factor, but re-clamp here: factor originates in request
+	// bodies (POST /replicate), and this bounds the allocation below even if
+	// a future caller forgets.
+	if factor <= 0 {
+		return nil
+	}
+	if factor > len(r.nodes) {
+		factor = len(r.nodes)
+	}
+	result := make([]*Node, 0, factor)
+	usedZones := make(map[string]bool)
+	var zoneSkipped []*Node
+
+	r.walkDistinct(hash, func(n *Node) bool {
+		if n.Zone != "" && usedZones[n.Zone] {
+			zoneSkipped = append(zoneSkipped, n)
+			return true
+		}
+		usedZones[n.Zone] = true
+		result = append(result, n)
+		return len(result) < factor
+	})
+
+	for _, n := range zoneSkipped {
+		if len(result) == factor {
+			break
+		}
+		result = append(result, n)
+	}
+	return result
+}
+
+// walkRingHealthy walks the ring clockwise from hash, returning the first
+// node that passes the health filter. Must be called with r.mu held.
+func (r *Ring) walkRingHealthy(hash uint32) (*Node, bool) {
+	var found *Node
+	r.walkDistinct(hash, func(n *Node) bool {
+		if r.healthFilter(n.ID) {
+			found = n
+			return false
+		}
+		return true
+	})
+	if found == nil {
+		return nil, false
+	}
+	r.keyCounts[found.ID].Add(1)
+	return found, true
 }
 
 func (r *Ring) GetNode(key string) (*Node, bool) {
@@ -199,14 +229,14 @@ func (r *Ring) GetReplicationNodes(key string, factor int) []*Node {
 	return r.walkRing(computeHash(key), factor)
 }
 
-// GetHealthyReplicationNodes walks the ring clockwise from key's hash,
-// collecting the first factor distinct nodes that pass the health filter, and
-// separately returns the distinct unhealthy nodes passed over before the
-// healthy set filled — the intended owners whose slots the trailing healthy
-// nodes take over (sloppy quorum: the coordinator writes to the substitutes
-// and buffers a hint per skipped owner). With no health filter, or a fully
-// healthy replica set, the result is identical to GetReplicationNodes with an
-// empty skipped list.
+// GetHealthyReplicationNodes returns the healthy members of key's zone-aware
+// replica set, topped up with healthy substitutes for any unhealthy intended
+// owner, and separately returns those unhealthy owners - the nodes whose
+// slots the substitutes take over (sloppy quorum: the coordinator writes to
+// the substitutes and buffers a hint per skipped owner). Substitutes are
+// drawn in ring order, preferring zones the healthy set does not already
+// cover. With no health filter, or a fully healthy replica set, the result
+// is identical to GetReplicationNodes with an empty skipped list.
 func (r *Ring) GetHealthyReplicationNodes(key string, factor int) (nodes, skipped []*Node) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -219,39 +249,66 @@ func (r *Ring) GetHealthyReplicationNodes(key string, factor int) (nodes, skippe
 	}
 
 	hash := computeHash(key)
-	seen := make(map[string]bool)
-	consider := func(n *Node) {
-		if seen[n.ID] {
-			return
-		}
-		seen[n.ID] = true
-		if r.healthFilter == nil || r.healthFilter(n.ID) {
+
+	// Intended owners come from the zone-aware walk, ignoring health: the
+	// owner set must be what every node would compute, so hints buffered for
+	// an unhealthy owner land on the node that owns the key once it recovers.
+	owners := r.walkRing(hash, factor)
+	usedZones := make(map[string]bool)
+	taken := make(map[string]bool, len(owners))
+	for _, n := range owners {
+		taken[n.ID] = true
+		if r.isHealthy(n) {
 			nodes = append(nodes, n)
+			usedZones[n.Zone] = true
 		} else {
 			skipped = append(skipped, n)
 		}
 	}
+	if len(skipped) == 0 {
+		return nodes, nil
+	}
+	return r.fillSubstitutes(hash, factor, nodes, taken, usedZones), skipped
+}
 
-	it := r.tree.Tree.Iterator()
-	// Advance to the ceiling vnode (first hash >= target).
-	for it.Next() {
-		vnode := it.Value().(*VNode)
-		if vnode.Hash < hash {
-			continue
+// isHealthy reports whether n passes the health filter; a ring without a
+// filter treats every node as healthy. Must be called with r.mu held.
+func (r *Ring) isHealthy(n *Node) bool {
+	return r.healthFilter == nil || r.healthFilter(n.ID)
+}
+
+// fillSubstitutes tops nodes up to factor with healthy non-owners in ring
+// order, zones the healthy set does not already cover first, so a rack outage
+// does not collapse the write set into the surviving owners' zones. Must be
+// called with r.mu held.
+func (r *Ring) fillSubstitutes(hash uint32, factor int, nodes []*Node, taken, usedZones map[string]bool) []*Node {
+	var candidates []*Node
+	r.walkDistinct(hash, func(n *Node) bool {
+		if !taken[n.ID] && r.isHealthy(n) {
+			candidates = append(candidates, n)
 		}
-		consider(vnode.Node)
-		break
-	}
-	// Continue clockwise, wrapping around, until factor healthy nodes are
-	// collected or every node has been considered.
-	for len(nodes) < factor && len(seen) < len(r.nodes) {
-		if !it.Next() {
-			// First() positions the iterator ON the lowest-hash vnode.
-			it.First()
+		return true
+	})
+	for _, n := range candidates {
+		if len(nodes) == factor {
+			return nodes
 		}
-		consider(it.Value().(*VNode).Node)
+		if n.Zone == "" || !usedZones[n.Zone] {
+			usedZones[n.Zone] = true
+			taken[n.ID] = true
+			nodes = append(nodes, n)
+		}
 	}
-	return nodes, skipped
+	for _, n := range candidates {
+		if len(nodes) == factor {
+			break
+		}
+		if !taken[n.ID] {
+			taken[n.ID] = true
+			nodes = append(nodes, n)
+		}
+	}
+	return nodes
 }
 
 func (r *Ring) NodeCount() int {
