@@ -119,11 +119,14 @@ jobs:
       - name: Install benchstat
         run: go install golang.org/x/perf/cmd/benchstat@latest
       - name: Benchmark base
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.sha }}
         run: |
-          git checkout ${{ github.event.pull_request.base.sha }}
+          git checkout "$BASE_SHA"
           go mod download
           make bench-ci > /tmp/bench-base.txt || go test ./benchmarks/ -run 'XXX' -bench . -skip 'Durable|Cluster|StoreScan100|TombstoneGC|ManagerRebuild' -count=8 -benchtime=0.3s > /tmp/bench-base.txt
-          git checkout ${{ github.sha }}
+          git checkout "$HEAD_SHA"
       - name: Benchmark head
         run: |
           go mod download
