@@ -67,10 +67,14 @@ Two surfaces, both mandatory when relevant:
   deferred).
 - **`docs/*.md`** (the architectural docs) — update the doc for the subsystem you
   touched (`ring.md`, `replication.md`, `gossip.md`, `persistence.md`, …). A new
-  subsystem gets a **new doc**, added to the `nav:` in [`mkdocs.yml`](mkdocs.yml).
-  Non-trivial features get a **design doc** under `docs/` recording the decisions
-  and any deferred work up front (see [`docs/paxos-cas-design.md`](docs/paxos-cas-design.md)
-  for the shape).
+  subsystem gets a **new doc**. Non-trivial features get a **design doc** under
+  `docs/` recording the decisions and any deferred work up front (see
+  [`docs/paxos-cas-design.md`](docs/paxos-cas-design.md) for the shape).
+
+**Any new doc must be added to the website.** The site is built from the `nav:`
+tree in [`mkdocs.yml`](mkdocs.yml) — a doc file that isn't in `nav:` never
+appears on the published site, and `mkdocs build --strict` fails on it. So every
+new `docs/*.md` gets a `nav:` entry in the same PR.
 
 If a PR ships something partial (one slice of a larger feature), the docs must
 say what is **shipped** versus **planned** so they never overclaim.
@@ -92,7 +96,7 @@ The concrete changes, as bullets — the code, the config, the docs. Enough that
 reviewer knows where to look.
 
 ## Review help
-Where to start reading, the load-bearing or subtle parts, and anything you're
+Where to start reading, the subtle or high-risk parts, and anything you're
 unsure about or want a second opinion on. Point reviewers at what matters.
 
 ## Verification
@@ -116,6 +120,17 @@ diff. Each PR in the series should:
 
 Record the whole arc and any deferred optimizations in a design doc under `docs/`
 in the first PR, so the plan and its boundaries are visible from the start.
+
+## Dependencies
+
+Continuum runs on a **deliberately small** dependency set — most of it is the
+standard library. A new external dependency needs a **strong, stated reason**:
+prefer the standard library, then an existing dependency, and only then reach for
+something new. If you do add one, justify it in the PR — what it does, why the
+stdlib or a current dependency can't, and why this particular package (maturity,
+maintenance, license, footprint). "It's convenient" is not enough; pulling in a
+dependency to save a few lines usually isn't worth the supply-chain and
+maintenance cost. Expect this to be a review discussion.
 
 ## Commits
 
