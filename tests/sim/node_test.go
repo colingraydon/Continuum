@@ -126,7 +126,7 @@ func (c *simCluster) startNode(id string) *simNode {
 	ml := gossip.NewMemberList(id, n.httpAddr, func(m *gossip.Member, status gossip.MemberStatus) {
 		switch status {
 		case gossip.MemberAlive:
-			r.AddZonedNode(m.ID, m.Address, m.Zone, m.Weight)
+			r.AddZonedNodeDC(m.ID, m.Address, m.DC, m.Zone, m.Weight)
 			if h := hptr.Load(); h != nil {
 				go h.DeliverHints(m.ID, m.Address)
 			}

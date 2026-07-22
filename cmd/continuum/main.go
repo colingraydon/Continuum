@@ -39,6 +39,7 @@ type config struct {
 	hintDeliveryInterval time.Duration
 	selfWeight           float64
 	selfZone             string
+	selfDC               string
 	dataDir              string
 	memtableMaxBytes     int64
 	blockCacheBytes      int64
@@ -124,6 +125,7 @@ func loadConfig() config {
 		hintDeliveryInterval: getEnvDurationMs("HINT_DELIVERY_INTERVAL_MS", 30*time.Second),
 		selfWeight:           getEnvFloat64("SELF_WEIGHT", 1.0),
 		selfZone:             getEnvString("SELF_ZONE", ""),
+		selfDC:               getEnvString("SELF_DC", ""),
 		dataDir:              getEnvString("DATA_DIR", ""),
 		memtableMaxBytes:     int64(getEnvPositiveInt("MEMTABLE_MAX_BYTES", 16<<20)),
 		blockCacheBytes:      int64(getEnvInt("BLOCK_CACHE_BYTES", 16<<20)), // <= 0 disables the cache
@@ -148,7 +150,7 @@ func makeMemberChangeCallback(r *ring.Ring, hptr *atomic.Pointer[api.Handler]) f
 		log.Printf("member %s status changed to %s", m.ID, status)
 		switch status {
 		case gossip.MemberAlive:
-			r.AddZonedNode(m.ID, m.Address, m.Zone, m.Weight)
+			r.AddZonedNodeDC(m.ID, m.Address, m.DC, m.Zone, m.Weight)
 			if h := hptr.Load(); h != nil {
 				go h.DeliverHints(m.ID, m.Address)
 			}
@@ -161,6 +163,21 @@ func makeMemberChangeCallback(r *ring.Ring, hptr *atomic.Pointer[api.Handler]) f
 			}
 		}
 	}
+}
+
+// applySelfMetadata stamps this node's own membership entry with the capacity
+// and failure-domain metadata from config before gossip starts, so peers learn
+// it on the first exchange. Empty zone/DC labels are skipped so an unlabeled
+// node does not gossip a spurious metadata change.
+func applySelfMetadata(ml *gossip.MemberList, cfg config) {
+	ml.SetSelfWeight(cfg.selfWeight)
+	if cfg.selfZone != "" {
+		ml.SetSelfZone(cfg.selfZone)
+	}
+	if cfg.selfDC != "" {
+		ml.SetSelfDC(cfg.selfDC)
+	}
+	ml.SetSelfGossipAddr(cfg.gossipAdvertise)
 }
 
 // restorePersistedIncarnation loads this node's last gossip incarnation from
@@ -329,11 +346,7 @@ func main() {
 	var hptr atomic.Pointer[api.Handler]
 
 	ml := gossip.NewMemberList(cfg.selfID, cfg.selfAddress, makeMemberChangeCallback(r, &hptr))
-	ml.SetSelfWeight(cfg.selfWeight)
-	if cfg.selfZone != "" {
-		ml.SetSelfZone(cfg.selfZone)
-	}
-	ml.SetSelfGossipAddr(cfg.gossipAdvertise)
+	applySelfMetadata(ml, cfg)
 	if cfg.dataDir != "" {
 		restorePersistedIncarnation(cfg.dataDir, ml)
 	}
@@ -370,7 +383,7 @@ func main() {
 	}
 
 	// add self to ring
-	r.AddZonedNode(cfg.selfID, cfg.selfAddress, cfg.selfZone, cfg.selfWeight)
+	r.AddZonedNodeDC(cfg.selfID, cfg.selfAddress, cfg.selfDC, cfg.selfZone, cfg.selfWeight)
 
 	_, httpPort, err := net.SplitHostPort(cfg.selfAddress)
 	if err != nil {

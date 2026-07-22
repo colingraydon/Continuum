@@ -49,7 +49,7 @@ flowchart TD
 
 | Layer | Package | Role |
 | ----- | ------- | ---- |
-| Hash Ring | `internal/ring` | Routes keys to nodes via consistent hashing, spreading replicas across failure-domain zones |
+| Hash Ring | `internal/ring` | Routes keys to nodes via consistent hashing, spreading replicas across failure-domain zones (nodes also carry a data-center label, surfaced today; DC-aware placement is planned — see [multi-DC](multi-dc.md)) |
 | Gossip | `internal/gossip` | Membership, failure detection, cluster convergence |
 | KV Store | `internal/store` | LSM storage engine: memtable with vector clock versioning, flushes to SSTables, merged reads across generations |
 | WAL + SSTables | `internal/wal`, `internal/sstable` | Append-only log with CRC framing + immutable sorted tables with bloom filters; recovery opens tables and replays the WAL tail |

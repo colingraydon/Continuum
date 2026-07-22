@@ -52,6 +52,8 @@ When nodes carry zones (see below), the walk is zone-aware: a node whose zone is
 
 An empty zone means unzoned: the node fills any slot and never conflicts with another node. A cluster that sets no zones anywhere gets exactly the pre-zone placement, and a mixed cluster (some nodes zoned, some not) degrades gracefully rather than failing.
 
+Nodes also carry a **data-center** label (`SELF_DC`, via `AddZonedNodeDC`), the failure domain above the zone. It is propagated through gossip and surfaced on `/stats`, but it does not yet affect placement - the walk above is zone-aware only. DC-aware placement (per-DC replica counts, `LOCAL_QUORUM`) is a staged follow-on; see [multi-DC](multi-dc.md).
+
 ### Key Counters
 
 Each physical node carries an atomic `int64` key counter. It increments on each successful single-node lookup (`GetNode`); the replica-set walk (`GetReplicationNodes`) does not touch it. The counter is discarded along with the node when it is removed from the ring. These feed the `/stats` load distribution report and the Prometheus variance gauge.

@@ -52,10 +52,17 @@ type Member struct {
 	Status        MemberStatus
 	Bootstrapping bool
 	Weight        float64 // relative capacity; 0 is treated as 1.0 by the ring
-	// Zone is the failure domain (rack, availability zone, DC) this member
-	// lives in; replica placement spreads each key's replicas across zones.
-	// Empty means unzoned. Older nodes drop the field from gossip, so a mixed
-	// cluster degrades to per-node placement rather than failing.
+	// DC is the data center this member lives in — the failure domain enclosing
+	// Zone. It is propagated and surfaced but carries no placement meaning yet
+	// (multi-DC placement lands in a later PR). Older nodes drop the field from
+	// gossip, leaving it empty; the field rides the wire automatically because
+	// Member is JSON-encoded by field name with no tags.
+	DC string
+	// Zone is the failure domain (rack, availability zone) this member lives
+	// in, nested within DC; replica placement spreads each key's replicas
+	// across zones. Empty means unzoned. Older nodes drop the field from
+	// gossip, so a mixed cluster degrades to per-node placement rather than
+	// failing.
 	Zone string
 }
 
@@ -122,6 +129,17 @@ func (ml *MemberList) SetSelfZone(zone string) {
 	ml.self.UpdatedAt = time.Now()
 }
 
+// SetSelfDC sets this node's data center and increments its heartbeat so the
+// change propagates to peers on the next gossip round. The DC is surfaced to
+// peers now; it gains placement and quorum meaning in a later PR.
+func (ml *MemberList) SetSelfDC(dc string) {
+	ml.mu.Lock()
+	defer ml.mu.Unlock()
+	ml.self.DC = dc
+	ml.self.Heartbeat++
+	ml.self.UpdatedAt = time.Now()
+}
+
 func (ml *MemberList) IncrementHeartbeat() {
 	ml.mu.Lock()
 	defer ml.mu.Unlock()
@@ -155,12 +173,12 @@ func (ml *MemberList) SetIncarnationSink(fn func(uint64)) {
 
 // notifyMemberChange fires the onChange callback for a merged member. prev is
 // a snapshot of the entry the merge replaced, nil for a first sighting. Beyond
-// status transitions, a metadata change (zone, weight, address) on a member
-// that stays alive re-fires Alive: the ring only learns about members through
-// this callback, and a member first registered without metadata (a mesh stub
-// via POST /nodes, or an entry from a peer that has not yet heard the member's
-// own gossip) would otherwise keep its empty zone and default weight on the
-// ring forever.
+// status transitions, a metadata change (dc, zone, weight, address) on a
+// member that stays alive re-fires Alive: the ring only learns about members
+// through this callback, and a member first registered without metadata (a
+// mesh stub via POST /nodes, or an entry from a peer that has not yet heard the
+// member's own gossip) would otherwise keep its empty dc/zone and default
+// weight on the ring forever.
 func (ml *MemberList) notifyMemberChange(m, prev *Member) {
 	if ml.onChange == nil {
 		return
@@ -170,7 +188,7 @@ func (ml *MemberList) notifyMemberChange(m, prev *Member) {
 		return
 	}
 	if m.Status == MemberAlive &&
-		(prev.Zone != m.Zone || prev.Weight != m.Weight || prev.Address != m.Address) {
+		(prev.DC != m.DC || prev.Zone != m.Zone || prev.Weight != m.Weight || prev.Address != m.Address) {
 		ml.onChange(m, MemberAlive)
 	}
 	if prev.Bootstrapping && !m.Bootstrapping {

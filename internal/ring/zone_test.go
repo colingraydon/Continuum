@@ -39,6 +39,64 @@ func TestAddZonedNode_SetsZone(t *testing.T) {
 	}
 }
 
+func TestAddZonedNodeDC_SetsDC(t *testing.T) {
+	// Arrange
+	r := NewRing(150)
+
+	// Act
+	r.AddZonedNodeDC("node1", "10.0.0.1", "us-east", "rack1", 1.0)
+
+	// Assert: both failure-domain labels are recorded on the node.
+	nodes := r.GetNodes()
+	if len(nodes) != 1 || nodes[0].DC != "us-east" || nodes[0].Zone != "rack1" {
+		t.Fatalf("expected one node in dc us-east / zone rack1, got %+v", nodes)
+	}
+}
+
+func TestAddZonedNodeDC_ClampsNonPositiveWeight(t *testing.T) {
+	// A non-positive weight is treated as 1.0, so the node still receives the
+	// full default vnode count rather than zero.
+	r := NewRing(150)
+
+	r.AddZonedNodeDC("node1", "10.0.0.1", "us-east", "rack1", 0)
+
+	stats := r.GetStats()
+	if len(stats.Distribution) != 1 || stats.Distribution[0].VNodeCount != 150 {
+		t.Fatalf("expected 150 vnodes from clamped weight, got %+v", stats.Distribution)
+	}
+}
+
+func TestAddZonedNodeDC_ReAddReplacesVnodes(t *testing.T) {
+	// Re-adding an existing node id (a metadata refresh from gossip) must clear
+	// the old vnodes first; a lowered weight would otherwise leave orphaned
+	// vnodes in the tree beyond the new count.
+	r := NewRing(150)
+	r.AddZonedNodeDC("node1", "10.0.0.1", "us-east", "rack1", 2.0) // 300 vnodes
+
+	r.AddZonedNodeDC("node1", "10.0.0.1", "us-west", "rack2", 1.0) // 150 vnodes
+
+	stats := r.GetStats()
+	if stats.TotalVNodes != 150 {
+		t.Fatalf("expected re-add to replace vnodes (150 total), got %d", stats.TotalVNodes)
+	}
+	if len(stats.Distribution) != 1 || stats.Distribution[0].DC != "us-west" {
+		t.Fatalf("expected single node relabeled to us-west, got %+v", stats.Distribution)
+	}
+}
+
+func TestAddZonedNode_LeavesDCEmpty(t *testing.T) {
+	// The zone-only helper must delegate with an empty DC, so nodes added the
+	// legacy way stay DC-unlabeled rather than inheriting a stray value.
+	r := NewRing(150)
+
+	r.AddZonedNode("node1", "10.0.0.1", "rack1", 1.0)
+
+	nodes := r.GetNodes()
+	if len(nodes) != 1 || nodes[0].DC != "" || nodes[0].Zone != "rack1" {
+		t.Fatalf("expected node with empty dc and zone rack1, got %+v", nodes)
+	}
+}
+
 func TestZonePlacement_SpreadsReplicasAcrossZones(t *testing.T) {
 	// Arrange: six nodes across three zones, two per zone.
 	r := newZonedRing(t, "a", "b", "c")
