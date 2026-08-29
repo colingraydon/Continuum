@@ -49,8 +49,8 @@ them here saves a round trip:
 - [ ] **Docs updated** (see below)
 
 CI additionally runs `go vet`, the full test suite with coverage, e2e, fault
-injection, CodeQL, a benchmark regression guard (fails on >20% significant
-regressions), and a `mkdocs --strict` docs build. SonarCloud flags functions
+injection, the seeded cluster simulation, CodeQL, a benchmark regression guard
+(fails on >20% significant regressions), and a `mkdocs --strict` docs build. SonarCloud flags functions
 whose **cognitive complexity exceeds 15** — keep new functions under it.
 
 ## Documentation is required

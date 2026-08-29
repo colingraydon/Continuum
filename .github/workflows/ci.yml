@@ -103,6 +103,27 @@ jobs:
       - name: Compare (fail on >20% significant regressions)
         run: bash scripts/benchguard.sh /tmp/bench-base.txt /tmp/bench-head.txt
 
+  # Seeded in-process cluster simulation. Cheap next to the fault suite (one
+  # process, no sockets or disks) and it covers ground the other jobs do not:
+  # the whole cluster shares an address space, so a seeded schedule of
+  # partitions, drops, and crash/restart drives the gossip-membership and ring
+  # interaction end to end. Its own runner matters — sim and fault starve each
+  # other badly enough to fail on a shared machine, which is why they are
+  # separate jobs rather than steps.
+  simulation:
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: "go.mod"
+      - name: Download dependencies
+        run: go mod download
+      - name: Seeded cluster simulation
+        run: go test -v -tags sim -timeout 600s ./tests/sim/...
+
   docker:
     runs-on: ubuntu-latest
     needs: [test, e2e-integration, fault-injection, lint]
