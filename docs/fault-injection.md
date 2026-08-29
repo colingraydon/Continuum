@@ -86,6 +86,7 @@ porcupine checker verifies the history is per-key linearizable. See
 | `LinearizableCASHealthy` | none | Racing CAS clients on shared keys produce a linearizable per-key history: one winner per generation |
 | `LinearizableCASAcrossPrimaryFailover` | SIGKILL + restart mid-workload | The paxos round keeps CAS linearizable across the kill and restart; the outage window degrades to retryable 503s, never forks |
 | `LinearizableCASAcrossPartition` | inbound blackhole 6s | The isolated node cannot assemble a majority (quorum denominators include dead members), so its rounds fail closed; history stays linearizable through heal |
+| `RemoteDCOutage_LocalQuorumStaysAvailable` | blackhole a whole DC (3 processes) | `local_quorum` keeps serving from the surviving DC while a cluster-wide quorum 503s; writes accepted during the outage reach the remote DC after heal |
 
 ## Findings the harness surfaced
 

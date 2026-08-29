@@ -70,6 +70,21 @@ crash per run: the store is memory-only in simulation, so a crash is total
 state loss, and two overlapping losses could legitimately destroy an
 acknowledged W=2 write - that would blame the schedule, not the system.
 
+### Multi-DC scenarios
+
+Alongside the seeded schedules, a fixed two-DC topology (three nodes in each of
+`us-east` and `eu-west`, a full replica set in each) runs targeted scenarios
+that the random schedule would not reliably produce. `partitionDCs` severs every
+link across the WAN while leaving each side internally quorate - the distinction
+that matters, since both DCs remain able to form a local quorum. These assert
+that `local_quorum` keeps serving through the cut while a cluster-wide quorum
+cannot, and that writes accepted during the cut reach the remote DC once it
+heals.
+
+Each scenario also asserts its own precondition - that the remote DC held none
+of those writes *while* partitioned - so a leaky cut cannot make the post-heal
+assertion pass for the wrong reason. See [multi-DC](multi-dc.md).
+
 ## Design Decisions
 
 ### Seeded, not bit-deterministic

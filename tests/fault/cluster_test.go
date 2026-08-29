@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -57,20 +58,59 @@ type clusterConfig struct {
 	syncIntervalMS    int // default 2000 (fast anti-entropy so tests converge quickly)
 	hintDeliveryMS    int // default 1000 (fast hint-delivery sweep so tests observe it)
 	memtableMaxBytes  int // default 8192 (tiny, to force flush/compaction churn under load)
+	// dcs assigns a data center to each node by index (SELF_DC); nil leaves
+	// every node unlabeled, the single-DC shape the other scenarios use.
+	dcs []string
+	// dcReplication becomes REPLICATION_FACTOR_BY_DC on every node. When set
+	// it replaces replicationFactor with its sum, as main.go does.
+	dcReplication map[string]int
+}
+
+// dcOf returns the configured data center for the node at index i.
+func (c clusterConfig) dcOf(i int) string {
+	if i < len(c.dcs) {
+		return c.dcs[i]
+	}
+	return ""
+}
+
+// dcReplicationEnv renders dcReplication as the REPLICATION_FACTOR_BY_DC
+// value, with DCs in a stable order so the env string is deterministic.
+func (c clusterConfig) dcReplicationEnv() string {
+	names := make([]string, 0, len(c.dcReplication))
+	for dc := range c.dcReplication {
+		names = append(names, dc)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, dc := range names {
+		parts = append(parts, fmt.Sprintf("%s:%d", dc, c.dcReplication[dc]))
+	}
+	return strings.Join(parts, ",")
 }
 
 func (c clusterConfig) withDefaults() clusterConfig {
 	if c.nodes == 0 {
 		c.nodes = 3
 	}
+	if len(c.dcReplication) > 0 {
+		total := 0
+		for _, n := range c.dcReplication {
+			total += n
+		}
+		c.replicationFactor = total
+	}
 	if c.replicationFactor == 0 {
 		c.replicationFactor = 3
 	}
+	// Majority of the effective RF: 2 at the default RF 3, 4 for a 3+3 two-DC
+	// table. Sizing it here keeps the cluster-wide quorum genuinely
+	// cluster-wide, so taking a whole DC down can be seen to break it.
 	if c.writeQuorum == 0 {
-		c.writeQuorum = 2
+		c.writeQuorum = c.replicationFactor/2 + 1
 	}
 	if c.readQuorum == 0 {
-		c.readQuorum = 2
+		c.readQuorum = c.replicationFactor/2 + 1
 	}
 	if c.replicaTimeoutMS == 0 {
 		c.replicaTimeoutMS = 750
@@ -91,6 +131,7 @@ func (c clusterConfig) withDefaults() clusterConfig {
 // and the persistent state that survives restarts (identity, ports, DATA_DIR).
 type node struct {
 	id         string
+	dc         string // SELF_DC; "" in single-DC runs
 	dataDir    string
 	bindPort   string // real HTTP listener; harness talks to this directly
 	gossipPort string // real UDP listener
@@ -133,6 +174,7 @@ func newCluster(t *testing.T, cfg clusterConfig) *cluster {
 		gossipPort := freePort(t)
 		n := &node{
 			id:         fmt.Sprintf("node%d", i+1),
+			dc:         cfg.dcOf(i),
 			dataDir:    t.TempDir(),
 			bindPort:   bindPort,
 			gossipPort: gossipPort,
@@ -179,6 +221,15 @@ func (c *cluster) start(n *node) {
 		fmt.Sprintf("HINT_DELIVERY_INTERVAL_MS=%d", c.cfg.hintDeliveryMS),
 		fmt.Sprintf("MEMTABLE_MAX_BYTES=%d", c.cfg.memtableMaxBytes),
 	)
+	// Multi-DC runs label the node and install the per-DC replica table, the
+	// same two variables an operator sets; single-DC runs leave both unset so
+	// the process takes the cluster-wide path unchanged.
+	if n.dc != "" {
+		env = append(env, "SELF_DC="+n.dc)
+	}
+	if len(c.cfg.dcReplication) > 0 {
+		env = append(env, "REPLICATION_FACTOR_BY_DC="+c.cfg.dcReplicationEnv())
+	}
 	cmd := exec.Command(binaryPath)
 	cmd.Env = env
 	cmd.Stdout = os.Stdout
