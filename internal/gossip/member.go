@@ -171,28 +171,52 @@ func (ml *MemberList) SetIncarnationSink(fn func(uint64)) {
 	ml.persistIncarnation = fn
 }
 
-// notifyMemberChange fires the onChange callback for a merged member. prev is
-// a snapshot of the entry the merge replaced, nil for a first sighting. Beyond
-// status transitions, a metadata change (dc, zone, weight, address) on a
-// member that stays alive re-fires Alive: the ring only learns about members
-// through this callback, and a member first registered without metadata (a
-// mesh stub via POST /nodes, or an entry from a peer that has not yet heard the
-// member's own gossip) would otherwise keep its empty dc/zone and default
-// weight on the ring forever.
-func (ml *MemberList) notifyMemberChange(m, prev *Member) {
-	if ml.onChange == nil {
-		return
-	}
+// memberEvent is one onChange call deferred until ml.mu is released.
+type memberEvent struct {
+	m      *Member
+	status MemberStatus
+}
+
+// memberEvents returns the callbacks that replacing prev with m implies,
+// without invoking any of them. prev is a snapshot of the entry being
+// replaced, nil for a first sighting. Beyond status transitions, a metadata
+// change (dc, zone, weight, address) on a member that stays alive re-fires
+// Alive: the ring only learns about members through this callback, so a member
+// first registered without metadata (a mesh stub via POST /nodes, or an entry
+// from a peer that has not yet heard the member's own gossip) would otherwise
+// keep its empty dc/zone and default weight on the ring forever.
+//
+// Callers must fire these *after* releasing ml.mu. The ring's change handler
+// takes the ring lock, and the ring's health filter takes ml.mu from inside
+// ring methods that already hold the ring lock — so calling out while holding
+// ml.mu closes an ml.mu -> ring.mu -> ml.mu cycle and deadlocks the node.
+//
+// The event carries a copy: mutators write member structs in place under
+// ml.mu, so handing a live pointer to a callback running outside the lock
+// would race with every later status change.
+func memberEvents(m, prev *Member) []memberEvent {
+	cp := *m
 	if prev == nil || prev.Status != m.Status {
-		ml.onChange(m, m.Status)
-		return
+		return []memberEvent{{&cp, cp.Status}}
 	}
+	var out []memberEvent
 	if m.Status == MemberAlive &&
 		(prev.DC != m.DC || prev.Zone != m.Zone || prev.Weight != m.Weight || prev.Address != m.Address) {
-		ml.onChange(m, MemberAlive)
+		out = append(out, memberEvent{&cp, MemberAlive})
 	}
 	if prev.Bootstrapping && !m.Bootstrapping {
-		ml.onChange(m, MemberBootstrapped)
+		out = append(out, memberEvent{&cp, MemberBootstrapped})
+	}
+	return out
+}
+
+// fire invokes each deferred callback. Must be called with ml.mu released.
+func fire(onChange func(*Member, MemberStatus), events []memberEvent) {
+	if onChange == nil {
+		return
+	}
+	for _, e := range events {
+		onChange(e.m, e.status)
 	}
 }
 
@@ -231,6 +255,7 @@ func (ml *MemberList) refuteSelf(incoming *Member) {
 func (ml *MemberList) Merge(incoming []*Member) {
 	ml.mu.Lock()
 
+	var events []memberEvent
 	beforeInc := ml.self.Incarnation
 	for _, m := range incoming {
 		if m.ID == ml.self.ID {
@@ -248,12 +273,15 @@ func (ml *MemberList) Merge(incoming []*Member) {
 			// time, and the stale checker compares against our own clock.
 			m.UpdatedAt = time.Now()
 			ml.members[m.ID] = m
-			ml.notifyMemberChange(m, prev)
+			events = append(events, memberEvents(m, prev)...)
 		}
 	}
 	afterInc := ml.self.Incarnation
 	sink := ml.persistIncarnation
+	onChange := ml.onChange
 	ml.mu.Unlock()
+
+	fire(onChange, events)
 
 	// Persist a refutation-driven advance before it propagates. Done outside
 	// the lock so the fsync does not stall concurrent membership reads.
@@ -318,30 +346,32 @@ func (ml *MemberList) GetAlive() []*Member {
 
 func (ml *MemberList) MarkSuspect(id string) {
 	ml.mu.Lock()
-	defer ml.mu.Unlock()
-
 	m, ok := ml.members[id]
 	if !ok || m.Status != MemberAlive {
+		ml.mu.Unlock()
 		return
 	}
 	m.Status = MemberSuspect
-	if ml.onChange != nil {
-		ml.onChange(m, MemberSuspect)
-	}
+	cp := *m
+	onChange := ml.onChange
+	ml.mu.Unlock()
+
+	fire(onChange, []memberEvent{{&cp, MemberSuspect}})
 }
 
 func (ml *MemberList) MarkDead(id string) {
 	ml.mu.Lock()
-	defer ml.mu.Unlock()
-
 	m, ok := ml.members[id]
 	if !ok || m.Status == MemberDead {
+		ml.mu.Unlock()
 		return
 	}
 	m.Status = MemberDead
-	if ml.onChange != nil {
-		ml.onChange(m, MemberDead)
-	}
+	cp := *m
+	onChange := ml.onChange
+	ml.mu.Unlock()
+
+	fire(onChange, []memberEvent{{&cp, MemberDead}})
 }
 
 func (ml *MemberList) Add(id, address string) {
@@ -351,15 +381,37 @@ func (ml *MemberList) Add(id, address string) {
 // AddWithGossip registers a member along with the UDP address it receives
 // gossip on. An empty gossipAddr leaves senders on the legacy assumption that
 // the member shares their gossip port.
+//
+// Re-registering a member we already hold advances past its current
+// incarnation rather than restarting at zero. Incarnation is the primary
+// precedence key in Merge, so a zero-incarnation entry loses to every copy of
+// the state it was meant to replace: registering a node that peers still
+// believe dead at incarnation N would be reverted by the next gossip round
+// carrying that entry, evicting the node from the ring again. Since only the
+// node itself may advance its own incarnation, this cannot be an arbitrary
+// jump — one past what we hold is exactly enough to supersede the stale claim
+// without racing the node's own refutation.
 func (ml *MemberList) AddWithGossip(id, address, gossipAddr string) {
 	ml.mu.Lock()
+	incarnation := uint64(0)
+	if existing, ok := ml.members[id]; ok {
+		incarnation = existing.Incarnation
+		// Only outrank the entry when it currently contradicts "alive";
+		// re-registering an already-alive member must stay a no-op as far as
+		// precedence goes, or repeated calls would inflate the epoch and
+		// outrank the node's own future state.
+		if existing.Status != MemberAlive {
+			incarnation++
+		}
+	}
 	m := &Member{
-		ID:         id,
-		Address:    address,
-		GossipAddr: gossipAddr,
-		Heartbeat:  0,
-		UpdatedAt:  time.Now(),
-		Status:     MemberAlive,
+		ID:          id,
+		Address:     address,
+		GossipAddr:  gossipAddr,
+		Incarnation: incarnation,
+		Heartbeat:   0,
+		UpdatedAt:   time.Now(),
+		Status:      MemberAlive,
 	}
 	ml.members[id] = m
 	onChange := ml.onChange

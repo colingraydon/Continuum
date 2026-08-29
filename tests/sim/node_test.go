@@ -318,24 +318,54 @@ func (c *simCluster) running() []*simNode {
 }
 
 // ringIDs returns the node IDs in n's ring, resolved through the HTTP API so
-// the harness observes what clients would.
-func (c *simCluster) ringIDs(n *simNode) map[string]bool {
+// the harness observes what clients would. A nil error with an empty map means
+// the ring really is empty; an error means the node could not be reached.
+// Keeping those apart matters when diagnosing a convergence failure, where
+// "unreachable" and "converged to nothing" are very different bugs.
+func (c *simCluster) ringIDs(n *simNode) (map[string]bool, error) {
 	resp, err := c.client.Get("http://" + n.httpAddr + "/nodes")
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer resp.Body.Close()
 	var nodes []struct {
 		ID string `json:"id"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&nodes); err != nil {
-		return nil
+		return nil, err
 	}
 	ids := make(map[string]bool, len(nodes))
 	for _, nr := range nodes {
 		ids[nr.ID] = true
 	}
-	return ids
+	return ids, nil
+}
+
+// memberStates reports each member's gossip status as n sees it, so a
+// convergence dump shows why a peer is missing from the ring (declared dead)
+// rather than only that it is missing.
+//
+// Bounded by a timeout because it runs on the failure path: reading the member
+// list takes ml.mu, and the failure being diagnosed may itself be a node
+// wedged holding that lock. A diagnostic that blocks turns a legible test
+// failure into a bare five-minute timeout panic, which is how the deadlock
+// this guards against first presented.
+func (c *simCluster) memberStates(n *simNode) map[string]string {
+	type result struct{ states map[string]string }
+	ch := make(chan result, 1)
+	go func() {
+		out := make(map[string]string)
+		for _, m := range n.ml.GetAll() {
+			out[m.ID] = fmt.Sprintf("%s/inc=%d/hb=%d", m.Status, m.Incarnation, m.Heartbeat)
+		}
+		ch <- result{out}
+	}()
+	select {
+	case r := <-ch:
+		return r.states
+	case <-time.After(2 * time.Second):
+		return map[string]string{"<unreadable>": "member list lock held; node likely wedged"}
+	}
 }
 
 // waitFullRing waits until every running node's ring holds every running
@@ -359,7 +389,10 @@ func (c *simCluster) waitFullRing(timeout time.Duration) {
 func (c *simCluster) ringsConverged() bool {
 	running := c.running()
 	for _, a := range running {
-		ids := c.ringIDs(a)
+		ids, err := c.ringIDs(a)
+		if err != nil {
+			return false
+		}
 		for _, b := range running {
 			if !ids[b.id] {
 				return false
@@ -373,7 +406,12 @@ func (c *simCluster) ringsConverged() bool {
 // failure.
 func (c *simCluster) dumpRings() {
 	for _, n := range c.running() {
-		c.t.Logf("%s ring: %v", n.id, c.ringIDs(n))
+		ids, err := c.ringIDs(n)
+		if err != nil {
+			c.t.Logf("%s ring: UNREACHABLE (%v); members: %v", n.id, err, c.memberStates(n))
+			continue
+		}
+		c.t.Logf("%s ring: %v; members: %v", n.id, ids, c.memberStates(n))
 	}
 }
 
