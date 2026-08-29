@@ -46,6 +46,16 @@ func (r *Ring) DCReplicationTotal() int {
 	return sumFactors(r.dcFactors)
 }
 
+// DCReplicationFactor returns the configured replica target for one data
+// center, or 0 when no per-DC table is installed or the DC is absent from it.
+// A zero result means the DC holds no replicas, which is what sizes (and
+// disqualifies) a LOCAL_QUORUM against it.
+func (r *Ring) DCReplicationFactor(dc string) int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.dcFactors[dc]
+}
+
 func sumFactors(factors map[string]int) int {
 	total := 0
 	for _, n := range factors {

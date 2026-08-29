@@ -488,3 +488,31 @@ func TestDCPlacement_PrimaryMayNotOwnKeyWhenDCUnlisted(t *testing.T) {
 		t.Error("expected at least one key whose primary is not its first replica")
 	}
 }
+
+func TestDCReplicationFactor(t *testing.T) {
+	// Arrange
+	r := NewRing(150)
+
+	// Assert: with no table installed every DC reports zero, which is what
+	// disqualifies a LOCAL_ consistency level.
+	if got := r.DCReplicationFactor("us-east"); got != 0 {
+		t.Errorf("without a table: got %d, want 0", got)
+	}
+
+	// Act
+	r.SetDCReplication(map[string]int{"us-east": 3, "eu-west": 2})
+
+	// Assert
+	if got := r.DCReplicationFactor("us-east"); got != 3 {
+		t.Errorf("us-east = %d, want 3", got)
+	}
+	if got := r.DCReplicationFactor("eu-west"); got != 2 {
+		t.Errorf("eu-west = %d, want 2", got)
+	}
+	if got := r.DCReplicationFactor("ap-south"); got != 0 {
+		t.Errorf("unlisted DC = %d, want 0", got)
+	}
+	if got := r.DCReplicationFactor(""); got != 0 {
+		t.Errorf("empty DC = %d, want 0", got)
+	}
+}

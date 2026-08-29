@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -42,7 +43,10 @@ const (
 
 // HandlerConfig holds the scalar settings for a Handler.
 type HandlerConfig struct {
-	SelfID            string
+	SelfID string
+	// SelfDC labels this node's data center; required for LOCAL_ consistency
+	// levels. Empty leaves the node on cluster-wide quorums only.
+	SelfDC            string
 	ReplicationFactor int
 	WriteQuorum       int
 	ReadQuorum        int
@@ -64,13 +68,16 @@ type SyncTreeProvider interface {
 }
 
 type Handler struct {
-	ring              *ring.Ring
-	aggregator        *stats.Aggregator
-	memberList        *gossip.MemberList
-	store             *store.Store
-	hintStore         *hintstore.HintStore
-	syncTrees         SyncTreeProvider
-	selfID            string
+	ring       *ring.Ring
+	aggregator *stats.Aggregator
+	memberList *gossip.MemberList
+	store      *store.Store
+	hintStore  *hintstore.HintStore
+	syncTrees  SyncTreeProvider
+	selfID     string
+	// selfDC is this node's data center, the scope for LOCAL_ consistency
+	// levels. Empty when unlabeled, which disqualifies those levels.
+	selfDC            string
 	replicationFactor int
 	writeQuorum       int
 	readQuorum        int
@@ -98,6 +105,7 @@ func NewHandler(r *ring.Ring, ml *gossip.MemberList, s *store.Store, cfg Handler
 		store:             s,
 		hintStore:         hs,
 		selfID:            cfg.SelfID,
+		selfDC:            cfg.SelfDC,
 		replicationFactor: cfg.ReplicationFactor,
 		writeQuorum:       cfg.WriteQuorum,
 		readQuorum:        cfg.ReadQuorum,
@@ -123,32 +131,120 @@ const (
 	consistencyOne    = "one"
 	consistencyQuorum = "quorum"
 	consistencyAll    = "all"
+	// consistencyLocalOne and consistencyLocalQuorum count acks only among
+	// replicas in the coordinator's own data center, so a request never blocks
+	// on a slow or unreachable remote DC. Both require a per-DC replica table
+	// (REPLICATION_FACTOR_BY_DC) and a labeled coordinator (SELF_DC).
+	consistencyLocalOne    = "local_one"
+	consistencyLocalQuorum = "local_quorum"
 	// consistencySerial is accepted on GET only: a linearizable read served
 	// by the paxos prepare phase (see serialRead). Writes wanting serial
 	// semantics use ?cas=true.
 	consistencySerial = "serial"
 )
 
-// requestedQuorum resolves the quorum size for one request: the ?consistency=
-// level mapped against the replication factor (one=1, quorum=RF/2+1, all=RF),
-// or dflt when the param is absent. An unrecognized level is an error; callers
-// must reject the request with 400 before touching the store. "all" means all
-// current replicas — like the configured W/R it is later clamped to the
-// available replica set, so it tracks membership rather than acting as a hard
-// durability floor.
-func (h *Handler) requestedQuorum(req *http.Request, dflt int) (int, error) {
+// errNoLocalDC explains why a LOCAL_ level cannot be served by this node. Both
+// conditions are configuration, not transient state, so this is a 400 rather
+// than a 503: retrying against the same node can never succeed.
+const errNoLocalDC = "local consistency levels require SELF_DC and a REPLICATION_FACTOR_BY_DC entry for this node's data center"
+
+// errNoLocalReplicas is returned when a LOCAL_ level is well-configured but
+// this key has no replica in the coordinator's DC. Unlike errNoLocalDC this is
+// transient — membership may bring a local replica back — so it is a 503.
+const errNoLocalReplicas = "no replicas for this key in the local data center"
+
+// quorumSpec is one request's acknowledgement requirement: how many replica
+// acks are needed, and whether replicas outside the coordinator's data center
+// may contribute them.
+//
+// localOnly narrows only the *counting*, never the fan-out. Remote replicas
+// still receive every write and read; their responses simply do not satisfy
+// the quorum. That is what makes a LOCAL_ level fast — the coordinator returns
+// as soon as its own DC has answered, while the remote requests finish in the
+// background — without weakening what actually gets replicated.
+type quorumSpec struct {
+	size      int
+	localOnly bool
+}
+
+// requestedQuorum resolves the quorum for one request: the ?consistency= level
+// mapped against the replication factor (one=1, quorum=RF/2+1, all=RF), or
+// dflt when the param is absent. LOCAL_ levels size against the coordinator's
+// own DC target instead of the cluster-wide RF. An unrecognized or unusable
+// level is an error; callers must reject the request with 400 before touching
+// the store. "all" means all current replicas — like the configured W/R it is
+// later clamped to the available replica set, so it tracks membership rather
+// than acting as a hard durability floor.
+func (h *Handler) requestedQuorum(req *http.Request, dflt int) (quorumSpec, error) {
 	switch level := req.URL.Query().Get(consistencyParam); level {
 	case "":
-		return dflt, nil
+		return quorumSpec{size: dflt}, nil
 	case consistencyOne:
-		return 1, nil
+		return quorumSpec{size: 1}, nil
 	case consistencyQuorum:
-		return h.replicationFactor/2 + 1, nil
+		return quorumSpec{size: h.replicationFactor/2 + 1}, nil
 	case consistencyAll:
-		return h.replicationFactor, nil
+		return quorumSpec{size: h.replicationFactor}, nil
+	case consistencyLocalOne:
+		if h.localReplicationFactor() == 0 {
+			return quorumSpec{}, errors.New(errNoLocalDC)
+		}
+		return quorumSpec{size: 1, localOnly: true}, nil
+	case consistencyLocalQuorum:
+		localRF := h.localReplicationFactor()
+		if localRF == 0 {
+			return quorumSpec{}, errors.New(errNoLocalDC)
+		}
+		return quorumSpec{size: localRF/2 + 1, localOnly: true}, nil
 	default:
-		return 0, fmt.Errorf("unknown consistency level %q (want one, quorum, or all; serial is GET-only)", level)
+		return quorumSpec{}, fmt.Errorf(
+			"unknown consistency level %q (want one, quorum, all, local_one, or local_quorum; serial is GET-only)", level)
 	}
+}
+
+// localReplicationFactor is the configured replica target for this node's own
+// data center, or 0 when the node is unlabeled or its DC carries no target.
+// Sizing LOCAL_QUORUM from the configured target rather than from the replicas
+// currently reachable keeps the required ack count stable while nodes come and
+// go, exactly as the cluster-wide levels size against RF.
+func (h *Handler) localReplicationFactor() int {
+	if h.selfDC == "" {
+		return 0
+	}
+	return h.ring.DCReplicationFactor(h.selfDC)
+}
+
+// ackCounter returns the predicate deciding which replicas' acks satisfy spec.
+// Cluster-wide levels accept every replica; LOCAL_ levels accept only those
+// sharing the coordinator's DC.
+func (h *Handler) ackCounter(spec quorumSpec, nodes []*ring.Node) func(nodeID string) bool {
+	if !spec.localOnly {
+		return func(string) bool { return true }
+	}
+	local := make(map[string]bool, len(nodes))
+	for _, n := range nodes {
+		if n.DC == h.selfDC {
+			local[n.ID] = true
+		}
+	}
+	return func(id string) bool { return local[id] }
+}
+
+// countable reports how many of nodes may contribute an ack toward spec. It
+// bounds the quorum the same way len(nodes) does for a cluster-wide level, so
+// a LOCAL_ level is clamped to the local replicas that actually exist rather
+// than to the whole set.
+func (h *Handler) countable(spec quorumSpec, nodes []*ring.Node) int {
+	if !spec.localOnly {
+		return len(nodes)
+	}
+	n := 0
+	for _, node := range nodes {
+		if node.DC == h.selfDC {
+			n++
+		}
+	}
+	return n
 }
 
 // casParam enables compare-and-set semantics on PUT/DELETE /keys/{key}:
@@ -629,8 +725,13 @@ func (h *Handler) filterReadNodes(nodes []*ring.Node) []*ring.Node {
 }
 
 type readResult struct {
-	resp NodeResponse
-	err  error
+	// nodeID is the replica this read was dispatched to. Quorum accounting
+	// keys off this rather than resp.ID: the response body carries whatever
+	// identity the peer reports about itself, which is not something the
+	// coordinator's own DC scoping should depend on.
+	nodeID string
+	resp   NodeResponse
+	err    error
 }
 
 // readNode reads key from one node: the local store when it is self, otherwise
@@ -639,37 +740,47 @@ type readResult struct {
 func (h *Handler) readNode(node *ring.Node, key string) readResult {
 	if node.ID != h.selfID {
 		r, err := h.readFromReplica(node.Address, key)
-		return readResult{resp: r, err: err}
+		return readResult{nodeID: node.ID, resp: r, err: err}
 	}
 	entry, ok, err := h.store.Get(key)
 	if err != nil {
-		return readResult{err: err}
+		return readResult{nodeID: node.ID, err: err}
 	}
 	r := NodeResponse{ID: h.selfID, Status: h.nodeStatus(h.selfID)}
 	if ok {
 		r = entryToResponse(h.selfID, h.nodeStatus(h.selfID), entry)
 	}
-	return readResult{resp: r}
+	return readResult{nodeID: node.ID, resp: r}
 }
 
-// quorumReadFanOut fans out reads to readNodes, collects results until quorum
-// is met, and returns the responses plus whether quorum was reached.
-func (h *Handler) quorumReadFanOut(readNodes []*ring.Node, key string, quorum int) ([]NodeResponse, bool) {
+// quorumReadFanOut fans out reads to every node in readNodes, collects results
+// until spec is satisfied, and returns the responses plus whether it was.
+//
+// Under a LOCAL_ level only same-DC replies count toward the quorum, but every
+// reply that arrives before the break is still returned: a remote sibling the
+// local DC has not seen yet belongs in the merge even though it cannot satisfy
+// the quorum.
+func (h *Handler) quorumReadFanOut(readNodes []*ring.Node, key string, spec quorumSpec) ([]NodeResponse, bool) {
+	counts := h.ackCounter(spec, readNodes)
 	results := make(chan readResult, len(readNodes))
 	for _, n := range readNodes {
 		go func(node *ring.Node) { results <- h.readNode(node, key) }(n)
 	}
 	var responses []NodeResponse
+	counted := 0
 	for i := 0; i < len(readNodes); i++ {
 		r := <-results
 		if r.err == nil {
 			responses = append(responses, r.resp)
+			if counts(r.nodeID) {
+				counted++
+			}
 		}
-		if len(responses) >= quorum {
+		if counted >= spec.size {
 			break
 		}
 	}
-	return responses, len(responses) >= quorum
+	return responses, counted >= spec.size
 }
 
 // readAllFanOut reads key from every read node and waits for all replies,
@@ -774,9 +885,18 @@ func (h *Handler) GetNode(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	quorum := min(readQuorum, len(readNodes))
+	// Clamp to the replicas that may actually answer: the whole read set for a
+	// cluster-wide level, only the local-DC members for a LOCAL_ one. A local
+	// level with no local replica for this key is unsatisfiable, not merely
+	// short, so it fails rather than silently widening to the remote DC.
+	available := h.countable(readQuorum, readNodes)
+	if available == 0 {
+		http.Error(w, errNoLocalReplicas, http.StatusServiceUnavailable)
+		return
+	}
+	readQuorum.size = min(readQuorum.size, available)
 
-	responses, ok := h.quorumReadFanOut(readNodes, key, quorum)
+	responses, ok := h.quorumReadFanOut(readNodes, key, readQuorum)
 	if !ok {
 		http.Error(w, "read quorum not met", http.StatusServiceUnavailable)
 		return
@@ -825,8 +945,11 @@ func (h *Handler) enforceSessionClock(session map[string]uint64, readNodes []*ri
 // collects results until quorum is met, and returns the ack count (including
 // self's pre-counted ack), in-flight count, failed node IDs, and the result
 // channel so the caller can drain remaining results for hint buffering.
-func (h *Handler) quorumFanOut(nodes []*ring.Node, quorum int, op func(*ring.Node) replicaResult) (acks, remaining int, failed []string, ch <-chan replicaResult) {
-	acks = 1 // self
+func (h *Handler) quorumFanOut(nodes []*ring.Node, spec quorumSpec, op func(*ring.Node) replicaResult) (acks, remaining int, failed []string, ch <-chan replicaResult) {
+	counts := h.ackCounter(spec, nodes)
+	// Self's local write always counts: the coordinator is in its own DC, so
+	// it satisfies a LOCAL_ level as readily as a cluster-wide one.
+	acks = 1
 	inner := make(chan replicaResult, len(nodes))
 	pending := 0
 	for _, n := range nodes {
@@ -839,14 +962,18 @@ func (h *Handler) quorumFanOut(nodes []*ring.Node, quorum int, op func(*ring.Nod
 	// If quorum is already satisfied by self's ack (e.g. W=1), don't wait at
 	// all: the fan-out still happens, and the caller's hint-buffering goroutine
 	// drains the channel for failures.
+	// A remote-DC reply under a LOCAL_ level is collected but not counted, so
+	// the loop keeps waiting on local replicas rather than stopping early on
+	// acks that cannot satisfy the quorum.
 	collected := 0
-	for collected < pending && acks < quorum {
+	for collected < pending && acks < spec.size {
 		r := <-inner
 		collected++
-		if r.err == nil {
-			acks++
-		} else {
+		switch {
+		case r.err != nil:
 			failed = append(failed, r.nodeID)
+		case counts(r.nodeID):
+			acks++
 		}
 	}
 	return acks, pending - collected, failed, inner
@@ -965,8 +1092,11 @@ func (h *Handler) coordinateWrite(w http.ResponseWriter, req *http.Request, key 
 	// fan-out happens even when self's ack already satisfies quorum (W=1) so
 	// replicas still receive the write without waiting on anti-entropy.
 	nodes, skipped := h.ring.GetHealthyReplicationNodes(key, h.replicationFactor)
-	quorum := min(writeQuorum, len(nodes))
-	acks, remaining, failed, resultCh := h.quorumFanOut(nodes, quorum, func(n *ring.Node) replicaResult {
+	// Clamp to the replicas whose acks can count — the local-DC subset under a
+	// LOCAL_ level. Self is always one of them, so a local level stays
+	// satisfiable by the coordinator alone even when every local peer is down.
+	writeQuorum.size = min(writeQuorum.size, max(h.countable(writeQuorum, nodes), 1))
+	acks, remaining, failed, resultCh := h.quorumFanOut(nodes, writeQuorum, func(n *ring.Node) replicaResult {
 		return replicaResult{n.ID, h.replicateWriteToSync(n.Address, key, wr, version.Clocks)}
 	})
 
@@ -977,7 +1107,7 @@ func (h *Handler) coordinateWrite(w http.ResponseWriter, req *http.Request, key 
 		)
 	}
 
-	if acks < quorum {
+	if acks < writeQuorum.size {
 		http.Error(w, "write quorum not met", http.StatusServiceUnavailable)
 		return
 	}

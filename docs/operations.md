@@ -14,8 +14,8 @@
 | `REPLICAS` | `150` | Virtual nodes per physical node |
 | `REPLICATION_FACTOR` | `3` | Number of replicas per key (ignored when `REPLICATION_FACTOR_BY_DC` is set) |
 | `REPLICATION_FACTOR_BY_DC` | (none) | Per-DC replica targets, `dc:count` comma-separated (e.g. `us-east:3,eu-west:3`). Replaces `REPLICATION_FACTOR` with the sum; see [multi-DC](multi-dc.md) |
-| `WRITE_QUORUM` | majority (`RF/2 + 1`) | Replica acks required before returning 204; overridable per request with `?consistency=` |
-| `READ_QUORUM` | majority (`RF/2 + 1`) | Replica responses required for a consistent read; overridable per request with `?consistency=` |
+| `WRITE_QUORUM` | majority (`RF/2 + 1`) | Replica acks required before returning 204; overridable per request with `?consistency=` (including `local_quorum`) |
+| `READ_QUORUM` | majority (`RF/2 + 1`) | Replica responses required for a consistent read; overridable per request with `?consistency=` (including `local_quorum`) |
 | `REPLICA_TIMEOUT_MS` | `500` | Timeout in milliseconds for inter-node replication and read calls |
 | `SYNC_INTERVAL_MS` | `30000` | Interval between anti-entropy sync rounds |
 | `HINT_DELIVERY_INTERVAL_MS` | `30000` | Interval between hint delivery sweeps to alive targets (backstops event-driven delivery) |
@@ -47,7 +47,9 @@
 - A DC with fewer nodes than its target yields a **short replica set** rather than borrowing a slot from another DC - topping up across the WAN would relocate exactly the durability the table asks for.
 - A node outage is absorbed **within its own DC**: sloppy-quorum substitutes are drawn from the failed owner's DC, and a whole-DC outage leaves the remote DC's set intact with the local owners reported for hinting.
 
-The table is static config and must be **identical on every node**, which keeps placement a deterministic pure function of the ring and membership. Setting it on a cluster that already holds data moves replica ownership, like enabling zones does - anti-entropy repairs the moved ranges over the following sync rounds. Cross-DC quorum control (`LOCAL_QUORUM`, `LOCAL_ONE`) and async cross-DC delivery are not implemented yet; see [multi-DC](multi-dc.md).
+The table is static config and must be **identical on every node**, which keeps placement a deterministic pure function of the ring and membership. Setting it on a cluster that already holds data moves replica ownership, like enabling zones does - anti-entropy repairs the moved ranges over the following sync rounds.
+
+Setting the table also unlocks the `local_one` and `local_quorum` per-request consistency levels, which count acknowledgements only within the coordinator's own DC and so keep serving through a remote-DC outage. Both require this variable plus a matching `SELF_DC`; without them they return 400. See [multi-DC](multi-dc.md) and the [API reference](api.md).
 
 `DATA_DIR` enables crash-durable persistence: every `PUT`/`DELETE`/`EVICT`/`GC` is appended to a write-ahead log and fsynced before the in-memory store is updated. When the memtable exceeds `MEMTABLE_MAX_BYTES` it is flushed to an immutable SSTable and the covered WAL segments are deleted; a final flush runs on graceful shutdown. On restart the node opens its SSTables and replays the WAL tail before joining gossip. A node whose last clean shutdown is older than `GCTTL` (24 h) discards its local data and re-bootstraps from peers, so the cluster cannot resurrect tombstones that other replicas have already purged. Pre-LSM data dirs (snapshot-based) are migrated to an SSTable automatically on first startup. See [docs/persistence.md](persistence.md) and [docs/sstable.md](sstable.md) for formats and recovery flow.
 

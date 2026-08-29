@@ -6,10 +6,11 @@
 
 ## Status
 
-This is a staged feature. **PRs 1–2 are shipped:** the `DC` label propagates
-through gossip and is surfaced on `/stats` (PR 1), and per-DC replica counts
-now drive placement (PR 2). **Quorum is still cluster-wide** — `LOCAL_QUORUM`,
-`LOCAL_ONE`, and async cross-DC delivery land in later PRs; see
+This is a staged feature. **PRs 1–3 are shipped:** the `DC` label propagates
+through gossip and is surfaced on `/stats` (PR 1), per-DC replica counts drive
+placement (PR 2), and `local_quorum` / `local_one` scope acknowledgements to
+the coordinator's own DC (PR 3). What remains is hardening the cross-DC path
+itself — hinting remote failures and tuning anti-entropy for the WAN; see
 [PR staging](#pr-staging).
 
 ## Why
@@ -71,29 +72,48 @@ gracefully to an empty DC.
 2. **PR 2 — DC-aware placement (shipped).** `SetDCReplication` /
    `REPLICATION_FACTOR_BY_DC`, the per-DC replica walk with per-DC zone
    spreading, and DC-scoped sloppy-quorum substitution.
-3. **PR 3 — `LOCAL_QUORUM` / `LOCAL_ONE`.** Partition replica acks by DC in the
-   read and write paths; add the consistency levels.
-4. **PR 4 — Async cross-DC replication.** Ack the client on local-DC quorum,
-   fan out to remote DCs without blocking, hint remote failures, tune AE cadence
-   for the WAN.
+3. **PR 3 — `LOCAL_QUORUM` / `LOCAL_ONE` (shipped).** Replica acks partitioned
+   by DC in the read and write paths; both consistency levels added.
+4. **PR 4 — Cross-DC delivery hardening.** Acking on local-DC quorum while the
+   remote fan-out continues in the background *already falls out of PR 3* (the
+   coordinator returns as soon as its quorum is met and drains the rest
+   asynchronously). What is left is the durability story around that: hinting
+   remote-DC failures reliably, and giving cross-DC anti-entropy its own
+   WAN-aware cadence.
 5. **PR 5 (optional) — Verification.** Add a DC dimension and a full
    cross-DC-partition scenario to the fault and simulation harnesses, asserting
    `LOCAL_QUORUM` stays available when the remote DC is unreachable.
 
 ## What is shipped vs. what is planned
 
-**Ships now (PRs 1–2):** the `DC` field, `SELF_DC`, gossip propagation,
-`/stats.dc`; and `REPLICATION_FACTOR_BY_DC` driving placement — per-DC replica
+**Ships now (PRs 1–3):** the `DC` field, `SELF_DC`, gossip propagation,
+`/stats.dc`; `REPLICATION_FACTOR_BY_DC` driving placement — per-DC replica
 targets, zone spreading scoped inside each DC, and sloppy-quorum substitutes
-confined to the failed owner's DC.
+confined to the failed owner's DC; and the `local_quorum` / `local_one`
+consistency levels, which count acks only within the coordinator's DC.
 
-**Not yet:** quorum is still **cluster-wide**. With `us-east:3,eu-west:3` the
-effective RF is 6 and the default quorum is 4, so a write must still be
-acknowledged across both DCs — the coordinator cannot yet be satisfied by its
-local DC alone. `LOCAL_QUORUM`, `LOCAL_ONE`, and async cross-DC delivery land in
-PRs 3–4. Until then, per-DC placement buys **durability** across DCs but not the
-**latency or availability** win; a fully unreachable DC will fail quorum even
-though the local replica set is intact.
+With `us-east:3,eu-west:3` the cluster RF is 6, so `quorum` needs 4 acks
+spanning both DCs while `local_quorum` needs 2 from `us-east` alone. A severed
+WAN link or a whole-DC outage now fails the former and survives the latter —
+that is the **latency and availability** win, on top of the cross-DC
+**durability** PR 2 delivered.
+
+**Not yet:** the cross-DC delivery path is not hardened. A `local_quorum` write
+returns as soon as the local DC acks, and the remote fan-out continues in the
+background — but a remote replica that fails after the coordinator has already
+responded currently depends on hinted handoff and anti-entropy catching it, and
+anti-entropy is still WAN-cost-unaware. `EACH_QUORUM` does not exist. See
+[Deferred / future work](#deferred-future-work).
+
+### Known limitation: the coordinator's self-ack
+
+The coordinator counts its own local write toward the quorum even when it is
+not one of the key's replicas — long-standing behavior for the cluster-wide
+levels, and unchanged here. Under `local_one` this means a coordinator in a DC
+with no replica for the key can satisfy the level from a copy that anti-entropy
+will later reclaim as stale. Use `local_quorum` where that matters; tightening
+the self-ack is deliberately out of scope for this arc, since it would change
+existing single-DC write semantics.
 
 ### Configuring it
 
@@ -108,6 +128,17 @@ it holds no replicas, so it must name every DC that carries data; startup fails
 if `SELF_DC` is empty or unlisted. See
 [operations](operations.md#environment-variables) for the full variable
 reference.
+
+Clients then opt into DC-scoped acknowledgement per request:
+
+```
+PUT /keys/cart?consistency=local_quorum
+GET /keys/cart?consistency=local_one
+```
+
+Both levels require the configuration above; on a node without it they return
+400 rather than quietly degrading to a cluster-wide quorum. The full semantics
+are in the [API reference](api.md).
 
 ## Deferred / future work
 

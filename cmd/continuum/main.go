@@ -489,6 +489,7 @@ func main() {
 
 	h := api.NewHandler(r, ml, s, api.HandlerConfig{
 		SelfID:            cfg.selfID,
+		SelfDC:            cfg.selfDC,
 		ReplicationFactor: cfg.replicationFactor,
 		WriteQuorum:       cfg.writeQuorum,
 		ReadQuorum:        cfg.readQuorum,
