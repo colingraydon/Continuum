@@ -150,15 +150,18 @@ Step 5 is what makes the downtime gate work: the gate compares `last_clean_shutd
 
 ## CI Pipeline
 
-Four jobs run on every push and pull request to `main` (see [docs/testing.md](testing.md) for what each layer covers):
+These jobs run on every push and pull request to `main` (see [docs/testing.md](testing.md) for what each layer covers):
 
 - **test** - `go vet` + `go test` with coverage upload to Codecov
 - **e2e-integration** - process-based end-to-end tests with a 120-second timeout
 - **fault-injection** - the fault-injection suite with a 900-second timeout
+- **simulation** - the seeded in-process cluster simulation with a 600-second timeout. It gets its own runner rather than sharing one with the fault suite: both are timing-sensitive, and run together they starve each other into spurious failures
 - **lint** - golangci-lint
 - **bench-regression** (pull requests only) - runs the CPU-bound benchmark subset (`make bench-ci`) on the PR's base commit and then on its head **on the same runner**, compares with `benchstat`, and fails on statistically significant time regressions above 20% (`scripts/benchguard.sh`, threshold via `BENCH_REGRESSION_THRESHOLD`). Same-runner A/B cancels most shared-VM variance and benchstat's significance test filters the rest; insignificant deltas (`~`) never fail the gate. fsync-bound, cluster-setup, and multi-millisecond benchmarks are excluded as too noisy or slow for CI - run `make bench` locally for those.
 
 **docker** runs after all of the above pass and verifies the image builds successfully.
+
+**coverage-gate** enforces a hard 90% statement-coverage floor excluding `cmd/`, matching the ignore list in `codecov.yml`. Codecov's own project status is advisory; this job is what gates a merge.
 
 **CodeQL** runs as a separate workflow on push, PR, and a weekly schedule (Mondays at 8am UTC). Results appear in the Security tab under Code scanning.
 
