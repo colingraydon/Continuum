@@ -52,7 +52,20 @@ When nodes carry zones (see below), the walk is zone-aware: a node whose zone is
 
 An empty zone means unzoned: the node fills any slot and never conflicts with another node. A cluster that sets no zones anywhere gets exactly the pre-zone placement, and a mixed cluster (some nodes zoned, some not) degrades gracefully rather than failing.
 
-Nodes also carry a **data-center** label (`SELF_DC`, via `AddZonedNodeDC`), the failure domain above the zone. It is propagated through gossip and surfaced on `/stats`, but it does not yet affect placement - the walk above is zone-aware only. DC-aware placement (per-DC replica counts, `LOCAL_QUORUM`) is a staged follow-on; see [multi-DC](multi-dc.md).
+Zone uniqueness is **scoped within a data center**: the walk compares `(dc, zone)` pairs, not bare zone names, so `rack1` in `us-east` and `rack1` in `eu-west` are distinct failure domains and can both hold a replica of the same key. With no DC labels anywhere this collapses to plain zone comparison, leaving single-DC placement unchanged.
+
+### Data Centers
+
+Nodes carry a **data-center** label (`SELF_DC`, via `AddZonedNodeDC`), the failure domain above the zone. On its own the label only scopes zone uniqueness as described above. Installing per-DC replica targets with `SetDCReplication` - wired to `REPLICATION_FACTOR_BY_DC` - promotes the DC to the outermost placement dimension:
+
+`walkRingDC` walks the same clockwise order, but instead of one cluster-wide count it fills **each DC's own target independently**, applying zone spreading inside each DC and falling back to a repeated zone there when that DC has fewer zones than its target. The passed `factor` is ignored: with a table installed, the table is authoritative and the cluster-wide replication factor is the sum of its values.
+
+Two properties fall out of treating each DC as its own budget:
+
+- **A DC absent from the table gets no replicas.** The table must name every DC meant to carry data; `main.go` refuses to start if `SELF_DC` is empty or unlisted.
+- **DCs never borrow from each other.** A DC with fewer nodes than its target yields a short replica set rather than topping up from across the WAN, which would relocate that DC's durability to the far side of the link the feature exists to survive. `healthyReplicasDC` applies the same rule to sloppy quorum: substitutes for an unhealthy owner come from that owner's own DC, so a whole-DC outage leaves the remote DC's set intact and reports every local owner for hinting.
+
+Cross-DC quorum control (`LOCAL_QUORUM`, `LOCAL_ONE`) and async cross-DC delivery are not implemented yet; see [multi-DC](multi-dc.md) for the staged plan.
 
 ### Key Counters
 
@@ -67,6 +80,14 @@ Each physical node carries an atomic `int64` key counter. It increments on each 
 This is the shape of Cassandra's NetworkTopologyStrategy: placement stays a pure function of the ring plus membership metadata, so any node can compute any key's replica set locally and all nodes agree as long as gossip has converged. A placement table (explicit key-range-to-replica assignments) would allow more balanced placement but needs its own replication, versioning, and repair story - the class of problem the consistent hash ring exists to avoid.
 
 **Tradeoff:** Zone-aware placement changes which nodes own which keys the moment zones are configured, exactly like adding a node does. Enabling zones on an existing cluster shifts replica sets, and anti-entropy must repair the moved ranges before the old copies are only found on non-owners. Deferred-then-fallback selection can also skew load toward zones with fewer nodes, since a small zone is picked once per set regardless of its size; balanced zones keep this moot.
+
+### Per-DC Budgets over One Cluster-Wide Factor
+
+**Choice:** With a per-DC table installed, each DC fills an independent replica budget and never borrows a slot from another DC, even when that leaves the set short of the nominal total.
+
+The point of a per-DC replica count is that each DC can serve the key alone. Silently substituting a remote node for a missing local one would keep the total looking right while quietly destroying that guarantee - the failure would surface only during the DC outage the configuration was meant to survive. A short set is the honest signal, and the skipped owners still flow through hinted handoff.
+
+**Tradeoff:** An under-provisioned DC degrades availability rather than transparently healing: if `us-east:3` only has two nodes, every key there is one node short and a quorum sized for the full total is harder to reach. This is a configuration error the operator should see, but it does mean the table has to track the real topology - there is no gossiped runtime topology map yet (see [multi-DC](multi-dc.md)).
 
 **Choice:** `emirpasic/gods` Red-Black Tree, keyed by vnode hash.
 

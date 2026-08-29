@@ -179,5 +179,5 @@ make coverage  # HTML coverage report
 
 **Cluster and operations**
 
-- **Multi-DC replication** - building on zone-aware placement: per-DC replica counts and LOCAL_QUORUM consistency levels, with asynchronous cross-DC replication and its own repair story; stresses ring topology metadata, gossip, and quorum math at once
+- **Multi-DC replication** - in progress: the DC label and per-DC replica counts (`REPLICATION_FACTOR_BY_DC`) already drive placement, so a key keeps a full replica set in each DC. Still to come are the LOCAL_QUORUM/LOCAL_ONE consistency levels and asynchronous cross-DC replication with its own repair story; see [docs/multi-dc.md](docs/multi-dc.md)
 - **Token-aware Go client** - a client library that hashes keys locally and talks directly to a replica, skipping the coordinator hop

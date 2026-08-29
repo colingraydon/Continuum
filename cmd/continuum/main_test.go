@@ -194,3 +194,114 @@ func TestLoadConfig_QuorumInvalidZero(t *testing.T) {
 		t.Errorf("READ_QUORUM=-1 should fall back to default 2, got %d", cfg.readQuorum)
 	}
 }
+
+func TestParseDCReplication_Valid(t *testing.T) {
+	// Arrange + Act: surrounding whitespace is tolerated so a wrapped or
+	// prettified env value still parses.
+	got, err := parseDCReplication(" us-east:3 , eu-west:2 ")
+
+	// Assert
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got["us-east"] != 3 || got["eu-west"] != 2 || len(got) != 2 {
+		t.Errorf("parsed %v, want us-east:3 eu-west:2", got)
+	}
+}
+
+func TestParseDCReplication_EmptyIsNil(t *testing.T) {
+	// An unset (or blank) value leaves the cluster on the single cluster-wide
+	// REPLICATION_FACTOR rather than installing an empty table.
+	for _, raw := range []string{"", "   "} {
+		got, err := parseDCReplication(raw)
+		if err != nil {
+			t.Fatalf("parseDCReplication(%q): unexpected error: %v", raw, err)
+		}
+		if got != nil {
+			t.Errorf("parseDCReplication(%q) = %v, want nil", raw, got)
+		}
+	}
+}
+
+func TestParseDCReplication_Malformed(t *testing.T) {
+	// Malformed input is an error rather than a silent skip: quietly dropping an
+	// entry would under-replicate the DC the operator asked to protect.
+	cases := map[string]string{
+		"missing colon":    "us-east",
+		"empty dc name":    ":3,eu-west:2",
+		"non-numeric":      "us-east:three",
+		"zero count":       "us-east:0",
+		"negative count":   "us-east:-1",
+		"duplicate dc":     "us-east:3,us-east:2",
+		"trailing garbage": "us-east:3,",
+	}
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parseDCReplication(raw); err == nil {
+				t.Errorf("parseDCReplication(%q) succeeded, want error", raw)
+			}
+		})
+	}
+}
+
+func TestValidateDCReplication(t *testing.T) {
+	factors := map[string]int{"us-east": 3, "eu-west": 3}
+
+	// No table: SELF_DC is irrelevant, single-DC placement applies.
+	if err := validateDCReplication(nil, ""); err != nil {
+		t.Errorf("empty table should validate, got %v", err)
+	}
+	// Listed DC: fine.
+	if err := validateDCReplication(factors, "us-east"); err != nil {
+		t.Errorf("listed SELF_DC should validate, got %v", err)
+	}
+	// Unset SELF_DC with a table: this node would hold nothing.
+	if err := validateDCReplication(factors, ""); err == nil {
+		t.Error("empty SELF_DC with a table should fail validation")
+	}
+	// SELF_DC absent from the table: same problem, named explicitly.
+	if err := validateDCReplication(factors, "ap-south"); err == nil {
+		t.Error("unlisted SELF_DC should fail validation")
+	}
+}
+
+func TestLoadConfig_DCReplicationDrivesReplicationFactor(t *testing.T) {
+	// The per-DC table replaces REPLICATION_FACTOR rather than sitting beside
+	// it, so quorum sizing keeps working off a single cluster-wide total.
+	t.Setenv("SELF_DC", "us-east")
+	t.Setenv("REPLICATION_FACTOR_BY_DC", "us-east:3,eu-west:3")
+	t.Setenv("REPLICATION_FACTOR", "2") // overridden by the table
+	t.Setenv("WRITE_QUORUM", "")
+	t.Setenv("READ_QUORUM", "")
+
+	cfg := loadConfig()
+
+	if cfg.replicationFactor != 6 {
+		t.Errorf("replicationFactor = %d, want 6 (sum of the table)", cfg.replicationFactor)
+	}
+	if len(cfg.dcReplication) != 2 || cfg.dcReplication["us-east"] != 3 {
+		t.Errorf("dcReplication = %v, want us-east:3 eu-west:3", cfg.dcReplication)
+	}
+	// Default quorum tracks the new total: floor(6/2)+1 = 4.
+	if cfg.writeQuorum != 4 || cfg.readQuorum != 4 {
+		t.Errorf("quorums = w%d/r%d, want 4/4 for RF 6", cfg.writeQuorum, cfg.readQuorum)
+	}
+}
+
+func TestLoadConfig_NoDCReplicationLeavesFactorAlone(t *testing.T) {
+	// Without the table nothing changes: dcReplication stays nil and
+	// REPLICATION_FACTOR still drives placement.
+	t.Setenv("REPLICATION_FACTOR_BY_DC", "")
+	t.Setenv("REPLICATION_FACTOR", "3")
+	t.Setenv("WRITE_QUORUM", "")
+	t.Setenv("READ_QUORUM", "")
+
+	cfg := loadConfig()
+
+	if cfg.dcReplication != nil {
+		t.Errorf("dcReplication = %v, want nil", cfg.dcReplication)
+	}
+	if cfg.replicationFactor != 3 {
+		t.Errorf("replicationFactor = %d, want 3", cfg.replicationFactor)
+	}
+}
