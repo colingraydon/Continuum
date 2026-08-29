@@ -891,14 +891,19 @@ func TestRequestedQuorumLevels(t *testing.T) {
 		got, err := h.requestedQuorum(req, 2)
 		if tc.wantErr {
 			if err == nil {
-				t.Errorf("consistency=%q: expected error, got quorum %d", tc.param, got)
+				t.Errorf("consistency=%q: expected error, got quorum %+v", tc.param, got)
 			}
 			continue
 		}
 		if err != nil {
 			t.Errorf("consistency=%q: unexpected error: %v", tc.param, err)
-		} else if got != tc.want {
-			t.Errorf("consistency=%q: got quorum %d, want %d", tc.param, got, tc.want)
+			continue
+		}
+		if got.size != tc.want {
+			t.Errorf("consistency=%q: got quorum %d, want %d", tc.param, got.size, tc.want)
+		}
+		if got.localOnly {
+			t.Errorf("consistency=%q: cluster-wide level marked localOnly", tc.param)
 		}
 	}
 }

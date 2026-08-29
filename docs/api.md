@@ -71,15 +71,26 @@ All three key endpoints accept an optional `?consistency=` query parameter that 
 | `one` | 1 | Fastest; the coordinator's own copy suffices |
 | `quorum` | RF/2 + 1 | Majority of the replication factor |
 | `all` | RF | Every current replica must respond |
+| `local_one` | 1 | Like `one`, counted only in the coordinator's DC |
+| `local_quorum` | localRF/2 + 1 | Majority of the coordinator's *own* DC replicas |
 | `serial` | RF/2 + 1 | GET only: linearizable read via a paxos prepare round |
 
 ```
 PUT /keys/session-token?consistency=all
 GET /keys/profile?consistency=one
+PUT /keys/cart?consistency=local_quorum
 GET /keys/lock-owner?consistency=serial
 ```
 
 An unrecognized level returns 400 without any side effect (`serial` on a write is rejected the same way - writes wanting serial semantics use `?cas=true`). Absent, the process default applies. Like the configured W/R, `one`/`quorum`/`all` are clamped to the currently available replica set, so `all` means "all current replicas", not a hard durability floor - see [Replication](replication.md). A `serial` read instead requires a true majority of the key's replica set and fails with a retryable 503 without one; it observes every decided CAS round through majority intersection and finishes any in-flight round before answering. See [Client Consistency](client-consistency.md).
+
+**Local consistency levels**
+
+`local_one` and `local_quorum` count acknowledgements only from replicas in the coordinator's own data center, so a request never blocks on a slow or unreachable remote DC. `local_quorum` sizes against that DC's own replica target, not the cluster-wide RF: with `REPLICATION_FACTOR_BY_DC=us-east:3,eu-west:3` the cluster RF is 6 and `quorum` needs 4 acks spanning both DCs, while `local_quorum` needs only 2 from `us-east`. A whole-DC outage or a severed WAN link therefore fails `quorum` but not `local_quorum`.
+
+Narrowing applies to the *counting*, never the fan-out: remote replicas still receive every write and read, their responses simply do not satisfy the quorum. A `local_quorum` write is fully replicated to every DC; the coordinator just stops waiting once its own DC has answered, and the remote requests complete in the background.
+
+Both levels require the node to be labeled (`SELF_DC`) and its DC to appear in `REPLICATION_FACTOR_BY_DC`. Without that there is no per-DC target to size against, and in a single-DC cluster `local_quorum` would merely restate `quorum` - so requesting one returns **400**, not a silent reinterpretation. If the configuration is valid but the key happens to have no replica in the local DC, the request returns **503**: that is transient, since membership may restore one. See [multi-DC](multi-dc.md).
 
 **Conditional writes (CAS)**
 ```

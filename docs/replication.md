@@ -76,6 +76,8 @@ With RF=3 and W=R=2, the system tolerates one node failure for both reads and wr
 
 The process-configured W and R are defaults, not fixed limits: any key request can override them with `?consistency=one|quorum|all` (`one`=1, `quorum`=RF/2+1, `all`=RF; see [API](api.md)). This lets a single deployment serve mixed workloads - a session write can demand `all` while a dashboard read takes `one` - instead of forcing one durability/latency point per process. An unrecognized level is rejected with 400 before any local write, so a typo cannot half-apply. The resolved quorum is clamped to the available replica set exactly like the configured values.
 
+In a multi-DC deployment, `local_one` and `local_quorum` narrow *which* replicas may acknowledge: only those sharing the coordinator's data center, sized against that DC's own replica target rather than the cluster-wide RF. The fan-out is unchanged - every DC still receives the write - so the coordinator simply stops waiting once its own DC has answered. See [multi-DC](multi-dc.md).
+
 > **Failure Mode - Quorum Not Met**
 >
 > If fewer than W replicas acknowledge a write, the coordinator returns 503. The write was not lost - it landed on however many replicas responded before quorum failed. Anti-entropy will propagate it. The client should treat 503 as "unknown state" and implement idempotent retry with the returned or a higher vector clock. With sloppy quorum this only happens when fewer than W *healthy* nodes exist anywhere on the ring, or when a replica that gossip still believes alive fails mid-request (e.g. in the seconds between a crash and the suspect verdict).
