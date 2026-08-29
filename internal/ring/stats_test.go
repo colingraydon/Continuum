@@ -34,6 +34,27 @@ func TestGetStatsEmptyRing(t *testing.T) {
 	}
 }
 
+func TestGetStatsSurfacesDCAndZone(t *testing.T) {
+	// Arrange
+	r := NewRing(150)
+	r.AddZonedNodeDC("node1", "10.0.0.1", "us-east", "rack1", 1.0)
+
+	// Act
+	stats := r.GetStats()
+
+	// Assert: the /stats distribution carries both failure-domain labels.
+	if len(stats.Distribution) != 1 {
+		t.Fatalf("expected one node in distribution, got %d", len(stats.Distribution))
+	}
+	got := stats.Distribution[0]
+	if got.DC != "us-east" {
+		t.Errorf("expected dc us-east, got %q", got.DC)
+	}
+	if got.Zone != "rack1" {
+		t.Errorf("expected zone rack1, got %q", got.Zone)
+	}
+}
+
 func TestGetStatsTotalCounts(t *testing.T) {
 	// Arrange
 	r := NewRing(150)

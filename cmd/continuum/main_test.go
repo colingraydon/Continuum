@@ -3,7 +3,62 @@ package main
 import (
 	"testing"
 	"time"
+
+	"github.com/colingraydon/continuum/internal/gossip"
 )
+
+func TestLoadConfig_SelfDC(t *testing.T) {
+	t.Setenv("SELF_DC", "us-west")
+
+	cfg := loadConfig()
+
+	if cfg.selfDC != "us-west" {
+		t.Errorf("expected selfDC=us-west, got %q", cfg.selfDC)
+	}
+}
+
+func TestApplySelfMetadata_StampsLabels(t *testing.T) {
+	ml := gossip.NewMemberList("n1", "10.0.0.1:8080", nil)
+
+	applySelfMetadata(ml, config{
+		selfWeight:      2.0,
+		selfZone:        "rack1",
+		selfDC:          "us-east",
+		gossipAdvertise: "10.0.0.1:9000",
+	})
+
+	self, ok := ml.Get("n1")
+	if !ok {
+		t.Fatal("self member missing")
+	}
+	if self.DC != "us-east" {
+		t.Errorf("dc = %q, want us-east", self.DC)
+	}
+	if self.Zone != "rack1" {
+		t.Errorf("zone = %q, want rack1", self.Zone)
+	}
+	if self.Weight != 2.0 {
+		t.Errorf("weight = %v, want 2.0", self.Weight)
+	}
+	if self.GossipAddr != "10.0.0.1:9000" {
+		t.Errorf("gossipAddr = %q, want 10.0.0.1:9000", self.GossipAddr)
+	}
+}
+
+func TestApplySelfMetadata_SkipsEmptyLabels(t *testing.T) {
+	// An unlabeled node must not carry a stray zone/DC after configuration.
+	ml := gossip.NewMemberList("n1", "10.0.0.1:8080", nil)
+
+	applySelfMetadata(ml, config{selfWeight: 1.0, gossipAdvertise: "10.0.0.1:9000"})
+
+	self, _ := ml.Get("n1")
+	if self.DC != "" {
+		t.Errorf("expected empty dc, got %q", self.DC)
+	}
+	if self.Zone != "" {
+		t.Errorf("expected empty zone, got %q", self.Zone)
+	}
+}
 
 func TestLoadConfig_Defaults(t *testing.T) {
 	// Clear all env vars that loadConfig reads by setting them via t.Setenv

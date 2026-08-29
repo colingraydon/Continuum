@@ -20,7 +20,8 @@
 | `HINT_DELIVERY_INTERVAL_MS` | `30000` | Interval between hint delivery sweeps to alive targets (backstops event-driven delivery) |
 | `SEED_NODES` | (none) | Comma-separated HTTP addresses to bootstrap from on first join |
 | `SELF_WEIGHT` | `1.0` | Capacity weight for vnode allocation; `2.0` gives twice the vnodes |
-| `SELF_ZONE` | (none) | Failure-domain label (rack, AZ, DC); replica placement spreads each key across distinct zones |
+| `SELF_ZONE` | (none) | Failure-domain label (rack, AZ); replica placement spreads each key across distinct zones |
+| `SELF_DC` | (none) | Data-center label, the failure domain above `SELF_ZONE`; propagated and surfaced today, gains placement/quorum meaning in a later PR (see [multi-DC](multi-dc.md)) |
 | `DATA_DIR` | (none) | Directory for WAL + SSTable persistence. Empty disables persistence (memory-only) |
 | `MEMTABLE_MAX_BYTES` | `16777216` (16 MiB) | Memtable size that triggers a flush to an SSTable (requires `DATA_DIR`) |
 | `BLOCK_CACHE_BYTES` | `16777216` (16 MiB) | Shared LRU cache over decompressed SSTable blocks; `0` disables it (requires `DATA_DIR`) |
@@ -35,7 +36,9 @@
 
 `SELF_WEIGHT` follows the formula `round(REPLICAS * SELF_WEIGHT)` with a minimum of 1 vnode. A weight of `0.5` on a 150-replica configuration gives 75 vnodes and roughly half the key space.
 
-`SELF_ZONE` propagates through gossip, so every node computes the same zone-aware placement from its local ring. Leaving it unset everywhere gives plain ring-order placement. Give all nodes in the same rack (or AZ, or DC) the same label; the label text itself carries no meaning. Setting zones on a cluster that already holds data moves some replica ownership, like adding a node does - anti-entropy repairs the moved ranges over the following sync rounds.
+`SELF_ZONE` propagates through gossip, so every node computes the same zone-aware placement from its local ring. Leaving it unset everywhere gives plain ring-order placement. Give all nodes in the same rack (or AZ) the same label; the label text itself carries no meaning. Setting zones on a cluster that already holds data moves some replica ownership, like adding a node does - anti-entropy repairs the moved ranges over the following sync rounds.
+
+`SELF_DC` labels the data center a node lives in - the failure domain above `SELF_ZONE`. Today it propagates through gossip and appears per node in `/stats`, but it does not yet affect placement or quorum; that behavior (per-DC replica counts, `LOCAL_QUORUM`, async cross-DC replication) lands in later PRs. See [multi-DC](multi-dc.md) for the full plan.
 
 `DATA_DIR` enables crash-durable persistence: every `PUT`/`DELETE`/`EVICT`/`GC` is appended to a write-ahead log and fsynced before the in-memory store is updated. When the memtable exceeds `MEMTABLE_MAX_BYTES` it is flushed to an immutable SSTable and the covered WAL segments are deleted; a final flush runs on graceful shutdown. On restart the node opens its SSTables and replays the WAL tail before joining gossip. A node whose last clean shutdown is older than `GCTTL` (24 h) discards its local data and re-bootstraps from peers, so the cluster cannot resurrect tombstones that other replicas have already purged. Pre-LSM data dirs (snapshot-based) are migrated to an SSTable automatically on first startup. See [docs/persistence.md](persistence.md) and [docs/sstable.md](sstable.md) for formats and recovery flow.
 

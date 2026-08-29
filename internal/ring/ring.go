@@ -53,10 +53,19 @@ func (r *Ring) AddWeightedNode(id, address string, weight float64) {
 }
 
 // AddZonedNode adds a node labeled with the failure-domain zone it lives in
-// (rack, availability zone, DC). Replica placement spreads each key's replica
-// set across distinct zones when it can; an empty zone leaves the node out of
-// that spreading entirely. Weight semantics match AddWeightedNode.
+// (rack, availability zone). Replica placement spreads each key's replica set
+// across distinct zones when it can; an empty zone leaves the node out of that
+// spreading entirely. Weight semantics match AddWeightedNode. The node's DC is
+// left empty; use AddZonedNodeDC to label it.
 func (r *Ring) AddZonedNode(id, address, zone string, weight float64) {
+	r.AddZonedNodeDC(id, address, "", zone, weight)
+}
+
+// AddZonedNodeDC adds a node labeled with both its data center and its
+// failure-domain zone. Zone semantics match AddZonedNode; DC is recorded and
+// surfaced but does not yet affect placement (multi-DC placement lands in a
+// later PR). Weight semantics match AddWeightedNode.
+func (r *Ring) AddZonedNodeDC(id, address, dc, zone string, weight float64) {
 	if weight <= 0 {
 		weight = 1.0
 	}
@@ -75,7 +84,7 @@ func (r *Ring) AddZonedNode(id, address, zone string, weight float64) {
 		r.tree.Remove(old, r.vnodeCounts[id])
 	}
 
-	node := &Node{ID: id, Address: address, Zone: zone}
+	node := &Node{ID: id, Address: address, DC: dc, Zone: zone}
 	r.nodes[id] = node
 	r.vnodeCounts[id] = vnodes
 	r.keyCounts[id] = &atomic.Int64{}

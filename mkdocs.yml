@@ -77,6 +77,7 @@ nav:
       - read repair: read-repair.md
       - hinted handoff: hinted-handoff.md
       - anti-entropy: antientropy.md
+      - multi-DC: multi-dc.md
   - consistency & queries:
       - client consistency: client-consistency.md
       - range scans: range-scans.md
