@@ -12,7 +12,8 @@
 | `GOSSIP_PORT` | `8081` | UDP port the gossip listener binds |
 | `GOSSIP_ADVERTISE_ADDR` | host of `SELF_ADDRESS` + `GOSSIP_PORT` | UDP address peers send gossip to. Set when nodes use heterogeneous gossip ports (local multi-process clusters) or sit behind port mapping |
 | `REPLICAS` | `150` | Virtual nodes per physical node |
-| `REPLICATION_FACTOR` | `3` | Number of replicas per key |
+| `REPLICATION_FACTOR` | `3` | Number of replicas per key (ignored when `REPLICATION_FACTOR_BY_DC` is set) |
+| `REPLICATION_FACTOR_BY_DC` | (none) | Per-DC replica targets, `dc:count` comma-separated (e.g. `us-east:3,eu-west:3`). Replaces `REPLICATION_FACTOR` with the sum; see [multi-DC](multi-dc.md) |
 | `WRITE_QUORUM` | majority (`RF/2 + 1`) | Replica acks required before returning 204; overridable per request with `?consistency=` |
 | `READ_QUORUM` | majority (`RF/2 + 1`) | Replica responses required for a consistent read; overridable per request with `?consistency=` |
 | `REPLICA_TIMEOUT_MS` | `500` | Timeout in milliseconds for inter-node replication and read calls |
@@ -21,7 +22,7 @@
 | `SEED_NODES` | (none) | Comma-separated HTTP addresses to bootstrap from on first join |
 | `SELF_WEIGHT` | `1.0` | Capacity weight for vnode allocation; `2.0` gives twice the vnodes |
 | `SELF_ZONE` | (none) | Failure-domain label (rack, AZ); replica placement spreads each key across distinct zones |
-| `SELF_DC` | (none) | Data-center label, the failure domain above `SELF_ZONE`; propagated and surfaced today, gains placement/quorum meaning in a later PR (see [multi-DC](multi-dc.md)) |
+| `SELF_DC` | (none) | Data-center label, the failure domain above `SELF_ZONE`; drives per-DC placement when `REPLICATION_FACTOR_BY_DC` is set (see [multi-DC](multi-dc.md)) |
 | `DATA_DIR` | (none) | Directory for WAL + SSTable persistence. Empty disables persistence (memory-only) |
 | `MEMTABLE_MAX_BYTES` | `16777216` (16 MiB) | Memtable size that triggers a flush to an SSTable (requires `DATA_DIR`) |
 | `BLOCK_CACHE_BYTES` | `16777216` (16 MiB) | Shared LRU cache over decompressed SSTable blocks; `0` disables it (requires `DATA_DIR`) |
@@ -38,7 +39,15 @@
 
 `SELF_ZONE` propagates through gossip, so every node computes the same zone-aware placement from its local ring. Leaving it unset everywhere gives plain ring-order placement. Give all nodes in the same rack (or AZ) the same label; the label text itself carries no meaning. Setting zones on a cluster that already holds data moves some replica ownership, like adding a node does - anti-entropy repairs the moved ranges over the following sync rounds.
 
-`SELF_DC` labels the data center a node lives in - the failure domain above `SELF_ZONE`. Today it propagates through gossip and appears per node in `/stats`, but it does not yet affect placement or quorum; that behavior (per-DC replica counts, `LOCAL_QUORUM`, async cross-DC replication) lands in later PRs. See [multi-DC](multi-dc.md) for the full plan.
+`SELF_DC` labels the data center a node lives in - the failure domain above `SELF_ZONE`. It propagates through gossip and appears per node in `/stats`. Zone uniqueness is scoped within a DC, so `rack1` in `us-east` and `rack1` in `eu-west` are distinct failure domains rather than a placement conflict.
+
+`REPLICATION_FACTOR_BY_DC` turns the DC into the outermost placement dimension: each listed DC keeps its own replica count for every key, with zone spreading applied independently inside each one. It **replaces** `REPLICATION_FACTOR`, which becomes the sum of the per-DC targets and continues to size quorums - so `us-east:3,eu-west:3` gives an effective RF of 6 and a default quorum of 4. Three rules follow from making the table authoritative:
+
+- A DC **absent from the table holds no replicas**, so the table must name every DC that should carry data. Startup fails if `SELF_DC` is empty or missing from the table, since that node would silently store nothing.
+- A DC with fewer nodes than its target yields a **short replica set** rather than borrowing a slot from another DC - topping up across the WAN would relocate exactly the durability the table asks for.
+- A node outage is absorbed **within its own DC**: sloppy-quorum substitutes are drawn from the failed owner's DC, and a whole-DC outage leaves the remote DC's set intact with the local owners reported for hinting.
+
+The table is static config and must be **identical on every node**, which keeps placement a deterministic pure function of the ring and membership. Setting it on a cluster that already holds data moves replica ownership, like enabling zones does - anti-entropy repairs the moved ranges over the following sync rounds. Cross-DC quorum control (`LOCAL_QUORUM`, `LOCAL_ONE`) and async cross-DC delivery are not implemented yet; see [multi-DC](multi-dc.md).
 
 `DATA_DIR` enables crash-durable persistence: every `PUT`/`DELETE`/`EVICT`/`GC` is appended to a write-ahead log and fsynced before the in-memory store is updated. When the memtable exceeds `MEMTABLE_MAX_BYTES` it is flushed to an immutable SSTable and the covered WAL segments are deleted; a final flush runs on graceful shutdown. On restart the node opens its SSTables and replays the WAL tail before joining gossip. A node whose last clean shutdown is older than `GCTTL` (24 h) discards its local data and re-bootstraps from peers, so the cluster cannot resurrect tombstones that other replicas have already purged. Pre-LSM data dirs (snapshot-based) are migrated to an SSTable automatically on first startup. See [docs/persistence.md](persistence.md) and [docs/sstable.md](sstable.md) for formats and recovery flow.
 

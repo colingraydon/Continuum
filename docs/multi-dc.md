@@ -6,9 +6,10 @@
 
 ## Status
 
-This is a staged feature. **PR 1 (shipped) adds the `DC` label only** — it is
-propagated through gossip and surfaced on `/stats`, but carries **no placement
-or quorum meaning yet**. The remaining behavior lands in later PRs; see
+This is a staged feature. **PRs 1–2 are shipped:** the `DC` label propagates
+through gossip and is surfaced on `/stats` (PR 1), and per-DC replica counts
+now drive placement (PR 2). **Quorum is still cluster-wide** — `LOCAL_QUORUM`,
+`LOCAL_ONE`, and async cross-DC delivery land in later PRs; see
 [PR staging](#pr-staging).
 
 ## Why
@@ -38,8 +39,7 @@ turn them into siblings, and anti-entropy already heals divergence.
 
 `DC` and `Zone` are **separate fields** on `ring.Node` and `gossip.Member`, not
 a single hierarchical string. Zone uniqueness is scoped *within* a DC — two
-racks named `rack1` in different DCs do not collide (this scoping lands with
-DC-aware placement in PR 2).
+racks named `rack1` in different DCs do not collide.
 
 ```
 region  ─┐
@@ -68,8 +68,9 @@ gracefully to an empty DC.
 1. **PR 1 — `DC` label + plumbing (shipped).** `DC` on `ring.Node` /
    `gossip.Member`, `SetSelfDC`, `SELF_DC` env, gossip propagation (including the
    metadata-change re-fire), and `/stats` surfacing. No behavior change.
-2. **PR 2 — DC-aware placement.** Generalize the ring's zone-aware walk to
-   per-DC replica targets with per-DC zone spreading; `REPLICATION_FACTOR_BY_DC`.
+2. **PR 2 — DC-aware placement (shipped).** `SetDCReplication` /
+   `REPLICATION_FACTOR_BY_DC`, the per-DC replica walk with per-DC zone
+   spreading, and DC-scoped sloppy-quorum substitution.
 3. **PR 3 — `LOCAL_QUORUM` / `LOCAL_ONE`.** Partition replica acks by DC in the
    read and write paths; add the consistency levels.
 4. **PR 4 — Async cross-DC replication.** Ack the client on local-DC quorum,
@@ -79,15 +80,34 @@ gracefully to an empty DC.
    cross-DC-partition scenario to the fault and simulation harnesses, asserting
    `LOCAL_QUORUM` stays available when the remote DC is unreachable.
 
-## What PR 1 ships vs. what is planned
+## What is shipped vs. what is planned
 
-**Ships now:** the `DC` field, `SELF_DC`, gossip propagation, `/stats.dc`. Every
-existing zone-placement test passes untouched — proof that DC is inert at this
-stage.
+**Ships now (PRs 1–2):** the `DC` field, `SELF_DC`, gossip propagation,
+`/stats.dc`; and `REPLICATION_FACTOR_BY_DC` driving placement — per-DC replica
+targets, zone spreading scoped inside each DC, and sloppy-quorum substitutes
+confined to the failed owner's DC.
 
-**Not yet:** DC does not influence which nodes own a key, and quorum is still
-cluster-wide. `REPLICATION_FACTOR_BY_DC`, `LOCAL_QUORUM`, `LOCAL_ONE`, and async
-cross-DC delivery do not exist yet.
+**Not yet:** quorum is still **cluster-wide**. With `us-east:3,eu-west:3` the
+effective RF is 6 and the default quorum is 4, so a write must still be
+acknowledged across both DCs — the coordinator cannot yet be satisfied by its
+local DC alone. `LOCAL_QUORUM`, `LOCAL_ONE`, and async cross-DC delivery land in
+PRs 3–4. Until then, per-DC placement buys **durability** across DCs but not the
+**latency or availability** win; a fully unreachable DC will fail quorum even
+though the local replica set is intact.
+
+### Configuring it
+
+```bash
+SELF_DC=us-east SELF_ZONE=rack1 \
+REPLICATION_FACTOR_BY_DC=us-east:3,eu-west:3 \
+./continuum
+```
+
+The table is static config and must be identical on every node. A DC absent from
+it holds no replicas, so it must name every DC that carries data; startup fails
+if `SELF_DC` is empty or unlisted. See
+[operations](operations.md#environment-variables) for the full variable
+reference.
 
 ## Deferred / future work
 

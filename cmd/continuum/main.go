@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -24,8 +25,12 @@ import (
 )
 
 type config struct {
-	replicas             int
-	replicationFactor    int
+	replicas          int
+	replicationFactor int
+	// dcReplication holds per-DC replica targets from REPLICATION_FACTOR_BY_DC.
+	// Nil means single-DC placement driven by replicationFactor alone; when set,
+	// replicationFactor is the sum of its values.
+	dcReplication        map[string]int
 	writeQuorum          int
 	readQuorum           int
 	selfID               string
@@ -88,8 +93,80 @@ func getEnvString(key, dflt string) string {
 	return dflt
 }
 
+// parseDCReplication parses REPLICATION_FACTOR_BY_DC ("us-east:3,eu-west:2")
+// into per-DC replica targets. An empty value returns nil, leaving the cluster
+// on the single cluster-wide REPLICATION_FACTOR.
+func parseDCReplication(raw string) (map[string]int, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	factors := make(map[string]int)
+	for _, pair := range strings.Split(raw, ",") {
+		name, count, ok := strings.Cut(pair, ":")
+		if !ok {
+			return nil, fmt.Errorf("%q is not in dc:count form", strings.TrimSpace(pair))
+		}
+		dc := strings.TrimSpace(name)
+		if dc == "" {
+			return nil, fmt.Errorf("empty data center name in %q", strings.TrimSpace(pair))
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(count))
+		if err != nil || n <= 0 {
+			return nil, fmt.Errorf("replica count for %q must be a positive integer, got %q", dc, strings.TrimSpace(count))
+		}
+		if _, dup := factors[dc]; dup {
+			return nil, fmt.Errorf("data center %q listed twice", dc)
+		}
+		factors[dc] = n
+	}
+	return factors, nil
+}
+
+// validateDCReplication rejects a table that leaves this node holding no
+// replicas at all. A DC absent from the table gets zero replicas by design, so
+// a node whose own DC is missing would silently store nothing — a
+// misconfiguration rather than a deployment shape worth supporting.
+func validateDCReplication(factors map[string]int, selfDC string) error {
+	if len(factors) == 0 {
+		return nil
+	}
+	if selfDC == "" {
+		return fmt.Errorf("REPLICATION_FACTOR_BY_DC is set but SELF_DC is empty: this node would hold no replicas")
+	}
+	if _, ok := factors[selfDC]; !ok {
+		return fmt.Errorf("SELF_DC %q is not listed in REPLICATION_FACTOR_BY_DC: this node would hold no replicas", selfDC)
+	}
+	return nil
+}
+
+// totalReplicationFactor is the cluster-wide replica count implied by the
+// per-DC table, which quorum sizing and anti-entropy's replica-range lookups
+// are derived from.
+func totalReplicationFactor(factors map[string]int) int {
+	total := 0
+	for _, n := range factors {
+		total += n
+	}
+	return total
+}
+
 func loadConfig() config {
+	selfDC := getEnvString("SELF_DC", "")
+
+	dcReplication, err := parseDCReplication(getEnvString("REPLICATION_FACTOR_BY_DC", ""))
+	if err != nil {
+		log.Fatalf("REPLICATION_FACTOR_BY_DC: %v", err)
+	}
+	if err := validateDCReplication(dcReplication, selfDC); err != nil {
+		log.Fatal(err)
+	}
+
+	// Per-DC targets replace the cluster-wide factor rather than sitting beside
+	// it, so quorum math keeps working off a single total.
 	replicationFactor := getEnvInt("REPLICATION_FACTOR", 3)
+	if len(dcReplication) > 0 {
+		replicationFactor = totalReplicationFactor(dcReplication)
+	}
 	defaultQuorum := replicationFactor/2 + 1
 	writeQuorum := getEnvPositiveInt("WRITE_QUORUM", defaultQuorum)
 	readQuorum := getEnvPositiveInt("READ_QUORUM", defaultQuorum)
@@ -112,6 +189,7 @@ func loadConfig() config {
 	return config{
 		replicas:             getEnvInt("REPLICAS", 150),
 		replicationFactor:    replicationFactor,
+		dcReplication:        dcReplication,
 		writeQuorum:          writeQuorum,
 		readQuorum:           readQuorum,
 		selfID:               getEnvString("SELF_ID", selfAddress),
@@ -125,7 +203,7 @@ func loadConfig() config {
 		hintDeliveryInterval: getEnvDurationMs("HINT_DELIVERY_INTERVAL_MS", 30*time.Second),
 		selfWeight:           getEnvFloat64("SELF_WEIGHT", 1.0),
 		selfZone:             getEnvString("SELF_ZONE", ""),
-		selfDC:               getEnvString("SELF_DC", ""),
+		selfDC:               selfDC,
 		dataDir:              getEnvString("DATA_DIR", ""),
 		memtableMaxBytes:     int64(getEnvPositiveInt("MEMTABLE_MAX_BYTES", 16<<20)),
 		blockCacheBytes:      int64(getEnvInt("BLOCK_CACHE_BYTES", 16<<20)), // <= 0 disables the cache
@@ -337,6 +415,12 @@ func main() {
 	api.RegisterBlockCacheMetrics(s.BlockCacheStats)
 
 	r := ring.NewRing(cfg.replicas)
+	// Install per-DC targets before any node joins the ring, so the very first
+	// placement already reflects them.
+	if len(cfg.dcReplication) > 0 {
+		r.SetDCReplication(cfg.dcReplication)
+		log.Printf("multi-DC placement: %v (total RF %d)", cfg.dcReplication, cfg.replicationFactor)
+	}
 	r.SetUpdateCallback(func(nodeCount, vnodeCount int) {
 		api.UpdateRingMetrics(nodeCount, vnodeCount)
 	})

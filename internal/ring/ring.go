@@ -7,13 +7,18 @@ import (
 )
 
 type Ring struct {
-	mu           sync.RWMutex
-	tree         *Tree
-	nodes        map[string]*Node
-	replicas     int
-	vnodeCounts  map[string]int
-	keyCounts    map[string]*atomic.Int64
-	onUpdate     func(nodeCount, vnodeCount int)
+	mu          sync.RWMutex
+	tree        *Tree
+	nodes       map[string]*Node
+	replicas    int
+	vnodeCounts map[string]int
+	keyCounts   map[string]*atomic.Int64
+	onUpdate    func(nodeCount, vnodeCount int)
+	// dcFactors, when non-empty, replaces the cluster-wide replication factor
+	// with a per-DC target: a key keeps dcFactors[dc] replicas in each listed
+	// DC and none in a DC absent from the table. Installed via
+	// SetDCReplication; nil means single-DC, cluster-wide placement.
+	dcFactors    map[string]int
 	healthFilter func(nodeID string) bool
 }
 
@@ -151,13 +156,20 @@ func (r *Ring) walkDistinct(start uint32, visit func(*Node) bool) {
 // bring new zones. If the walk exhausts every node before the set fills, the
 // passed-over nodes take the remaining slots in ring order, so the set never
 // shrinks just because the cluster has fewer zones than replicas. Unzoned
-// nodes (Zone == "") never conflict. Must be called with r.mu held.
+// nodes (Zone == "") never conflict.
+//
+// With per-DC replica targets installed the factor is not a cluster-wide count
+// any more, so placement defers entirely to walkRingDC. Must be called with
+// r.mu held.
 func (r *Ring) walkRing(hash uint32, factor int) []*Node {
 	// Callers clamp factor, but re-clamp here: factor originates in request
 	// bodies (POST /replicate), and this bounds the allocation below even if
 	// a future caller forgets.
 	if factor <= 0 {
 		return nil
+	}
+	if len(r.dcFactors) > 0 {
+		return r.walkRingDC(hash)
 	}
 	if factor > len(r.nodes) {
 		factor = len(r.nodes)
@@ -167,11 +179,11 @@ func (r *Ring) walkRing(hash uint32, factor int) []*Node {
 	var zoneSkipped []*Node
 
 	r.walkDistinct(hash, func(n *Node) bool {
-		if n.Zone != "" && usedZones[n.Zone] {
+		if n.Zone != "" && usedZones[zoneKey(n)] {
 			zoneSkipped = append(zoneSkipped, n)
 			return true
 		}
-		usedZones[n.Zone] = true
+		usedZones[zoneKey(n)] = true
 		result = append(result, n)
 		return len(result) < factor
 	})
@@ -246,6 +258,9 @@ func (r *Ring) GetReplicationNodes(key string, factor int) []*Node {
 // drawn in ring order, preferring zones the healthy set does not already
 // cover. With no health filter, or a fully healthy replica set, the result
 // is identical to GetReplicationNodes with an empty skipped list.
+//
+// With per-DC replica targets installed, substitution is scoped per DC — see
+// healthyReplicasDC.
 func (r *Ring) GetHealthyReplicationNodes(key string, factor int) (nodes, skipped []*Node) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -253,11 +268,14 @@ func (r *Ring) GetHealthyReplicationNodes(key string, factor int) (nodes, skippe
 	if r.tree.Tree.Size() == 0 {
 		return nil, nil
 	}
+
+	hash := computeHash(key)
+	if len(r.dcFactors) > 0 {
+		return r.healthyReplicasDC(hash)
+	}
 	if factor > len(r.nodes) {
 		factor = len(r.nodes)
 	}
-
-	hash := computeHash(key)
 
 	// Intended owners come from the zone-aware walk, ignoring health: the
 	// owner set must be what every node would compute, so hints buffered for
@@ -269,7 +287,7 @@ func (r *Ring) GetHealthyReplicationNodes(key string, factor int) (nodes, skippe
 		taken[n.ID] = true
 		if r.isHealthy(n) {
 			nodes = append(nodes, n)
-			usedZones[n.Zone] = true
+			usedZones[zoneKey(n)] = true
 		} else {
 			skipped = append(skipped, n)
 		}
@@ -302,8 +320,8 @@ func (r *Ring) fillSubstitutes(hash uint32, factor int, nodes []*Node, taken, us
 		if len(nodes) == factor {
 			return nodes
 		}
-		if n.Zone == "" || !usedZones[n.Zone] {
-			usedZones[n.Zone] = true
+		if n.Zone == "" || !usedZones[zoneKey(n)] {
+			usedZones[zoneKey(n)] = true
 			taken[n.ID] = true
 			nodes = append(nodes, n)
 		}
