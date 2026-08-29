@@ -125,7 +125,9 @@ Heartbeat alone is not enough because a crashed and restarted node starts its he
 
 The alternative is a polling loop that periodically reads the `MemberList` and syncs the ring to match. Polling adds latency proportional to the poll interval and wastes CPU when nothing has changed. The callback approach means the ring is updated within the same gossip processing tick that detected the change - typically within 1 second of the actual event.
 
-**Tradeoff:** The callback is called on the gossip receive goroutine. A slow or blocking callback would delay gossip processing. The ring's `AddWeightedNode` and `RemoveNode` operations are fast (O(log n) RBT mutations), so this is not a concern in practice.
+**Tradeoff:** The callback is called on the gossip receive goroutine, so a slow callback delays gossip processing. The ring's `AddWeightedNode` and `RemoveNode` operations are fast (O(log n) RBT mutations), so the cost itself is not a concern.
+
+The *lock ordering* is. `MemberList` fires `onChange` only after releasing `ml.mu`, and this is a hard requirement rather than a tidiness preference. The callback takes the ring's lock, while the ring's health filter takes `ml.mu` from inside ring methods that already hold the ring lock. Calling out under `ml.mu` therefore closes a cycle - `ml.mu` -> `ring.mu` -> `ml.mu` - and deadlocks the node: a gossip merge blocks forever on the ring lock while a request path holds the ring lock and blocks on `ml.mu`. Any new `MemberList` mutator that notifies must collect its events under the lock and fire them after unlocking, passing a **copy** of the member (mutators write member structs in place, so a live pointer handed to a callback outside the lock would race).
 
 ### 5-Second Stale Threshold
 
