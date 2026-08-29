@@ -45,6 +45,7 @@ const (
 // anti-entropy, which is exactly what the checks assert.
 type simNode struct {
 	id         string
+	dc         string // failure domain above the zone; "" in single-DC runs
 	httpAddr   string
 	gossipAddr string
 
@@ -66,22 +67,47 @@ type simConfig struct {
 	replicationFactor int
 	writeQuorum       int
 	readQuorum        int
+	// dcs assigns a data center to each node by index; nil leaves every node
+	// unlabeled, which is the single-DC shape the other scenarios run in.
+	dcs []string
+	// dcReplication installs per-DC replica targets on every node's ring. When
+	// set it replaces replicationFactor with its sum, mirroring how
+	// REPLICATION_FACTOR_BY_DC overrides REPLICATION_FACTOR in main.go.
+	dcReplication map[string]int
 }
 
 func (c simConfig) withDefaults() simConfig {
 	if c.nodes == 0 {
 		c.nodes = 3
 	}
+	if len(c.dcReplication) > 0 {
+		total := 0
+		for _, n := range c.dcReplication {
+			total += n
+		}
+		c.replicationFactor = total
+	}
 	if c.replicationFactor == 0 {
 		c.replicationFactor = 3
 	}
+	// Majority of the effective RF: 2 for the default RF 3, 4 for a 3+3
+	// two-DC table. Sizing it here keeps the cluster-wide quorum genuinely
+	// cluster-wide, so a cross-DC partition can be seen to break it.
 	if c.writeQuorum == 0 {
-		c.writeQuorum = 2
+		c.writeQuorum = c.replicationFactor/2 + 1
 	}
 	if c.readQuorum == 0 {
-		c.readQuorum = 2
+		c.readQuorum = c.replicationFactor/2 + 1
 	}
 	return c
+}
+
+// dcOf returns the configured data center for the node at index i.
+func (c simConfig) dcOf(i int) string {
+	if i < len(c.dcs) {
+		return c.dcs[i]
+	}
+	return ""
 }
 
 type simCluster struct {
@@ -112,9 +138,10 @@ func (c *simCluster) snapshot() []*simNode {
 
 // startNode builds and starts a node with the given identity, mirroring the
 // production wiring in cmd/continuum/main.go.
-func (c *simCluster) startNode(id string) *simNode {
+func (c *simCluster) startNode(id, dc string) *simNode {
 	n := &simNode{
 		id:         id,
+		dc:         dc,
 		httpAddr:   id + ":80",
 		gossipAddr: id + ":81",
 	}
@@ -139,6 +166,16 @@ func (c *simCluster) startNode(id string) *simNode {
 		}
 	})
 	ml.SetSelfGossipAddr(n.gossipAddr)
+	// Stamp the DC before gossip starts so peers learn it on the first
+	// exchange, exactly as applySelfMetadata does in main.go.
+	if dc != "" {
+		ml.SetSelfDC(dc)
+	}
+	// Per-DC targets must be installed before any node joins the ring, or the
+	// first placements would be computed cluster-wide.
+	if len(c.cfg.dcReplication) > 0 {
+		r.SetDCReplication(c.cfg.dcReplication)
+	}
 	r.SetHealthFilter(func(nodeID string) bool {
 		m, ok := ml.Get(nodeID)
 		return ok && m.Status == gossip.MemberAlive
@@ -156,6 +193,7 @@ func (c *simCluster) startNode(id string) *simNode {
 
 	h := api.NewHandler(r, ml, s, api.HandlerConfig{
 		SelfID:            id,
+		SelfDC:            dc,
 		ReplicationFactor: c.cfg.replicationFactor,
 		WriteQuorum:       c.cfg.writeQuorum,
 		ReadQuorum:        c.cfg.readQuorum,
@@ -181,7 +219,7 @@ func (c *simCluster) startNode(id string) *simNode {
 		}
 	}()
 
-	r.AddWeightedNode(id, n.httpAddr, 1.0)
+	r.AddZonedNodeDC(id, n.httpAddr, dc, "", 1.0)
 
 	n.store, n.ring, n.ml, n.gossiper, n.ae, n.h = s, r, ml, g, ae, h
 	n.mux = api.BuildMux(h)
@@ -207,7 +245,7 @@ func (c *simCluster) crash(n *simNode) {
 // node may never learn the stale claim it must refute — production restarts
 // do the same via SEED_NODES (gossip finding #3).
 func (c *simCluster) restart(n *simNode) *simNode {
-	fresh := c.startNode(n.id)
+	fresh := c.startNode(n.id, n.dc)
 	var peers []string
 	c.mu.Lock()
 	for i, existing := range c.nodes {
@@ -237,7 +275,7 @@ func newSimCluster(t *testing.T, cfg simConfig, seed int64) *simCluster {
 		},
 	}
 	for i := 0; i < cfg.nodes; i++ {
-		c.nodes = append(c.nodes, c.startNode(fmt.Sprintf("n%d", i+1)))
+		c.nodes = append(c.nodes, c.startNode(fmt.Sprintf("n%d", i+1), cfg.dcOf(i)))
 	}
 	t.Cleanup(func() {
 		for _, n := range c.snapshot() {
@@ -360,4 +398,74 @@ func (c *simCluster) replicaSet(key string) []*simNode {
 		return out
 	}
 	return nil
+}
+
+// nodesInDC returns the running nodes labeled dc.
+func (c *simCluster) nodesInDC(dc string) []*simNode {
+	var out []*simNode
+	for _, n := range c.running() {
+		if n.dc == dc {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// partitionDCs severs every link between the two data centers in both
+// directions — a WAN cut. Each side stays fully connected internally, which is
+// what separates this from the single-node partitions the seeded schedule
+// generates: both sides remain quorate within themselves.
+func (c *simCluster) partitionDCs(a, b string) {
+	var idsA, idsB []string
+	for _, n := range c.nodesInDC(a) {
+		idsA = append(idsA, n.id)
+	}
+	for _, n := range c.nodesInDC(b) {
+		idsB = append(idsB, n.id)
+	}
+	c.net.partition(idsA, idsB)
+}
+
+// waitDCsPropagated waits until every running node's ring has learned every
+// running node's DC label. Placement only becomes DC-aware once the labels
+// arrive through gossip, so a test that cuts the WAN before then would be
+// asserting against a half-formed topology.
+func (c *simCluster) waitDCsPropagated(timeout time.Duration) {
+	c.t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if c.dcsPropagated() {
+			return
+		}
+		if time.Now().After(deadline) {
+			for _, n := range c.running() {
+				c.t.Logf("%s ring DCs: %v", n.id, c.ringDCs(n))
+			}
+			c.t.Fatalf("DC labels did not propagate within %v", timeout)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// ringDCs reports node id -> DC as seen in n's local ring.
+func (c *simCluster) ringDCs(n *simNode) map[string]string {
+	out := make(map[string]string)
+	for _, rn := range n.ring.GetNodes() {
+		out[rn.ID] = rn.DC
+	}
+	return out
+}
+
+// dcsPropagated reports whether every running node agrees on every peer's DC.
+func (c *simCluster) dcsPropagated() bool {
+	running := c.running()
+	for _, a := range running {
+		seen := c.ringDCs(a)
+		for _, b := range running {
+			if seen[b.id] != b.dc {
+				return false
+			}
+		}
+	}
+	return true
 }

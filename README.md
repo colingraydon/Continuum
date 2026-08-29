@@ -179,5 +179,5 @@ make coverage  # HTML coverage report
 
 **Cluster and operations**
 
-- **Multi-DC replication** - in progress: per-DC replica counts (`REPLICATION_FACTOR_BY_DC`) drive placement, so a key keeps a full replica set in each DC, and `?consistency=local_quorum` acknowledges from the coordinator's own DC alone - a severed WAN link no longer fails those writes. Still to come is hardening the cross-DC delivery path: reliable hinting of remote-DC failures and a WAN-aware anti-entropy cadence; see [docs/multi-dc.md](docs/multi-dc.md)
+- **Multi-DC replication** - shipped: per-DC replica counts (`REPLICATION_FACTOR_BY_DC`) drive placement, so a key keeps a full replica set in each DC, and `?consistency=local_quorum` acknowledges from the coordinator's own DC alone - a severed WAN link no longer fails those writes. Both the simulation and fault harnesses run cross-DC partition scenarios proving it. Still open is hardening the cross-DC delivery path: reliable hinting of remote-DC failures and a WAN-aware anti-entropy cadence; see [docs/multi-dc.md](docs/multi-dc.md)
 - **Token-aware Go client** - a client library that hashes keys locally and talks directly to a replica, skipping the coordinator hop

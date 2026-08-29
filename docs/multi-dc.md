@@ -6,12 +6,18 @@
 
 ## Status
 
-This is a staged feature. **PRs 1–3 are shipped:** the `DC` label propagates
-through gossip and is surfaced on `/stats` (PR 1), per-DC replica counts drive
-placement (PR 2), and `local_quorum` / `local_one` scope acknowledgements to
-the coordinator's own DC (PR 3). What remains is hardening the cross-DC path
-itself — hinting remote failures and tuning anti-entropy for the WAN; see
-[PR staging](#pr-staging).
+**Shipped.** The `DC` label propagates through gossip and is surfaced on
+`/stats` (PR 1), per-DC replica counts drive placement (PR 2), `local_quorum` /
+`local_one` scope acknowledgements to the coordinator's own DC (PR 3), and both
+verification harnesses now carry a DC dimension with cross-DC partition
+scenarios (PR 5).
+
+PR 4 — cross-DC delivery hardening — was **deferred**, not completed: reliable
+hinting of remote-DC failures and a WAN-aware anti-entropy cadence are still
+open. The PR 5 scenarios do demonstrate that the *existing* hint and
+anti-entropy machinery carries writes across a healed partition, so the gap is
+tuning and failure-path robustness rather than a missing mechanism. See
+[PR staging](#pr-staging) and [Deferred / future work](#deferred-future-work).
 
 ## Why
 
@@ -74,15 +80,18 @@ gracefully to an empty DC.
    spreading, and DC-scoped sloppy-quorum substitution.
 3. **PR 3 — `LOCAL_QUORUM` / `LOCAL_ONE` (shipped).** Replica acks partitioned
    by DC in the read and write paths; both consistency levels added.
-4. **PR 4 — Cross-DC delivery hardening.** Acking on local-DC quorum while the
-   remote fan-out continues in the background *already falls out of PR 3* (the
-   coordinator returns as soon as its quorum is met and drains the rest
-   asynchronously). What is left is the durability story around that: hinting
-   remote-DC failures reliably, and giving cross-DC anti-entropy its own
-   WAN-aware cadence.
-5. **PR 5 (optional) — Verification.** Add a DC dimension and a full
-   cross-DC-partition scenario to the fault and simulation harnesses, asserting
-   `LOCAL_QUORUM` stays available when the remote DC is unreachable.
+4. **PR 4 — Cross-DC delivery hardening (not done).** Acking on local-DC quorum
+   while the remote fan-out continues in the background *already falls out of
+   PR 3* (the coordinator returns as soon as its quorum is met and drains the
+   rest asynchronously). What is left is the durability story around that:
+   hinting remote-DC failures reliably, and giving cross-DC anti-entropy its own
+   WAN-aware cadence. Deferred — PR 5 landed first, and its scenarios now cover
+   the cross-DC repair path well enough to show the existing hint and
+   anti-entropy machinery carries writes across a healed partition.
+5. **PR 5 — Verification (shipped).** A DC dimension in both the simulation and
+   fault harnesses, plus cross-DC partition scenarios asserting `local_quorum`
+   stays available while the remote DC is unreachable and that writes accepted
+   during the cut reach it afterwards.
 
 ## What is shipped vs. what is planned
 
@@ -98,10 +107,20 @@ WAN link or a whole-DC outage now fails the former and survives the latter —
 that is the **latency and availability** win, on top of the cross-DC
 **durability** PR 2 delivered.
 
+**Verified (PR 5):** both harnesses run a two-DC topology. The simulation
+harness cuts the WAN between data centers with each side still internally
+quorate; the fault harness blackholes three real processes to take a whole DC
+dark. Both assert that `local_quorum` keeps serving from the surviving side
+while a cluster-wide quorum fails, and that every write accepted during the
+outage reaches the remote DC once it returns. Each scenario also asserts its
+precondition — that the remote DC held none of those writes *during* the cut —
+so a leaky partition cannot make the post-heal assertion pass for the wrong
+reason.
+
 **Not yet:** the cross-DC delivery path is not hardened. A `local_quorum` write
 returns as soon as the local DC acks, and the remote fan-out continues in the
 background — but a remote replica that fails after the coordinator has already
-responded currently depends on hinted handoff and anti-entropy catching it, and
+responded depends on hinted handoff and anti-entropy catching it, and
 anti-entropy is still WAN-cost-unaware. `EACH_QUORUM` does not exist. See
 [Deferred / future work](#deferred-future-work).
 

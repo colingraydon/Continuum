@@ -339,3 +339,43 @@ func (w *casWorkload) halt() (int, int, int) {
 	defer w.mu.Unlock()
 	return w.acked, w.conflict, w.unknown
 }
+
+// putConsistency writes key through n at an explicit ?consistency= level,
+// returning the status code so a caller can assert availability directly.
+func (c *simCluster) putConsistency(n *simNode, key, value, level string) (int, error) {
+	body, err := json.Marshal(struct {
+		Value string `json:"value"`
+	}{Value: value})
+	if err != nil {
+		return 0, err
+	}
+	url := fmt.Sprintf("http://%s/keys/%s?consistency=%s", n.httpAddr, key, level)
+	req, err := http.NewRequest(http.MethodPut, url, strings.NewReader(string(body)))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	resp.Body.Close()
+	return resp.StatusCode, nil
+}
+
+// getConsistency reads key through n at an explicit ?consistency= level.
+func (c *simCluster) getConsistency(n *simNode, key, level string) (nodeResponse, int, error) {
+	url := fmt.Sprintf("http://%s/keys/%s?consistency=%s", n.httpAddr, key, level)
+	resp, err := c.client.Get(url)
+	if err != nil {
+		return nodeResponse{}, 0, err
+	}
+	defer resp.Body.Close()
+	var nr nodeResponse
+	if resp.StatusCode == http.StatusOK {
+		if err := json.NewDecoder(resp.Body).Decode(&nr); err != nil {
+			return nodeResponse{}, resp.StatusCode, err
+		}
+	}
+	return nr, resp.StatusCode, nil
+}
