@@ -1,4 +1,4 @@
-.PHONY: build run test test-race e2e e2e-integration fault sim sim-race bench bench-ci bench-report lint docker clean
+.PHONY: build run test test-race e2e e2e-integration fault sim sim-race bench bench-ci bench-report lint workflow-lint docker clean
 
 build:
 	go build -o bin/continuum ./cmd/continuum
@@ -40,16 +40,21 @@ bench:
 bench-report:
 	go run ./cmd/benchreport -out docs/data
 
-# CPU-bound benchmark subset for regression gating: excludes fsync-bound,
-# cluster-setup, and multi-millisecond benchmarks whose wall time is dominated
-# by IO or fixture setup and therefore too noisy for CI comparison.
+# CPU-bound benchmark subset for regression gating. The selection lives in the
+# script so this target and the CI gate's interleaved A/B run measure exactly
+# the same benchmarks.
 bench-ci:
-	go test ./benchmarks/ -run 'XXX' -bench . \
-		-skip 'Durable|Cluster|StoreScan100|TombstoneGC|ManagerRebuild' \
-		-count=8 -benchtime=0.3s
+	bash scripts/bench-ab.sh --single
 
 lint:
 	golangci-lint run ./...
+
+# Workflow files are configuration GitHub parses on its own: a syntax error in
+# one does not fail a run, it makes the workflow unreadable, so no job starts
+# and nothing goes red. Lint them like code.
+workflow-lint:
+	go -C tools install github.com/rhysd/actionlint/cmd/actionlint
+	actionlint -shellcheck= -pyflakes=
 
 coverage:
 	go test -coverprofile=coverage.out ./...

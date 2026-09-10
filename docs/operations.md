@@ -90,6 +90,7 @@ In Grafana, add `http://prometheus:9090` as a Prometheus data source.
 | `make bench-ci` | Run the CPU-bound benchmark subset used by the CI regression gate |
 | `make bench-report` | Regenerate the published percentile dataset in `docs/data/` (run on a known machine) |
 | `make lint` | Run golangci-lint |
+| `make workflow-lint` | Run actionlint over `.github/workflows` |
 | `make coverage` | Generate HTML coverage report |
 
 ## Generating Test Traffic
@@ -157,7 +158,8 @@ These jobs run on every push and pull request to `main` (see [docs/testing.md](t
 - **fault-injection** - the fault-injection suite with a 900-second timeout
 - **simulation** - the seeded in-process cluster simulation with a 600-second timeout. It gets its own runner rather than sharing one with the fault suite: both are timing-sensitive, and run together they starve each other into spurious failures
 - **lint** - golangci-lint
-- **bench-regression** (pull requests only) - runs the CPU-bound benchmark subset (`make bench-ci`) on the PR's base commit and then on its head **on the same runner**, compares with `benchstat`, and fails on statistically significant time regressions above 20% (`scripts/benchguard.sh`, threshold via `BENCH_REGRESSION_THRESHOLD`). Same-runner A/B cancels most shared-VM variance and benchstat's significance test filters the rest; insignificant deltas (`~`) never fail the gate. fsync-bound, cluster-setup, and multi-millisecond benchmarks are excluded as too noisy or slow for CI - run `make bench` locally for those.
+- **bench-regression** (pull requests only) - measures the CPU-bound benchmark subset at the PR's base commit and at its head **on the same runner, in alternating rounds** (`scripts/bench-ab.sh`), compares with `benchstat`, and fails on statistically significant time regressions above 20% (`scripts/benchguard.sh`, threshold via `BENCH_REGRESSION_THRESHOLD`). Interleaving matters: measured one side after the other, any drift during the job lands entirely on whichever ran second and reads as a one-sided regression. Only the `sec/op` table is gated - the ring's custom `variance` and `vnodes` units are not costs. Insignificant deltas (`~`) never fail the gate. fsync-bound, cluster-setup, and multi-millisecond benchmarks are excluded as too noisy or slow for CI - run `make bench` locally for those.
+- **workflow-lint** - actionlint over `.github/workflows`. Workflow files are configuration GitHub parses itself, so a syntax error in one does not fail a run - it makes the workflow unreadable and no job starts, which looks identical to a green PR. This job is the only thing that turns that into a visible failure
 
 **docker** runs after all of the above pass and verifies the image builds successfully.
 
@@ -165,4 +167,6 @@ These jobs run on every push and pull request to `main` (see [docs/testing.md](t
 
 **CodeQL** runs as a separate workflow on push, PR, and a weekly schedule (Mondays at 8am UTC). Results appear in the Security tab under Code scanning.
 
-**Dependabot** opens grouped PRs weekly for Go module and GitHub Actions dependency updates. Patch and minor updates are auto-merged if CI passes.
+**Dependabot** opens grouped PRs weekly for Go module and GitHub Actions dependency updates. Patch and minor updates are approved and queued for auto-merge.
+
+Note what "auto-merge" waits on: GitHub holds the merge for the branch's **required** status checks, not for every job on this page. Only `coverage-gate` and SonarCloud are required today, so a red `bench-regression`, `lint`, or `fault-injection` does not block a Dependabot merge - PR #89 landed on `main` with `bench-regression` failing. Widening the required set is a repository-settings change, tracked separately from this file.

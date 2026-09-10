@@ -27,6 +27,7 @@ Common targets (full list in [`docs/operations.md`](docs/operations.md)):
 | `make test` | Unit + integration tests |
 | `make test-race` | Same, under the race detector |
 | `make lint` | `golangci-lint` |
+| `make workflow-lint` | `actionlint` over `.github/workflows` |
 | `make e2e` | In-process cluster tests |
 | `make fault` | Process-based fault-injection suite (kills, hangs, partitions, packet loss) |
 | `make sim` / `make sim-race` | Seeded in-process cluster simulation |
@@ -40,6 +41,8 @@ them here saves a round trip:
 
 - [ ] `make test` (and `make test-race` if you touched anything concurrent)
 - [ ] `make lint` — **zero issues**
+- [ ] `make workflow-lint` if you touched `.github/workflows` — a workflow that
+      fails to parse does not go red, it silently stops running
 - [ ] `gofmt` clean on the files you changed
 - [ ] `make fault` and/or `make sim` when the change touches replication,
       consistency, gossip, or membership — the behavior these harnesses exist to
@@ -49,7 +52,8 @@ them here saves a round trip:
 - [ ] **Docs updated** (see below)
 
 CI additionally runs `go vet`, the full test suite with coverage, e2e, fault
-injection, the seeded cluster simulation, CodeQL, a benchmark regression guard
+injection, the seeded cluster simulation, CodeQL, `actionlint` over the workflow
+files, a benchmark regression guard
 (fails on >20% significant regressions), and a `mkdocs --strict` docs build. SonarCloud flags functions
 whose **cognitive complexity exceeds 15** — keep new functions under it.
 

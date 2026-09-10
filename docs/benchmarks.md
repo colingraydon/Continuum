@@ -49,14 +49,29 @@ reproducible and citable, and CI runners are neither.
 
 ## Regression gate in CI
 
-Every pull request runs the CPU-bound subset (`make bench-ci`) twice on the
-same runner - once at the PR's base commit, once at its head - and compares
-with `benchstat`. A statistically significant time regression above 20% fails
-the build (`scripts/benchguard.sh`). Same-runner A/B comparison cancels most
-shared-VM variance; the significance test filters the rest, so a noisy run
-shows up as `~` and never fails the gate. The fsync-bound, cluster-setup, and
+Every pull request measures the CPU-bound subset on one runner at both the PR's
+base commit and its head, and compares with `benchstat`. A statistically
+significant time regression above 20% fails the build
+(`scripts/benchguard.sh`). Same-runner A/B comparison cancels most shared-VM
+variance; the significance test filters the rest, so a noisy run shows up as
+`~` and never fails the gate. The fsync-bound, cluster-setup, and
 multi-millisecond benchmarks are excluded from the gate as too noisy or slow
 for CI - they remain in `make bench` for local measurement.
+
+**The two sides are measured in alternating rounds** (`scripts/bench-ab.sh`),
+not one side and then the other. Each commit is compiled to a test binary once
+and the binaries run round-robin. Sequential measurement leaves the comparison
+hostage to what else the runner is doing: drift over the job's lifetime -
+a noisy neighbour arriving, thermal throttling - lands entirely on whichever
+side ran second, and benchstat reads it as a significant one-sided regression.
+A dependency bump touching no ring code was failed by the gate that way, at
+`RemoveNode` +24.91% with head variance at 13% against base's 6%. Interleaving
+spreads that drift across both sides, where it reads as variance and the
+significance test absorbs it.
+
+The gate reads only benchstat's `sec/op` table. The benchmarks also report
+custom units (the ring's `variance` and `vnodes`), which are not costs - a
+`+25%` there is not a regression and must never fail a merge.
 
 ## Hash ring
 
