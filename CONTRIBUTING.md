@@ -28,6 +28,7 @@ Common targets (full list in [`docs/operations.md`](docs/operations.md)):
 | `make test-race` | Same, under the race detector |
 | `make lint` | `golangci-lint` |
 | `make workflow-lint` | `actionlint` over `.github/workflows` |
+| `make patch-coverage` | Diff coverage against the base branch (the CI gate) |
 | `make e2e` | In-process cluster tests |
 | `make fault` | Process-based fault-injection suite (kills, hangs, partitions, packet loss) |
 | `make sim` / `make sim-race` | Seeded in-process cluster simulation |
@@ -47,8 +48,10 @@ them here saves a round trip:
 - [ ] `make fault` and/or `make sim` when the change touches replication,
       consistency, gossip, or membership — the behavior these harnesses exist to
       protect
-- [ ] Tests added for new logic; coverage stays high (the repo tracks coverage
-      via Codecov)
+- [ ] Tests added for new logic; coverage stays high. CI enforces two floors:
+      90% project-wide (`coverage-gate`) and 80% on the diff
+      (`patch-coverage`) - run `make patch-coverage` to see the latter locally,
+      with the uncovered lines named
 - [ ] **Docs updated** (see below)
 
 CI additionally runs `go vet`, the full test suite with coverage, e2e, fault

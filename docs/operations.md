@@ -93,6 +93,7 @@ In Grafana, add `http://prometheus:9090` as a Prometheus data source.
 | `make bench-report` | Regenerate the published percentile dataset in `docs/data/` (run on a known machine) |
 | `make lint` | Run golangci-lint |
 | `make workflow-lint` | Run actionlint over `.github/workflows` |
+| `make patch-coverage` | Diff coverage against `BASE` (default `origin/main`), the gate CI runs on PRs |
 | `make coverage` | Generate HTML coverage report |
 
 ## Generating Test Traffic
@@ -163,7 +164,16 @@ These jobs run on every push and pull request to `main` (see [docs/testing.md](t
 - **bench-regression** (pull requests only) - measures the CPU-bound benchmark subset at the PR's base commit and at its head **on the same runner, in alternating rounds** (`scripts/bench-ab.sh`), compares with `benchstat`, and fails on statistically significant time regressions above 20% (`scripts/benchguard.sh`, threshold via `BENCH_REGRESSION_THRESHOLD`). Interleaving matters: measured one side after the other, any drift during the job lands entirely on whichever ran second and reads as a one-sided regression. Only the `sec/op` table is gated - the ring's custom `variance` and `vnodes` units are not costs. Insignificant deltas (`~`) never fail the gate. fsync-bound, cluster-setup, and multi-millisecond benchmarks are excluded as too noisy or slow for CI - run `make bench` locally for those.
 - **workflow-lint** - actionlint over `.github/workflows`. Workflow files are configuration GitHub parses itself, so a syntax error in one does not fail a run - it makes the workflow unreadable and no job starts, which looks identical to a green PR. This job is the only thing that turns that into a visible failure
 
+- **patch-coverage** (pull requests only) - fails when less than 80% of the changed statements in the diff are covered (`cmd/patchcov`)
 - **sonar-branch-gate** (pushes to `main` only) - fails the run when SonarQube Cloud's **branch** quality gate is red for the merged commit (`scripts/sonar-branch-gate.sh`)
+
+> **Why diff coverage is gated in CI rather than by Codecov**
+>
+> Codecov reports patch coverage, and `codecov.yml` marks that status **informational** - which means it always reports success, whatever the number is. Requiring the `codecov/patch` context therefore blocks a merge only when Codecov fails to answer at all: an availability dependency with no signal in it. The `patch-coverage` job computes the same measure inside CI, where the verdict is reproducible with `make patch-coverage` and the logs name the uncovered lines. Codecov keeps its report, its PR comment, and the README badge - all fed by the coverage upload in the `test` job, none of which depend on the status check.
+>
+> **The two numbers will not match exactly, by design.** Codecov measures *lines*; `patchcov` measures *statements*, because a Go coverage profile records statement blocks. A changed line carrying no statement - a comment, an import, a bare brace - is neither covered nor uncovered, so it is excluded from both sides of the ratio rather than counted as a miss. A diff with no coverable statements at all (docs, workflows) reports "nothing to gate" and passes instead of reporting 0%.
+>
+> The 80% floor sits deliberately below the 90% project floor, for the reason `codecov.yml` made patch informational in the first place: the storage engine has filesystem-error branches (`fsync`/`rename`/`close`) that cannot be exercised without an injection seam. The floor catches a diff that is largely untested without failing one that touches those paths.
 
 > **Two Sonar analyses, only one of which can gate**
 >

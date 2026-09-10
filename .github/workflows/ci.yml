@@ -150,6 +150,41 @@ jobs:
           go -C tools install github.com/rhysd/actionlint/cmd/actionlint
           actionlint -shellcheck= -pyflakes=
 
+  # Diff coverage, gated in CI so it can block a merge deterministically.
+  # Codecov reports the same measure but cannot gate it: codecov.yml marks the
+  # patch status informational, so `codecov/patch` always reports success
+  # whatever the number is. Requiring that context blocks a merge only when
+  # Codecov fails to answer at all - an availability dependency with no signal.
+  # Codecov keeps its report, its PR comment, and the README badge; only the
+  # gating moves here.
+  #
+  # The floor is deliberately below the project floor: the storage engine has
+  # filesystem-error branches (fsync/rename/close) that cannot be exercised
+  # without an injection seam, which is the same reason codecov.yml made patch
+  # informational in the first place. This catches a diff that is largely
+  # untested without failing one that touches those paths.
+  patch-coverage:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # the base commit must be present to diff against
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: "go.mod"
+      - name: Download dependencies
+        run: go mod download
+      - name: Enforce patch coverage
+        run: |
+          go test -coverprofile=coverage.out -covermode=atomic ./...
+          go run ./cmd/patchcov \
+            -base "${{ github.event.pull_request.base.sha }}" \
+            -profile coverage.out \
+            -min 80
+
   # Post-merge only. The required "SonarCloud Code Analysis" check validates a
   # PR's diff; after the merge Sonar runs a second analysis against the branch,
   # scoped to the project's new-code window, which can fail where the PR passed.
