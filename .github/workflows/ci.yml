@@ -71,11 +71,15 @@ jobs:
           go -C tools install github.com/golangci/golangci-lint/v2/cmd/golangci-lint
           golangci-lint run ./...
 
-  # Same-runner A/B benchmark comparison: runs the CPU-bound benchmark subset
-  # on the PR's base commit and head in one job, then fails on statistically
+  # Same-runner A/B benchmark comparison: measures the CPU-bound benchmark
+  # subset at the PR's base commit and at its head, then fails on statistically
   # significant time regressions above the threshold. Same-runner comparison
   # cancels most shared-VM variance; benchstat's significance test (rows
   # without it show "~" and never fail the gate) filters the rest.
+  #
+  # The two sides are measured in alternating rounds rather than one after the
+  # other - see scripts/bench-ab.sh for why running them in sequence turns any
+  # drift during the job into a one-sided false regression.
   bench-regression:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -90,16 +94,11 @@ jobs:
           go-version-file: "go.mod"
       - name: Install benchstat
         run: go -C tools install golang.org/x/perf/cmd/benchstat
-      - name: Benchmark base
+      - name: Benchmark base and head, interleaved
         run: |
-          git checkout ${{ github.event.pull_request.base.sha }}
-          go mod download
-          make bench-ci > /tmp/bench-base.txt || go test ./benchmarks/ -run 'XXX' -bench . -skip 'Durable|Cluster|StoreScan100|TombstoneGC|ManagerRebuild' -count=8 -benchtime=0.3s > /tmp/bench-base.txt
-          git checkout ${{ github.sha }}
-      - name: Benchmark head
-        run: |
-          go mod download
-          make bench-ci > /tmp/bench-head.txt
+          bash scripts/bench-ab.sh \
+            ${{ github.event.pull_request.base.sha }} ${{ github.sha }} \
+            /tmp/bench-base.txt /tmp/bench-head.txt
       - name: Compare (fail on >20% significant regressions)
         run: bash scripts/benchguard.sh /tmp/bench-base.txt /tmp/bench-head.txt
 
@@ -132,6 +131,25 @@ jobs:
       - name: Build Docker image
         run: docker build -t continuum .
 
+  # Workflow files are configuration GitHub parses on its own, so a syntax error
+  # in one does not fail a run - it makes the workflow unreadable, and no job
+  # starts at all. Nothing goes red, so the failure is invisible on a green PR.
+  # A stray ":all:" in docs.yml disabled the docs deploy for seven weeks and
+  # broke Dependabot's github-actions updater with it before anyone noticed.
+  # Shell/Python linting of run blocks is deliberately off, so this gate behaves
+  # identically here and under `make workflow-lint` on a contributor's machine.
+  workflow-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: "go.mod"
+      - name: actionlint
+        run: |
+          go -C tools install github.com/rhysd/actionlint/cmd/actionlint
+          actionlint -shellcheck= -pyflakes=
+
   # Hard coverage floor, enforced in CI so it can gate merges deterministically
   # (Codecov's project status is advisory only). cmd/ is excluded to match the
   # ignore list in codecov.yml: main()'s process wiring is not unit-testable, so
@@ -144,7 +162,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version-file: "go.mod"
       - name: Download dependencies

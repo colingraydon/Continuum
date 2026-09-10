@@ -31,7 +31,13 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: requirements-docs.txt
-      - run: pip install --require-hashes --only-binary :all: -r requirements-docs.txt
+      # Block scalar, not a plain one: ":all:" ends in a colon, and a colon
+      # followed by a space makes a plain scalar unparseable YAML. That does not
+      # fail the run - it stops the workflow from being readable at all, so no
+      # job starts and Dependabot's github-actions updater errors out too.
+      - name: Install docs dependencies
+        run: |
+          pip install --require-hashes --only-binary=:all: -r requirements-docs.txt
       - run: mkdocs build --strict
       - uses: actions/upload-pages-artifact@v5
         with:

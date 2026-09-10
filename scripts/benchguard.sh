@@ -11,6 +11,10 @@
 # run-to-run variance of shared CI runners. The geomean row is skipped so an
 # accumulation of small, individually-insignificant shifts cannot fail the
 # gate on its own.
+#
+# Only the sec/op table is gated. benchstat emits one table per unit, and the
+# custom units the benchmarks report (ring `variance`, `vnodes`) are not costs -
+# a "+25%" there is not a regression and must not fail a merge.
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
@@ -23,8 +27,11 @@ out="$(benchstat "$1" "$2")"
 echo "$out"
 
 regressions="$(echo "$out" | awk -v t="$threshold" '
+    # Table headers are the only lines benchstat draws with box rules; the one
+    # carrying the unit decides whether the rows below it are costs.
+    /│/ { timing = ($0 ~ /sec\/op/); next }
     /geomean/ { next }
-    {
+    timing {
         for (i = 1; i <= NF; i++) {
             if ($i ~ /^\+[0-9.]+%$/) {
                 v = substr($i, 2, length($i) - 2) + 0
