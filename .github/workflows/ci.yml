@@ -177,13 +177,10 @@ jobs:
           go-version-file: "go.mod"
       - name: Download dependencies
         run: go mod download
+      # Delegates to the make target so CI and a local run measure identically,
+      # including the merge-base diff semantics it owns.
       - name: Enforce patch coverage
-        run: |
-          go test -coverprofile=coverage.out -covermode=atomic ./...
-          go run ./cmd/patchcov \
-            -base "${{ github.event.pull_request.base.sha }}" \
-            -profile coverage.out \
-            -min 80
+        run: make patch-coverage BASE="${{ github.event.pull_request.base.sha }}"
 
   # Post-merge only. The required "SonarCloud Code Analysis" check validates a
   # PR's diff; after the merge Sonar runs a second analysis against the branch,

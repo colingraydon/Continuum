@@ -12,14 +12,19 @@
 // brace) is neither covered nor uncovered and is excluded from both sides of
 // the ratio - which is why a docs-heavy diff reports "no coverable statements"
 // rather than 0%.
+//
+// The unified diff arrives on stdin rather than being produced here, so this
+// binary never shells out and has no dependency on what PATH resolves. The
+// `make patch-coverage` target owns the git invocation, which keeps the
+// merge-base semantics in one place for both CI and local runs.
 package main
 
 import (
 	"bufio"
 	"flag"
 	"fmt"
+	"io"
 	"os"
-	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,10 +32,9 @@ import (
 
 func main() {
 	var (
-		base    = flag.String("base", "origin/main", "base ref to diff against")
 		profile = flag.String("profile", "coverage.out", "go coverage profile")
 		module  = flag.String("module", "", "module path to strip from profile paths (default: read go.mod)")
-		min     = flag.Float64("min", 80, "minimum percent of changed statements covered")
+		minPct  = flag.Float64("min", 80, "minimum percent of changed statements covered")
 		ignore  = flag.String("ignore", "cmd/", "comma-separated path prefixes to exclude")
 	)
 	flag.Parse()
@@ -43,10 +47,11 @@ func main() {
 		}
 	}
 
-	diff, err := changedLines(*base)
+	raw, err := io.ReadAll(os.Stdin)
 	if err != nil {
-		fatal("diff against %s: %v", *base, err)
+		fatal("read diff from stdin: %v", err)
 	}
+	diff := parseDiff(string(raw))
 	blocks, err := readProfile(*profile, mod)
 	if err != nil {
 		fatal("read profile %s: %v", *profile, err)
@@ -61,7 +66,7 @@ func main() {
 	}
 
 	pct := 100 * float64(covered) / float64(total)
-	fmt.Printf("patch coverage: %.2f%% (%d/%d changed statements) against %s\n", pct, covered, total, *base)
+	fmt.Printf("patch coverage: %.2f%% (%d/%d changed statements)\n", pct, covered, total)
 
 	if len(uncovered) > 0 {
 		fmt.Println("\nUncovered changed lines:")
@@ -69,11 +74,11 @@ func main() {
 			fmt.Printf("  %s\n", u)
 		}
 	}
-	if pct+1e-9 < *min {
-		fmt.Printf("\nFAIL: patch coverage %.2f%% is below the %.2f%% floor.\n", pct, *min)
+	if pct+1e-9 < *minPct {
+		fmt.Printf("\nFAIL: patch coverage %.2f%% is below the %.2f%% floor.\n", pct, *minPct)
 		os.Exit(1)
 	}
-	fmt.Printf("\nOK: at or above the %.2f%% floor.\n", *min)
+	fmt.Printf("\nOK: at or above the %.2f%% floor.\n", *minPct)
 }
 
 func fatal(format string, args ...any) {
@@ -181,43 +186,37 @@ func lineOf(s string) (int, bool) {
 	return n, err == nil
 }
 
-// changedLines returns the set of added/modified line numbers per Go file,
-// diffed against the merge base so unrelated commits landing on the base branch
-// are not attributed to this change.
-func changedLines(base string) (map[string]map[int]bool, error) {
-	cmd := exec.Command("git", "diff", "--unified=0", base+"...HEAD", "--", "*.go")
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, err
-	}
-	return parseDiff(string(out)), nil
-}
-
 // parseDiff extracts added line numbers per file from unified=0 diff output.
 func parseDiff(diff string) map[string]map[int]bool {
 	changed := make(map[string]map[int]bool)
 	var file string
 	for _, line := range strings.Split(diff, "\n") {
-		switch {
-		case strings.HasPrefix(line, "+++ b/"):
-			file = strings.TrimPrefix(line, "+++ b/")
+		if target, ok := strings.CutPrefix(line, "+++ b/"); ok {
+			file = target
 			if file == "/dev/null" {
 				file = ""
 			}
-		case strings.HasPrefix(line, "@@") && file != "":
-			start, count, ok := parseHunk(line)
-			if !ok {
-				continue
-			}
-			if changed[file] == nil {
-				changed[file] = make(map[int]bool)
-			}
-			for i := range count {
-				changed[file][start+i] = true
-			}
+			continue
+		}
+		if file != "" && strings.HasPrefix(line, "@@") {
+			recordHunk(changed, file, line)
 		}
 	}
 	return changed
+}
+
+// recordHunk marks the lines a single hunk header adds to file.
+func recordHunk(changed map[string]map[int]bool, file, header string) {
+	start, count, ok := parseHunk(header)
+	if !ok {
+		return
+	}
+	if changed[file] == nil {
+		changed[file] = make(map[int]bool)
+	}
+	for i := range count {
+		changed[file][start+i] = true
+	}
 }
 
 // parseHunk reads the new-file line range from "@@ -a,b +c,d @@".

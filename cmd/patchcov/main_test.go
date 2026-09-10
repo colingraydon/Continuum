@@ -203,11 +203,16 @@ func TestSplitPrefixes(t *testing.T) {
 	}
 }
 
-// TestChangedLinesAgainstRealGit exercises the one part that shells out, in a
-// throwaway repository. It pins the three-dot semantics: diffing against the
-// merge base means a commit that lands on the base branch after we forked is
-// not attributed to our change. Two-dot would blame us for it.
-func TestChangedLinesAgainstRealGit(t *testing.T) {
+// TestParseDiffAgainstRealGit feeds genuine `git diff` output through the
+// parser in a throwaway repository, rather than trusting a hand-written
+// fixture to match what git actually emits.
+//
+// It also pins the **three-dot** semantics the `patch-coverage` make target
+// relies on: diffing against the merge base means a commit landing on the base
+// branch after this one forked is not attributed to it. Two-dot would blame
+// this change for someone else's untested code. The flags here must stay in
+// step with the Makefile, which owns the invocation in CI.
+func TestParseDiffAgainstRealGit(t *testing.T) {
 	dir := t.TempDir()
 	run := func(args ...string) {
 		t.Helper()
@@ -247,19 +252,8 @@ func TestChangedLinesAgainstRealGit(t *testing.T) {
 	run("commit", "-qm", "unrelated")
 	run("checkout", "-q", "feature")
 
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(wd) })
-
-	changed, err := changedLines(baseSHA)
-	if err != nil {
-		t.Fatalf("changedLines: %v", err)
-	}
+	raw := gitOut(t, dir, "diff", "--unified=0", baseSHA+"...HEAD", "--", "*.go")
+	changed := parseDiff(raw)
 
 	if len(changed["a.go"]) == 0 {
 		t.Error("expected the added line in a.go to be reported")
