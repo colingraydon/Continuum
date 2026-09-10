@@ -163,6 +163,16 @@ These jobs run on every push and pull request to `main` (see [docs/testing.md](t
 - **bench-regression** (pull requests only) - measures the CPU-bound benchmark subset at the PR's base commit and at its head **on the same runner, in alternating rounds** (`scripts/bench-ab.sh`), compares with `benchstat`, and fails on statistically significant time regressions above 20% (`scripts/benchguard.sh`, threshold via `BENCH_REGRESSION_THRESHOLD`). Interleaving matters: measured one side after the other, any drift during the job lands entirely on whichever ran second and reads as a one-sided regression. Only the `sec/op` table is gated - the ring's custom `variance` and `vnodes` units are not costs. Insignificant deltas (`~`) never fail the gate. fsync-bound, cluster-setup, and multi-millisecond benchmarks are excluded as too noisy or slow for CI - run `make bench` locally for those.
 - **workflow-lint** - actionlint over `.github/workflows`. Workflow files are configuration GitHub parses itself, so a syntax error in one does not fail a run - it makes the workflow unreadable and no job starts, which looks identical to a green PR. This job is the only thing that turns that into a visible failure
 
+- **sonar-branch-gate** (pushes to `main` only) - fails the run when SonarQube Cloud's **branch** quality gate is red for the merged commit (`scripts/sonar-branch-gate.sh`)
+
+> **Two Sonar analyses, only one of which can gate**
+>
+> The required `SonarCloud Code Analysis` check validates a **pull request's diff**. After a merge, Sonar runs a *second, different* analysis against the **branch**, scoped to the project's new-code window - and it can fail where the PR passed, because the two score different sets of lines. That second analysis cannot gate anything by construction: it only exists once the merge has already happened.
+>
+> So `main` can be red on Sonar while every check on the merge commit is green. That is not a misconfiguration, and no change to the required-checks list fixes it. It happened after #90: `main` sat red for three hours with a green merge commit, because nothing was watching. `sonar-branch-gate` is the watcher - it does not prevent the red, it makes it visible as a failed CI run.
+>
+> The job binds its verdict to a specific commit (each Sonar analysis reports the git revision it ran on) rather than asking "is the branch red right now", which would read the previous commit's verdict in the seconds before the new analysis lands. A commit with no analysis at all - Automatic Analysis skips those with no analyzable source change, such as a docs-only merge - reports loudly and passes rather than failing the build.
+
 **docker** runs after all of the above pass and verifies the image builds successfully.
 
 **coverage-gate** enforces a hard 90% statement-coverage floor excluding `cmd/`, matching the ignore list in `codecov.yml`. Codecov's own project status is advisory; this job is what gates a merge.

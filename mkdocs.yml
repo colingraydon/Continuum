@@ -85,6 +85,7 @@ nav:
       - architecture: architecture.md
       - api reference: api.md
       - operations: operations.md
+      - security posture: security.md
       - benchmarks: benchmarks.md
       - fault injection: fault-injection.md
       - history checking: history-checking.md
