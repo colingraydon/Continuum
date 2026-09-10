@@ -44,7 +44,8 @@ fi
 # shell, which reads scripts incrementally. Re-exec from a copy outside the
 # work tree so the checkout below cannot corrupt execution mid-run.
 if [[ "${BENCH_AB_REEXEC:-}" != "1" ]]; then
-    BENCH_AB_SELF="$(mktemp -t bench-ab)"
+    # Explicit X template: GNU mktemp rejects a bare -t prefix that BSD accepts.
+    BENCH_AB_SELF="$(mktemp "${TMPDIR:-/tmp}/bench-ab.XXXXXX")"
     cp "$0" "$BENCH_AB_SELF"
     # exec replaces this shell, so an EXIT trap here would never fire; the copy
     # is removed by the re-exec'd child's trap instead.
@@ -57,7 +58,7 @@ head_sha="$2"
 base_out="$3"
 head_out="$4"
 
-workdir="$(mktemp -d -t bench-ab)"
+workdir="$(mktemp -d "${TMPDIR:-/tmp}/bench-ab-work.XXXXXX")"
 # Always land back on head: the gate compares from there, and a job left on a
 # detached base commit would silently measure the wrong tree afterwards.
 trap 'git checkout -q "$head_sha"; rm -rf "$workdir" "${BENCH_AB_SELF:-}"' EXIT
