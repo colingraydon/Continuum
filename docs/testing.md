@@ -16,6 +16,7 @@ the heavier ones are opt-in behind build tags so the default loop stays fast.
 | Process-based E2E | `make e2e-integration` | real binaries, real signals | ~10s |
 | Fault injection | `make fault` | real binaries + fault proxies | ~2-3 min |
 | Seeded simulation | `make sim` | whole cluster, one process, in-memory network | ~20s (scales with `SIM_SEEDS`) |
+| TLA+ model checking | `make spec` | **no Continuum code at all** | ~20s |
 | Benchmarks | `make bench` | micro | varies |
 
 Supporting passes: `make test-race` (race detector across all packages),
@@ -88,6 +89,19 @@ Same invariants as the fault harness plus the porcupine check; failures
 replay by seed. Being in-process, `make sim-race` gives the race detector its
 only whole-system view - which is how finding #8 (shared member pointers) was
 caught. See [Simulation Testing](simulation.md).
+
+## Beside the pyramid: the TLA+ specification (`specs/`)
+
+Every layer above samples executions: they run the system and observe what the
+schedule happens to produce. Model checking inverts that. `make spec` runs no
+Continuum code - it enumerates *every* interleaving of a mathematical model of
+the replication path within bounded constants, and reports the shortest trace
+that breaks an invariant if one exists.
+
+That makes it complementary rather than higher on the pyramid. It covers
+interleavings no seed would reach, and it covers none of the implementation:
+a correct spec and a buggy Go function coexist happily until trace conformance
+lands. See [TLA+ Specification](tla-spec.md).
 
 ## Benchmarks
 

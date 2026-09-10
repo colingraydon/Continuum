@@ -150,6 +150,28 @@ jobs:
           go -C tools install github.com/rhysd/actionlint/cmd/actionlint
           actionlint -shellcheck= -pyflakes=
 
+  # Model-checks the TLA+ specification. The other jobs run the system and
+  # observe what happens; this one runs no Continuum code at all - it
+  # enumerates every interleaving of the modelled protocol within bounded
+  # constants and checks the invariants hold in all of them. It guards the
+  # design, not the implementation, which is why it complements rather than
+  # replaces the fault and simulation suites.
+  #
+  # Both configurations finish in well under a minute at these bounds. Larger
+  # bounds are a documented manual run, not a CI gate - TLC state spaces grow
+  # fast enough that putting one on the critical path invites a timeout.
+  spec:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Model-check the specification
+        run: make spec
+
   # Diff coverage, gated in CI so it can block a merge deterministically.
   # Codecov reports the same measure but cannot gate it: codecov.yml marks the
   # patch status informational, so `codecov/patch` always reports success

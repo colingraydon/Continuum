@@ -42,3 +42,12 @@ sonarqube_issues.csv
 
 # MkDocs build output (published by the docs workflow, never committed)
 /site/
+
+# TLC model checker jar, fetched on demand by scripts/tlc.sh
+.tlc/
+
+# TLC scratch output: the on-disk state queue and the trace module it writes
+# when an invariant is violated. Generated per run, never source.
+specs/states/
+specs/*_TTrace_*.tla
+specs/*_TTrace_*.bin
