@@ -19,6 +19,8 @@
 | `REPLICA_TIMEOUT_MS` | `500` | Timeout in milliseconds for inter-node replication and read calls |
 | `SYNC_INTERVAL_MS` | `30000` | Interval between anti-entropy sync rounds |
 | `HINT_DELIVERY_INTERVAL_MS` | `30000` | Interval between hint delivery sweeps to alive targets (backstops event-driven delivery) |
+| `CROSS_DC_REPLICA_TIMEOUT_MS` | `2000` | Timeout for a replica hop to another DC. Defaults to `REPLICA_TIMEOUT_MS` when unset; only applies between two DC-labeled nodes |
+| `CROSS_DC_SYNC_EVERY` | `4` | Anti-entropy syncs a replica in another DC every nth round. `1` restores the pre-multi-DC behavior of every round |
 | `SEED_NODES` | (none) | Comma-separated HTTP addresses to bootstrap from on first join |
 | `SELF_WEIGHT` | `1.0` | Capacity weight for vnode allocation; `2.0` gives twice the vnodes |
 | `SELF_ZONE` | (none) | Failure-domain label (rack, AZ); replica placement spreads each key across distinct zones |

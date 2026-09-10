@@ -12,12 +12,12 @@
 verification harnesses now carry a DC dimension with cross-DC partition
 scenarios (PR 5).
 
-PR 4 — cross-DC delivery hardening — was **deferred**, not completed: reliable
-hinting of remote-DC failures and a WAN-aware anti-entropy cadence are still
-open. The PR 5 scenarios do demonstrate that the *existing* hint and
-anti-entropy machinery carries writes across a healed partition, so the gap is
-tuning and failure-path robustness rather than a missing mechanism. See
-[PR staging](#pr-staging) and [Deferred / future work](#deferred-future-work).
+PR 4 — cross-DC delivery hardening — has now landed too: replica hops across
+the WAN get their own timeout budget, anti-entropy repairs remote DCs on its own
+slower cadence, and hints dropped undelivered escalate to a targeted repair
+instead of waiting on the background cycle. See
+[Cross-DC delivery](#cross-dc-delivery) for the mechanisms and
+[Deferred / future work](#deferred-future-work) for what remains.
 
 ## Why
 
@@ -80,14 +80,13 @@ gracefully to an empty DC.
    spreading, and DC-scoped sloppy-quorum substitution.
 3. **PR 3 — `LOCAL_QUORUM` / `LOCAL_ONE` (shipped).** Replica acks partitioned
    by DC in the read and write paths; both consistency levels added.
-4. **PR 4 — Cross-DC delivery hardening (not done).** Acking on local-DC quorum
-   while the remote fan-out continues in the background *already falls out of
-   PR 3* (the coordinator returns as soon as its quorum is met and drains the
-   rest asynchronously). What is left is the durability story around that:
-   hinting remote-DC failures reliably, and giving cross-DC anti-entropy its own
-   WAN-aware cadence. Deferred — PR 5 landed first, and its scenarios now cover
-   the cross-DC repair path well enough to show the existing hint and
-   anti-entropy machinery carries writes across a healed partition.
+4. **PR 4 — Cross-DC delivery hardening (shipped, after PR 5).** Acking on
+   local-DC quorum while the remote fan-out continues in the background *already
+   fell out of PR 3*. This PR is the durability story around that: a WAN timeout
+   budget so healthy remote replicas stop being timed out and hinted, a
+   WAN-paced anti-entropy cadence, and escalation of dropped hints to a targeted
+   repair. Landed out of order — PR 5's scenarios came first and are what the
+   overflow scenario here was built on top of.
 5. **PR 5 — Verification (shipped).** A DC dimension in both the simulation and
    fault harnesses, plus cross-DC partition scenarios asserting `local_quorum`
    stays available while the remote DC is unreachable and that writes accepted
@@ -117,12 +116,66 @@ precondition — that the remote DC held none of those writes *during* the cut �
 so a leaky partition cannot make the post-heal assertion pass for the wrong
 reason.
 
-**Not yet:** the cross-DC delivery path is not hardened. A `local_quorum` write
-returns as soon as the local DC acks, and the remote fan-out continues in the
-background — but a remote replica that fails after the coordinator has already
-responded depends on hinted handoff and anti-entropy catching it, and
-anti-entropy is still WAN-cost-unaware. `EACH_QUORUM` does not exist. See
+**Shipped (PR 4):** the cross-DC delivery path is hardened — a WAN timeout
+budget, a WAN-paced anti-entropy cadence, and escalation of dropped hints. See
+[Cross-DC delivery](#cross-dc-delivery).
+
+**Not yet:** `EACH_QUORUM` does not exist, and the per-DC replica table is still
+static config rather than a gossiped topology map. See
 [Deferred / future work](#deferred-future-work).
+
+## Cross-DC delivery
+
+A `local_quorum` write returns as soon as the local DC acks and the remote
+fan-out continues in the background, so everything that carries a write to the
+far side runs after the client is gone. Three things make that path survive a
+WAN rather than merely work on a LAN.
+
+### One timeout budget per failure domain
+
+A replica hop to another DC gets `CROSS_DC_REPLICA_TIMEOUT_MS` (default 2s)
+instead of `REPLICA_TIMEOUT_MS` (default 500ms). A single budget for both had a
+quiet cost: a cross-continent round trip routinely exceeds a budget sized for a
+rack neighbour, so healthy remote replicas timed out as a matter of course and
+their writes were buffered as hints and retried later — paying the WAN twice to
+deliver what waiting a little longer would have delivered once. The budget
+applies only between two DC-labeled nodes; an unlabeled cluster is unchanged.
+
+### Anti-entropy pays the WAN less often
+
+Anti-entropy compares one Merkle root per vnode per round, and the overwhelming
+majority of those comparisons report "identical". Running that unpaced across a
+WAN spends bandwidth to learn nothing, so a replica in another DC is compared
+only every `CROSS_DC_SYNC_EVERY` rounds (default 4) while local replicas keep
+the full cadence. The round-robin guarantee scales accordingly: a full cross-DC
+pass takes `vnodes × SYNC_INTERVAL_MS × CROSS_DC_SYNC_EVERY`, still bounded,
+just slower. The first round after startup always crosses the WAN — a node that
+just came up is when remote divergence is most likely.
+
+### Dropped hints escalate instead of waiting
+
+Hints are capped per target node and expire on a TTL. Both limits exist to bound
+memory, and both mean the same thing when they bite: writes this coordinator
+accepted will never reach that replica by the hint path. A prolonged DC outage
+hits them by design — hints accumulate at write rate against a fixed cap.
+
+Anti-entropy has always been the documented backstop, but on its own it only
+recovers those keys when the round-robin cursor happens upon their vnodes, which
+for a remote DC is now the slow cadence times the vnode count. So a drop is now
+an event: the hint store reports it, and the coordinator schedules a targeted
+anti-entropy pass against that node, deferred until gossip says it is reachable
+(escalating into a still-dark DC would burn a vnode sweep on connection
+timeouts).
+
+That pass walks the coordinator's **entire replica set**, not the primary subset
+the background round drives — a coordinator is primary for only a fraction of
+the keys it accepts, so a pass scoped to its primary ranges would leave most of
+the dropped writes unrepaired. Pushing from a non-primary is safe for the same
+reason the background sync is: reconciliation is by vector clock, so a redundant
+push is idempotent.
+
+`HintStore.Lost()` exposes the per-node drop counts behind this, so overflow is
+visible rather than silent.
 
 ### Known limitation: the coordinator's self-ack
 
@@ -176,9 +229,13 @@ out of scope for the initial implementation:
 3. **`EACH_QUORUM`.** A write consistency level requiring a quorum in *every*
    DC (vs. `LOCAL_QUORUM`'s single-DC majority). Useful for strong multi-DC
    durability guarantees; deferred because it reintroduces cross-DC blocking.
-4. **Cross-DC anti-entropy cadence tuning.** Anti-entropy is WAN-cost-unaware
-   today; cross-DC repair should run on its own (slower) cadence and possibly
-   prefer a local-DC peer before reaching across the WAN.
-5. **Whole-DC-outage hint volume.** A prolonged DC or WAN outage can overrun the
-   in-memory hint cap (10k/node). Anti-entropy is the backstop, but a robust
-   story may need hint overflow-to-disk or a bulk cross-DC re-sync path.
+4. ~~**Cross-DC anti-entropy cadence tuning.**~~ **Done in PR 4**
+   (`CROSS_DC_SYNC_EVERY`). Still open within it: preferring a local-DC peer
+   before reaching across the WAN, so a key already repairable from a rack
+   neighbour never costs a WAN round trip at all.
+5. ~~**Whole-DC-outage hint volume.**~~ **Handled in PR 4** by escalation rather
+   than by raising the ceiling: overrunning the cap is now an event that
+   schedules a targeted anti-entropy pass, and `HintStore.Lost()` makes the
+   drops visible. The cap itself is unchanged, so the writes between the drop
+   and the repair still rely on that pass — overflow-to-disk would remove that
+   window entirely and remains open.

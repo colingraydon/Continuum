@@ -85,6 +85,19 @@ Each scenario also asserts its own precondition - that the remote DC held none
 of those writes *while* partitioned - so a leaky cut cannot make the post-heal
 assertion pass for the wrong reason. See [multi-DC](multi-dc.md).
 
+One scenario is built specifically so that only the hint-loss escalation can
+pass it. `TestSimCrossDCHintOverflow_ResyncRepairs` sets the per-node hint cap
+to 5 against 30 writes, so most hints are evicted, and sets `crossDCSyncEvery`
+to 1000, which parks the background WAN cycle far outside the assertion window.
+Nothing but the targeted resync can carry the evicted keys across, and the
+scenario asserts *both* preconditions - that the cut was effective and that
+hints were genuinely dropped - before asserting repair. Unwiring
+`SetResyncTrigger` fails it with 20 of 30 keys never reaching the remote DC.
+
+That second precondition exists because of how the earlier multi-DC scenarios
+went wrong: a scenario about overflow that never overflowed would pass while
+proving nothing.
+
 ## Design Decisions
 
 ### Seeded, not bit-deterministic

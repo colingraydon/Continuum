@@ -192,3 +192,96 @@ func TestSimCrossDCPartition_LocalOneServesFromEitherSide(t *testing.T) {
 		}
 	}
 }
+
+// TestSimCrossDCHintOverflow_ResyncRepairs is the scenario the hint-overflow
+// escalation exists for, and it is deliberately built so that only the
+// escalation can pass it.
+//
+// A prolonged DC outage accumulates hints at write rate against a fixed
+// per-node cap. Past the cap the oldest hints are evicted: those writes are now
+// absent from every fast path, and the documented backstop — anti-entropy —
+// only recovers them when its round-robin cursor happens upon their vnodes,
+// which for a remote DC is the WAN cadence times the vnode count.
+//
+// The topology forces that gap into the open:
+//
+//   - hintCap is 5 against 30 writes, so 25 hints per target are evicted. Those
+//     keys have no hint left to deliver.
+//   - crossDCSyncEvery is 1000, which at this harness's timings parks the
+//     background WAN cycle far outside the assertion window. Nothing but the
+//     escalation's direct ResyncWithNode pass can carry those keys west.
+//
+// Removing h.SetResyncTrigger from the harness wiring fails this test with all
+// 25 evicted keys missing, while the five that still had hints arrive.
+func TestSimCrossDCHintOverflow_ResyncRepairs(t *testing.T) {
+	c := newSimCluster(t, simConfig{
+		nodes:            6,
+		dcs:              []string{dcEast, dcEast, dcEast, dcWest, dcWest, dcWest},
+		dcReplication:    map[string]int{dcEast: 3, dcWest: 3},
+		hintCap:          5,
+		crossDCSyncEvery: 1000,
+	}, 904)
+	c.waitDCsPropagated(10 * time.Second)
+	east := c.nodesInDC(dcEast)[0]
+
+	// Arrange: cut the WAN and write far past the hint cap at local quorum.
+	c.partitionDCs(dcEast, dcWest)
+	const writes = 30
+	keys := make([]string, 0, writes)
+	for i := 0; i < writes; i++ {
+		key := fmt.Sprintf("overflow-%d", i)
+		code, err := c.putConsistency(east, key, fmt.Sprintf("v%d", i), "local_quorum")
+		if err != nil || code != http.StatusNoContent {
+			t.Fatalf("%s: local_quorum write got %d (err %v), want 204", key, code, err)
+		}
+		keys = append(keys, key)
+	}
+
+	// Precondition 1: the cut is real, so the post-heal assertion cannot pass
+	// for the wrong reason.
+	if missing := missingOnDC(c, keys, dcWest); len(missing) != len(keys) {
+		t.Fatalf("%d of %d keys reached %s while partitioned; the WAN cut is not effective",
+			len(keys)-len(missing), len(keys), dcWest)
+	}
+
+	// Precondition 2: hints were genuinely dropped. Without this the scenario
+	// could pass having never exercised overflow at all — the exact way the
+	// PR 5 scenarios were vacuous before mutation testing caught them.
+	// The coordinator acks on local quorum and hints the remote replicas from a
+	// background drain, so the evictions land after the writes return - poll
+	// rather than sampling once and racing them.
+	dropped := waitHintsDropped(t, c, east, dcWest, 10*time.Second)
+	t.Logf("%d hints dropped across the western replicas", dropped)
+
+	// Act: restore the WAN. Gossip marks the western nodes alive, the delivery
+	// sweep sees the pending escalations, and each fires a direct resync.
+	c.net.healAll()
+	c.waitFullRing(10 * time.Second)
+
+	// Assert: every write reaches the remote DC, including the ones whose
+	// hints were evicted.
+	waitKeysOnDC(t, c, keys, dcWest, 20*time.Second)
+	verifyConvergence(t, c, keys, 20*time.Second)
+}
+
+// waitHintsDropped waits until coordinator has dropped at least one hint
+// undelivered for some node in dc, and returns the total. It is a precondition
+// check, not an assertion about repair: a scenario about hint overflow that
+// never overflowed would prove nothing.
+func waitHintsDropped(t *testing.T, c *simCluster, coordinator *simNode, dc string, timeout time.Duration) int {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		dropped := 0
+		for _, n := range c.nodesInDC(dc) {
+			dropped += coordinator.hintsLostFor(n.id)
+		}
+		if dropped > 0 {
+			return dropped
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no hints dropped for %s within %v; the cap did not overflow and this scenario proves nothing", dc, timeout)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}

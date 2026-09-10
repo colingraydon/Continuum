@@ -57,6 +57,8 @@ With `DATA_DIR` set, the hint store is backed by its own append-only log (layere
 > **Failure Mode - Hint Buffer Full**
 >
 > If a node is down long enough that a coordinator accumulates more than 10,000 hints for it, the oldest hints are evicted. Those keys will not be replayed via handoff and must rely on anti-entropy for repair. The cap prevents unbounded memory growth on the coordinator when a downstream node is down for an extended period.
+>
+> The drop is no longer silent. Both ways a hint dies undelivered - cap eviction and TTL expiry - notify a loss handler, which schedules a **targeted anti-entropy pass** against that node once gossip reports it alive (escalating into a node that is still down would burn a full vnode sweep on connection timeouts). Without that escalation those keys wait for the background round-robin cursor to reach their vnodes, which for a remote DC is the cross-DC cadence times the vnode count. `HintStore.Lost()` exposes the per-node drop counts for metrics. See [Anti-Entropy](antientropy.md#targeted-resync-on-hint-loss).
 
 ## Design Decisions
 
@@ -83,6 +85,8 @@ The hint log reuses the segmented WAL (`internal/wal`) for CRC framing, torn-tai
 Oldest-first eviction prioritizes delivering the most recent writes. In a scenario where a replica has been down long enough to overflow the hint buffer, the most recent state of each key is more valuable than the oldest. Evicting oldest hints means the replay, if it happens, brings the replica closer to the current state faster.
 
 **Tradeoff:** Oldest-first eviction can cause hint starvation for keys that are written infrequently but had their hint evicted before the replica recovered. Those keys fall back to anti-entropy. This is acceptable - the hint store is an optimization layer, not the durability guarantee. Anti-entropy is the durability guarantee.
+
+That fallback is now explicit rather than incidental: an eviction fires a loss handler that escalates the affected node to a targeted anti-entropy pass, so "falls back to anti-entropy" means a bounded repair starting when the node returns, not an unbounded wait for the round-robin cursor. The distinction matters most across a WAN, where the background cadence is deliberately slow.
 
 ### Hints Never Count toward Quorum
 

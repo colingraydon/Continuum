@@ -50,6 +50,7 @@ type simNode struct {
 	gossipAddr string
 
 	store    *store.Store
+	hints    *hintstore.HintStore
 	ring     *ring.Ring
 	ml       *gossip.MemberList
 	gossiper *gossip.Gossiper
@@ -74,11 +75,24 @@ type simConfig struct {
 	// set it replaces replicationFactor with its sum, mirroring how
 	// REPLICATION_FACTOR_BY_DC overrides REPLICATION_FACTOR in main.go.
 	dcReplication map[string]int
+	// crossDCSyncEvery paces cross-DC anti-entropy, as CROSS_DC_SYNC_EVERY
+	// does in main.go. Defaults to 1 (every round) so scenarios that are not
+	// about the cadence converge at the harness's compressed timings.
+	crossDCSyncEvery int
+	// hintCap is the per-node hint buffer cap. Defaults to hintCapPerNode; a
+	// scenario about hint overflow sets it low enough to overrun deliberately.
+	hintCap int
 }
 
 func (c simConfig) withDefaults() simConfig {
 	if c.nodes == 0 {
 		c.nodes = 3
+	}
+	if c.crossDCSyncEvery == 0 {
+		c.crossDCSyncEvery = 1
+	}
+	if c.hintCap == 0 {
+		c.hintCap = hintCapPerNode
 	}
 	if len(c.dcReplication) > 0 {
 		total := 0
@@ -147,7 +161,7 @@ func (c *simCluster) startNode(id, dc string) *simNode {
 	}
 	s := store.New()
 	r := ring.NewRing(vnodesPerNode)
-	hs := hintstore.New(hintCapPerNode, hintTTL)
+	hs := hintstore.New(c.cfg.hintCap, hintTTL)
 
 	var hptr atomic.Pointer[api.Handler]
 	ml := gossip.NewMemberList(id, n.httpAddr, func(m *gossip.Member, status gossip.MemberStatus) {
@@ -187,6 +201,8 @@ func (c *simCluster) startNode(id, dc string) *simNode {
 
 	ae := antientropy.New(r, s, id, c.cfg.replicationFactor, replicaTimeout)
 	ae.SetSyncInterval(syncInterval)
+	ae.SetSelfDC(dc)
+	ae.SetCrossDCSyncEvery(c.cfg.crossDCSyncEvery)
 	ae.SetHTTPTransport(linkFrom{net: c.net, from: id})
 	s.SetOnUpdate(ae.Update)
 	s.SetOnEvict(ae.RemoveFromTrees)
@@ -198,9 +214,15 @@ func (c *simCluster) startNode(id, dc string) *simNode {
 		WriteQuorum:       c.cfg.writeQuorum,
 		ReadQuorum:        c.cfg.readQuorum,
 		ReplicaTimeout:    replicaTimeout,
-		Transport:         linkFrom{net: c.net, from: id},
+		// The sim's WAN is not slower than its LAN, so a distinct budget would
+		// change nothing here; keeping them equal makes the harness's timing
+		// one fewer variable.
+		CrossDCReplicaTimeout: replicaTimeout,
+		Transport:             linkFrom{net: c.net, from: id},
 	}, hs)
 	h.SetSyncTreeProvider(ae)
+	h.SetResyncTrigger(ae)
+	hs.SetLossHandler(h.OnHintLoss)
 	hptr.Store(h)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -213,6 +235,7 @@ func (c *simCluster) startNode(id, dc string) *simNode {
 			select {
 			case <-ticker.C:
 				h.DeliverPendingHints()
+				h.RunPendingResyncs()
 			case <-ctx.Done():
 				return
 			}
@@ -221,7 +244,7 @@ func (c *simCluster) startNode(id, dc string) *simNode {
 
 	r.AddZonedNodeDC(id, n.httpAddr, dc, "", 1.0)
 
-	n.store, n.ring, n.ml, n.gossiper, n.ae, n.h = s, r, ml, g, ae, h
+	n.store, n.hints, n.ring, n.ml, n.gossiper, n.ae, n.h = s, hs, r, ml, g, ae, h
 	n.mux = api.BuildMux(h)
 	n.cancel = cancel
 	n.running.Store(true)
@@ -436,6 +459,13 @@ func (c *simCluster) replicaSet(key string) []*simNode {
 		return out
 	}
 	return nil
+}
+
+// hintsLostFor reports how many hints this node dropped undelivered for a
+// target — cap eviction or TTL expiry. Scenarios use it to assert that an
+// overflow actually happened rather than assuming it did.
+func (n *simNode) hintsLostFor(nodeID string) int {
+	return n.hints.Lost()[nodeID]
 }
 
 // nodesInDC returns the running nodes labeled dc.

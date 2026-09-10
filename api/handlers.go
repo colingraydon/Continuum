@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -51,6 +52,13 @@ type HandlerConfig struct {
 	WriteQuorum       int
 	ReadQuorum        int
 	ReplicaTimeout    time.Duration
+	// CrossDCReplicaTimeout bounds a replica hop that crosses the WAN. A
+	// cross-continent round trip routinely exceeds the same-DC budget, so
+	// reusing ReplicaTimeout for it turns healthy remote replicas into
+	// timeouts: the write is hinted and retried later even though waiting a
+	// little longer would have delivered it. Zero falls back to
+	// ReplicaTimeout, which is the pre-multi-DC behavior.
+	CrossDCReplicaTimeout time.Duration
 	// Transport, when non-nil, replaces the default transport for all
 	// outbound node-to-node HTTP (replica fan-out, CAS forwarding, hint
 	// delivery, migration, scan scatter). The simulation harness injects an
@@ -83,6 +91,17 @@ type Handler struct {
 	readQuorum        int
 	startTime         time.Time
 	replicaClient     *http.Client
+	// crossDCClient carries replica hops to another DC, on a longer timeout
+	// than replicaClient. Selected by clientForDC.
+	crossDCClient *http.Client
+	// resync escalates a node whose buffered hints were dropped to an
+	// immediate anti-entropy pass. nil leaves anti-entropy's background cycle
+	// as the only repair path.
+	resync ResyncTrigger
+	// pendingResync holds nodes that lost hints while unreachable, so the
+	// escalation can be retried once they are alive again. Guarded by resyncMu.
+	resyncMu      sync.Mutex
+	pendingResync map[string]struct{}
 	// casClient carries paxos phase requests (prepare/propose/commit).
 	// Separate from replicaClient because a phase reply includes a
 	// replica-local store read, so its round trip is bounded by the replica
@@ -111,9 +130,42 @@ func NewHandler(r *ring.Ring, ml *gossip.MemberList, s *store.Store, cfg Handler
 		readQuorum:        cfg.ReadQuorum,
 		startTime:         time.Now(),
 		replicaClient:     &http.Client{Timeout: cfg.ReplicaTimeout, Transport: cfg.Transport},
+		crossDCClient:     &http.Client{Timeout: crossDCTimeout(cfg), Transport: cfg.Transport},
 		casClient:         &http.Client{Timeout: 2 * cfg.ReplicaTimeout, Transport: cfg.Transport},
 		acceptor:          paxos.NewAcceptor(),
 	}
+}
+
+// crossDCTimeout resolves the WAN replica budget, defaulting to the same-DC one
+// so an unconfigured node behaves exactly as it did before.
+func crossDCTimeout(cfg HandlerConfig) time.Duration {
+	if cfg.CrossDCReplicaTimeout > 0 {
+		return cfg.CrossDCReplicaTimeout
+	}
+	return cfg.ReplicaTimeout
+}
+
+// ResyncTrigger drives an immediate anti-entropy pass with one node.
+// Implemented by *antientropy.Manager.
+type ResyncTrigger interface {
+	ResyncWithNode(nodeID, address string)
+}
+
+// SetResyncTrigger installs the escalation path used when a node's buffered
+// hints are dropped undelivered. Wired in main after the anti-entropy manager
+// exists; unset (e.g. in tests) leaves the background cycle as the only repair.
+func (h *Handler) SetResyncTrigger(t ResyncTrigger) {
+	h.resync = t
+}
+
+// clientForDC picks the replica client whose timeout matches the hop: the WAN
+// budget for a peer in another DC, the same-DC budget otherwise. An unlabeled
+// node or peer counts as local (see antientropy.isRemoteDC for the same rule).
+func (h *Handler) clientForDC(nodeDC string) *http.Client {
+	if h.selfDC != "" && nodeDC != "" && h.selfDC != nodeDC {
+		return h.crossDCClient
+	}
+	return h.replicaClient
 }
 
 // SetSyncTreeProvider installs the provider used to serve anti-entropy sync
@@ -388,12 +440,13 @@ func (h *Handler) DeliverHints(nodeID, address string) {
 	}
 	log.Printf("hinted handoff: delivering %d hints to %s", len(hints), nodeID)
 	var requeued int
+	dc := h.ring.NodeDC(nodeID)
 	for _, hint := range hints {
 		var err error
 		if hint.Deleted {
-			err = h.replicateDeleteToSync(address, hint.Key, hint.Clocks)
+			err = h.replicateDeleteToSync(address, dc, hint.Key, hint.Clocks)
 		} else {
-			err = h.replicateToSync(address, hint.Key, hint.Value, hint.Clocks)
+			err = h.replicateToSync(address, dc, hint.Key, hint.Value, hint.Clocks)
 		}
 		if err != nil {
 			log.Printf("hinted handoff: failed to deliver hint for %s to %s: %v", hint.Key, nodeID, err)
@@ -422,6 +475,71 @@ func (h *Handler) DeliverPendingHints() {
 			continue
 		}
 		h.DeliverHints(nodeID, m.Address)
+	}
+}
+
+// OnHintLoss escalates dropped hints to a bulk anti-entropy pass. It is the
+// handler the hint store calls when buffered hints for a node are discarded
+// undelivered — the per-node cap overflowing, or hints aging past their TTL.
+//
+// Both are expected under a prolonged outage: a dark DC accumulates hints at
+// write rate against a fixed cap, and beyond it the oldest writes are dropped.
+// Anti-entropy is the documented backstop, but on its own it only repairs those
+// keys when the round-robin cycle happens upon their vnodes, which for a remote
+// DC is now the slow cadence times the vnode count. Escalating turns "we will
+// notice eventually" into a bounded repair pass that starts as soon as the
+// target is reachable.
+//
+// The pass is deferred until the node is actually alive: running it against a
+// still-dark DC would burn a full vnode sweep on connection timeouts.
+func (h *Handler) OnHintLoss(nodeID string, dropped int) {
+	log.Printf("hinted handoff: dropped %d undelivered hints for %s; scheduling anti-entropy resync", dropped, nodeID)
+	if h.resync == nil {
+		return
+	}
+	m, ok := h.memberList.Get(nodeID)
+	if !ok || m.Status != gossip.MemberAlive {
+		// Not reachable now — which is the common case, since hints pile up
+		// precisely because the target is down. Remember it; RunPendingResyncs
+		// escalates once gossip says it is back.
+		h.resyncMu.Lock()
+		if h.pendingResync == nil {
+			h.pendingResync = make(map[string]struct{})
+		}
+		h.pendingResync[nodeID] = struct{}{}
+		h.resyncMu.Unlock()
+		return
+	}
+	go h.resync.ResyncWithNode(nodeID, m.Address)
+}
+
+// RunPendingResyncs escalates any node that lost hints while unreachable and is
+// now alive. Driven by the periodic hint-delivery sweep, so a DC that comes
+// back gets its bulk repair without waiting for the anti-entropy cycle to reach
+// those vnodes on its own. Deliberately not part of DeliverPendingHints, which
+// also runs at shutdown — starting a full vnode sweep there would delay exit.
+func (h *Handler) RunPendingResyncs() {
+	if h.resync == nil {
+		return
+	}
+	h.resyncMu.Lock()
+	pending := make([]string, 0, len(h.pendingResync))
+	for id := range h.pendingResync {
+		pending = append(pending, id)
+	}
+	h.resyncMu.Unlock()
+
+	for _, nodeID := range pending {
+		m, ok := h.memberList.Get(nodeID)
+		if !ok || m.Status != gossip.MemberAlive {
+			continue
+		}
+		// Clear before running: a loss recorded during the pass re-marks the
+		// node, so a concurrent drop cannot be swallowed by this clear.
+		h.resyncMu.Lock()
+		delete(h.pendingResync, nodeID)
+		h.resyncMu.Unlock()
+		h.resync.ResyncWithNode(nodeID, m.Address)
 	}
 }
 
@@ -627,10 +745,11 @@ func (h *Handler) repairSurvivor(key, nodeID, addr string, s SiblingResponse) {
 		return
 	}
 	var err error
+	dc := h.ring.NodeDC(nodeID)
 	if s.Deleted {
-		err = h.replicateDeleteToSync(addr, key, s.Clocks)
+		err = h.replicateDeleteToSync(addr, dc, key, s.Clocks)
 	} else {
-		err = h.replicateToSync(addr, key, s.Value, s.Clocks)
+		err = h.replicateToSync(addr, dc, key, s.Value, s.Clocks)
 	}
 	if err != nil {
 		log.Printf("read repair: failed to repair %s for key %s: %v", nodeID, key, err)
@@ -1097,7 +1216,7 @@ func (h *Handler) coordinateWrite(w http.ResponseWriter, req *http.Request, key 
 	// satisfiable by the coordinator alone even when every local peer is down.
 	writeQuorum.size = min(writeQuorum.size, max(h.countable(writeQuorum, nodes), 1))
 	acks, remaining, failed, resultCh := h.quorumFanOut(nodes, writeQuorum, func(n *ring.Node) replicaResult {
-		return replicaResult{n.ID, h.replicateWriteToSync(n.Address, key, wr, version.Clocks)}
+		return replicaResult{n.ID, h.replicateWriteToSync(n.Address, n.DC, key, wr, version.Clocks)}
 	})
 
 	if h.hintStore != nil {
@@ -1200,8 +1319,10 @@ func (h *Handler) DeleteKey(w http.ResponseWriter, req *http.Request) {
 
 // replicateWriteToSync sends a replica sub-write (a value write, or a
 // tombstone when wr.deleted is set) to addr and returns an error if the
-// request fails or the replica responds with a non-204 status.
-func (h *Handler) replicateWriteToSync(address, key string, wr keyWrite, clocks map[string]uint64) error {
+// request fails or the replica responds with a non-204 status. dc is the
+// target's data center, which selects the timeout budget for the hop; "" means
+// unknown and takes the same-DC budget.
+func (h *Handler) replicateWriteToSync(address, dc, key string, wr keyWrite, clocks map[string]uint64) error {
 	method, payload := http.MethodPut, any(PutKeyRequest{Value: wr.value, Clocks: clocks})
 	if wr.deleted {
 		method, payload = http.MethodDelete, any(DeleteKeyRequest{Clocks: clocks})
@@ -1216,7 +1337,7 @@ func (h *Handler) replicateWriteToSync(address, key string, wr keyWrite, clocks 
 	}
 	req.Header.Set(contentTypeHeader, contentTypeJSON)
 	req.Header.Set(headerXProxiedFrom, h.selfID)
-	resp, err := h.replicaClient.Do(req)
+	resp, err := h.clientForDC(dc).Do(req)
 	if err != nil {
 		return err
 	}
@@ -1228,13 +1349,13 @@ func (h *Handler) replicateWriteToSync(address, key string, wr keyWrite, clocks 
 }
 
 // replicateToSync sends a replica value write to addr: see replicateWriteToSync.
-func (h *Handler) replicateToSync(address, key, value string, clocks map[string]uint64) error {
-	return h.replicateWriteToSync(address, key, keyWrite{value: value}, clocks)
+func (h *Handler) replicateToSync(address, dc, key, value string, clocks map[string]uint64) error {
+	return h.replicateWriteToSync(address, dc, key, keyWrite{value: value}, clocks)
 }
 
 // replicateDeleteToSync sends a replica tombstone to addr: see replicateWriteToSync.
-func (h *Handler) replicateDeleteToSync(address, key string, clocks map[string]uint64) error {
-	return h.replicateWriteToSync(address, key, keyWrite{deleted: true}, clocks)
+func (h *Handler) replicateDeleteToSync(address, dc, key string, clocks map[string]uint64) error {
+	return h.replicateWriteToSync(address, dc, key, keyWrite{deleted: true}, clocks)
 }
 
 // readFromReplica fetches the local entry for key from a replica node. The

@@ -93,6 +93,26 @@ A shorter interval would detect divergence faster but add more background HTTP t
 
 **Tradeoff:** A full pass still scales linearly with vnode count: a node primary for 150 vnodes at the default interval takes 75 minutes per pass. Tune `SYNC_INTERVAL_MS` or `REPLICAS` when faster convergence matters; prioritizing ranges with known divergence or syncing several vnodes per tick are the next steps if that isn't enough.
 
+### A Slower Cadence across the WAN
+
+**Choice:** A replica in another DC is compared every `CROSS_DC_SYNC_EVERY` rounds (default 4); replicas in the local DC keep the full cadence. Both sides must carry a DC label for the pacing to engage, so an unlabeled cluster is unchanged.
+
+A sync round costs one Merkle root comparison per replica, and the overwhelming majority of them report "identical" - that is the design working. Paying a WAN round trip for each of those is spending the most expensive link in the cluster to learn nothing. Pacing the WAN separately keeps local repair fast, which is where the acute divergence usually is anyway.
+
+The round-robin bound scales with it: a full cross-DC pass takes `vnodes x interval x CROSS_DC_SYNC_EVERY`. The first round after startup always crosses the WAN rather than waiting out a full multiple - a node that just came up is when remote divergence is most likely.
+
+**Tradeoff:** Remote divergence takes proportionally longer to find. That is the right trade only because anti-entropy is the *slow* path by design - hinted handoff and read repair handle the acute cases, and a hint that is dropped rather than delivered now escalates to a targeted pass (below) instead of waiting for this cycle.
+
+### Targeted Resync on Hint Loss
+
+**Choice:** `ResyncWithNode` drives an immediate pass with one node across every vnode the two share, bypassing the round-robin cursor and the cross-DC cadence. It is triggered when a coordinator's buffered hints for that node are dropped undelivered.
+
+The background cycle repairs the same divergence eventually, but "eventually" is a full pass - 75 minutes at 150 vnodes and the default interval, multiplied again for a remote DC. That is the right cost for background drift and the wrong one for a known, bounded loss: when hints are dropped, the coordinator knows exactly which peer is now missing writes.
+
+Unlike the background round, the pass walks the node's **entire replica set** rather than the primary subset it normally initiates for. A coordinator is primary for only a fraction of the keys it accepts, so a pass scoped to its primary ranges would leave most of the dropped writes unrepaired. Pushing from a non-primary is safe for the same reason the background sync is - reconciliation is by vector clock, so a redundant push is idempotent.
+
+**Tradeoff:** A full shared-vnode sweep is far more expensive than one round, so it is deliberately not on any periodic path: it fires only on a hint drop, and only once the target is alive (escalating into a still-dark DC would burn the sweep on connection timeouts).
+
 ### Replicated Ranges Rebuilt on Membership Change
 
 **Choice:** Each sync tick re-derives the ranges this node replicates from the ring and, only when they changed, rebuilds the Merkle trees with one `KeyHashes` scan. The primary subset that drives sync initiation can only change when the replicated set does (a node is primary of a vnode exactly when it owns that vnode, which also puts the vnode in its replica set), so the round-robin order and its cursor are left intact whenever the range set is unchanged.
