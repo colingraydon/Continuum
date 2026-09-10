@@ -28,6 +28,7 @@ Common targets (full list in [`docs/operations.md`](docs/operations.md)):
 | `make test-race` | Same, under the race detector |
 | `make lint` | `golangci-lint` |
 | `make workflow-lint` | `actionlint` over `.github/workflows` |
+| `make spec` | Model-check the TLA+ specification (needs a JDK) |
 | `make patch-coverage` | Diff coverage against the base branch (the CI gate) |
 | `make e2e` | In-process cluster tests |
 | `make fault` | Process-based fault-injection suite (kills, hangs, partitions, packet loss) |

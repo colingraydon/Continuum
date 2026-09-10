@@ -1,4 +1,4 @@
-.PHONY: build run test test-race e2e e2e-integration fault sim sim-race bench bench-ci bench-report lint workflow-lint patch-coverage docker clean
+.PHONY: build run test test-race e2e e2e-integration fault sim sim-race bench bench-ci bench-report lint workflow-lint patch-coverage spec docker clean
 
 build:
 	go build -o bin/continuum ./cmd/continuum
@@ -48,6 +48,14 @@ bench-ci:
 
 lint:
 	golangci-lint run ./...
+
+# Model-check the TLA+ specification. Unlike the test suites, which sample
+# executions of the real system, TLC enumerates every interleaving of the
+# model within its configured bounds. Both configurations must hold; see
+# docs/tla-spec.md for what each one claims.
+spec:
+	bash scripts/tlc.sh Replication
+	bash scripts/tlc.sh Strict
 
 # Workflow files are configuration GitHub parses on its own: a syntax error in
 # one does not fail a run, it makes the workflow unreadable, so no job starts

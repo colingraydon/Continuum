@@ -90,5 +90,6 @@ nav:
       - fault injection: fault-injection.md
       - history checking: history-checking.md
       - simulation testing: simulation.md
+      - 'TLA+ specification': tla-spec.md
       - testing: testing.md
       - 'design: paxos cas': paxos-cas-design.md

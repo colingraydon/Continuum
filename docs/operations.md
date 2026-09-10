@@ -93,6 +93,7 @@ In Grafana, add `http://prometheus:9090` as a Prometheus data source.
 | `make bench-report` | Regenerate the published percentile dataset in `docs/data/` (run on a known machine) |
 | `make lint` | Run golangci-lint |
 | `make workflow-lint` | Run actionlint over `.github/workflows` |
+| `make spec` | Model-check the TLA+ specification with TLC (needs a JDK) |
 | `make patch-coverage` | Diff coverage against `BASE` (default `origin/main`), the gate CI runs on PRs |
 | `make coverage` | Generate HTML coverage report |
 
@@ -162,6 +163,7 @@ These jobs run on every push and pull request to `main` (see [docs/testing.md](t
 - **simulation** - the seeded in-process cluster simulation with a 600-second timeout. It gets its own runner rather than sharing one with the fault suite: both are timing-sensitive, and run together they starve each other into spurious failures
 - **lint** - golangci-lint
 - **bench-regression** (pull requests only) - measures the CPU-bound benchmark subset at the PR's base commit and at its head **on the same runner, in alternating rounds** (`scripts/bench-ab.sh`), compares with `benchstat`, and fails on statistically significant time regressions above 20% (`scripts/benchguard.sh`, threshold via `BENCH_REGRESSION_THRESHOLD`). Interleaving matters: measured one side after the other, any drift during the job lands entirely on whichever ran second and reads as a one-sided regression. Only the `sec/op` table is gated - the ring's custom `variance` and `vnodes` units are not costs. Insignificant deltas (`~`) never fail the gate. fsync-bound, cluster-setup, and multi-millisecond benchmarks are excluded as too noisy or slow for CI - run `make bench` locally for those.
+- **spec** - model-checks the TLA+ specification (`specs/Replication.tla`) with TLC. Runs no Continuum code: it enumerates every interleaving of the modelled protocol within bounded constants, so it guards the design rather than the implementation. See [the spec docs](tla-spec.md)
 - **workflow-lint** - actionlint over `.github/workflows`. Workflow files are configuration GitHub parses itself, so a syntax error in one does not fail a run - it makes the workflow unreadable and no job starts, which looks identical to a green PR. This job is the only thing that turns that into a visible failure
 
 - **patch-coverage** (pull requests only) - fails when less than 80% of the changed statements in the diff are covered (`cmd/patchcov`)

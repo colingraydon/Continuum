@@ -169,7 +169,7 @@ make coverage  # HTML coverage report
 
 **Correctness and verification**
 
-- **TLA+ specification** - model the sloppy quorum, hinted handoff, read repair, and anti-entropy interaction and model-check the invariants the fault harness only samples (acknowledged writes survive F failures, tombstone GC never resurrects); stretch goal is trace conformance between harness events and the spec
+- **TLA+ specification** - shipped: `specs/Replication.tla` models quorum writes, crash/recovery, hinted handoff, anti-entropy, tombstones and the downtime gate, and TLC checks `NoResurrection` and `Durability` exhaustively over the bounded state space (`make spec`). It proved both tombstone-GC guards load-bearing and showed that a downtime-gate wipe costs durability budget exactly as a permanent failure does - a stronger statement than the prose made. Still open is **trace conformance**: nothing yet checks that the running system refines the spec, so this guards the design rather than the implementation. See [docs/tla-spec.md](docs/tla-spec.md)
 
 **Data model**
 
