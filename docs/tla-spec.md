@@ -31,7 +31,7 @@ the code because a human kept it that way.
 
 | Mechanism | Modelled as |
 | --------- | ----------- |
-| Quorum write | fan-out to reachable replicas, acknowledge at `W` |
+| Quorum write | **per-replica** fan-out (`StartWrite` / `DeliverWrite` / `FinishWrite`), acknowledged the moment `W` legs land |
 | Quorum clamp | `ClampQuorum`: settle for fewer than `W` when that is all that is live |
 | Crash / partition | node leaves `up`, **keeps its data** |
 | Recovery | node rejoins; the downtime gate may wipe it first |
@@ -57,11 +57,40 @@ finite. They are the reason a passing check is evidence rather than proof:
 - **No clock.** TTLs cannot be expressed, so their *consequences* are stated
   directly as preconditions. The GC's convergence guard is the clearest case —
   see below.
-- **The coordinator is implicit.** Fan-out is atomic in the model; a coordinator
-  crashing mid-fan-out is not represented.
-- **Bounded everything.** Three nodes, two values, three operations, one
-  permanent failure. Bugs needing a fourth node or a fifth operation are outside
+- **The coordinator is implicit.** There is no coordinator state: a write's legs
+  are delivered independently, but the decision to start one is not modelled as
+  something that can itself fail partway.
+- **Bounded everything.** Three nodes, two values, **two** operations, one
+  permanent failure. Bugs needing a fourth node or a third operation are outside
   what this run explores.
+
+## Fan-out is not atomic
+
+A write is three kinds of step, not one: `StartWrite` mints the version and fixes
+the acknowledgement count, `DeliverWrite(n)` completes one replica's leg, and
+`FinishWrite` closes the fan-out. The client is acknowledged the moment enough
+legs have landed, while others may still be outstanding.
+
+That matters for two reasons.
+
+**Fidelity.** An atomic write cannot express partial delivery, a replica
+crashing between two legs of the same write, or a quorum that is never reached —
+all of which the real coordinator does daily. Those are not exotic edge cases;
+they are the normal shape of a fan-out under failure.
+
+**It is the precondition for trace conformance.** With an atomic write, a
+recorded execution of the real system *cannot* be replayed against this spec:
+a write that reached two of three replicas has no corresponding single step, so
+perfectly legal executions would be reported as conformance violations. Trace
+validation was blocked on this before it could start.
+
+The cost is state space, and it is steep — roughly **30x**. At three operations
+this configuration passes 24M distinct states without terminating; at two it is
+exhaustive in under a minute. So the bound came down from three operations to
+two, which is enough to reach everything both properties are about (a write then
+a delete is the resurrection scenario; a delete then a write is the gate-wipe
+durability scenario). Depth was the right thing to trade: partial delivery is a
+failure mode an atomic write cannot express *at any depth*.
 
 ## The properties
 
@@ -75,14 +104,14 @@ This is the safety argument written in prose in
 that is *down* may still carry the old value on disk — that is unavoidable and
 harmless, because it must discard the data before it can serve or spread it.
 
-**Holds** in the checked configuration: 738,061 distinct states, exhaustive.
+**Holds** in the checked configuration: 2,889,856 distinct states, exhaustive.
 
 ### Durability
 
 > The newest acknowledged write survives, so long as no more than
 > `|Nodes| - W` replicas have lost their data.
 
-**Holds** under strict quorum: 135,799 distinct states, exhaustive.
+**Holds** under strict quorum: 1,903,991 distinct states, exhaustive.
 
 Two things about this property are not obvious, and TLC is what made them
 explicit.
@@ -165,7 +194,7 @@ of a caveat a reader has to take on trust.
 ## Running it
 
 ```bash
-make spec                      # both configurations, ~20s
+make spec                      # both configurations, ~75s
 bash scripts/tlc.sh Replication   # one configuration
 bash scripts/tlc.sh Strict
 ```
@@ -190,8 +219,11 @@ runs the small configurations and larger ones stay a manual exercise.
 Stated so the boundary is explicit rather than implied:
 
 - **Trace conformance** — checking that the running system's observed behavior
-  actually refines this spec. The roadmap's stretch goal, and the thing that
-  would close the design-versus-implementation gap.
+  actually refines this spec. Still the open item, but no longer blocked: the
+  per-replica fan-out above removes the abstraction that made recorded
+  executions unreplayable. What remains is instrumenting the simulation harness
+  to emit spec-level events, generating a trace module from a run, and a
+  `Trace.tla` that constrains `Next` to follow it.
 - **Paxos CAS** — the conditional-write protocol has its own
   [design doc](paxos-cas-design.md) and porcupine coverage, but no spec.
 - **Sibling semantics** — excluded by the total-order abstraction above.

@@ -62,6 +62,12 @@ NoEntry == [ver |-> 0, val |-> "absent"]
 
 Entries == [ver : 1..MaxOps, val : Values \cup {Tombstone}]
 
+(* A write being fanned out. `pending` is the replicas the coordinator has
+   yet to hear from, `need` the acknowledgements required (fixed when the
+   write started, as the real coordinator fixes it), `got` those received.
+   NoWrite means no fan-out is in progress. *)
+NoWrite == [ver |-> 0, val |-> "none", pending |-> {}, need |-> 0, got |-> 0]
+
 VARIABLES
     store,    \* [Nodes -> entry] each node's local copy
     up,       \* SUBSET Nodes: reachable, serving
@@ -72,9 +78,10 @@ VARIABLES
     ops,      \* client operations so far
     gcVer,    \* version of the delete whose tombstone was collected (0 = none)
     stale,    \* SUBSET Nodes: were down across a GC, so must wipe before serving
-    wiped     \* SUBSET Nodes: the downtime gate has destroyed their data
+    wiped,    \* SUBSET Nodes: the downtime gate has destroyed their data
+    inflight  \* the write being fanned out, or NoWrite
 
-vars == <<store, up, failed, hints, acked, nextVer, ops, gcVer, stale, wiped>>
+vars == <<store, up, failed, hints, acked, nextVer, ops, gcVer, stale, wiped, inflight>>
 
 TypeOK ==
     /\ store \in [Nodes -> Entries \cup {NoEntry}]
@@ -87,6 +94,7 @@ TypeOK ==
     /\ gcVer \in 0..MaxOps
     /\ stale \subseteq Nodes
     /\ wiped \subseteq Nodes
+    /\ inflight.pending \subseteq Nodes
 
 Init ==
     /\ store = [n \in Nodes |-> NoEntry]
@@ -99,6 +107,7 @@ Init ==
     /\ gcVer = 0
     /\ stale = {}
     /\ wiped = {}
+    /\ inflight = NoWrite
 
 (* Reconciliation is last-writer-wins on version, matching the store's
    merge: a strictly newer version replaces what is held. This abstracts
@@ -115,32 +124,69 @@ Required ==
     THEN IF Cardinality(up) < WriteQuorum THEN Cardinality(up) ELSE WriteQuorum
     ELSE WriteQuorum
 
-(* A client write or delete. The coordinator fans out to every reachable
-   replica, acknowledges once Required of them hold it, and buffers a hint
-   for each replica that is merely unreachable (not permanently failed). *)
-Apply(v) ==
+(* A client write or delete begins. The coordinator mints a version, fixes
+   the acknowledgement count it will wait for, and starts fanning out to the
+   replicas reachable at that moment. Replicas that are already unreachable
+   are hinted immediately, as the sloppy walk does.
+
+   Fan-out is deliberately NOT atomic: each replica is reached in its own
+   step (DeliverWrite), so the model admits partial delivery, a replica
+   crashing mid-fan-out, and a quorum that is never met. The earlier version
+   of this spec applied a write to every reachable replica in a single step,
+   which made real recorded executions unreplayable against it - see the
+   trace-conformance note in docs/tla-spec.md. *)
+StartWrite(v) ==
     /\ ops < MaxOps
-    /\ Cardinality(up) >= Required
+    /\ inflight = NoWrite
     /\ Required > 0
-    /\ LET e == [ver |-> nextVer, val |-> v] IN
-        /\ store' = [n \in Nodes |-> IF n \in up THEN Merge(store[n], e) ELSE store[n]]
-        /\ hints' = [n \in Nodes |->
-                        IF n \in (Nodes \ up) \ failed THEN hints[n] \cup {e} ELSE hints[n]]
-        /\ acked' = acked \cup {e}
+    /\ Cardinality(up) >= Required
+    /\ inflight' = [ver |-> nextVer, val |-> v, pending |-> up, need |-> Required, got |-> 0]
+    /\ hints' = [n \in Nodes |->
+                    IF n \in (Nodes \ up) \ failed
+                    THEN hints[n] \cup {[ver |-> nextVer, val |-> v]}
+                    ELSE hints[n]]
     /\ nextVer' = nextVer + 1
     /\ ops' = ops + 1
-    /\ UNCHANGED <<up, failed, gcVer, stale, wiped>>
+    /\ UNCHANGED <<store, up, failed, acked, gcVer, stale, wiped>>
 
-Write == \E v \in Values : Apply(v)
+(* One replica's leg of the fan-out completes. A replica still reachable
+   stores the write and counts toward the quorum; one that has since become
+   unreachable does not, and is hinted instead. The client is acknowledged
+   the moment the count is reached, which is why acked can be set while other
+   legs are still outstanding. *)
+DeliverWrite(n) ==
+    /\ inflight # NoWrite
+    /\ n \in inflight.pending
+    /\ LET e == [ver |-> inflight.ver, val |-> inflight.val]
+           reached == n \in up
+           got == IF reached THEN inflight.got + 1 ELSE inflight.got
+       IN
+        /\ store' = IF reached THEN [store EXCEPT ![n] = Merge(store[n], e)] ELSE store
+        /\ hints' = IF reached \/ n \in failed
+                     THEN hints
+                     ELSE [hints EXCEPT ![n] = hints[n] \cup {e}]
+        /\ acked' = IF got >= inflight.need THEN acked \cup {e} ELSE acked
+        /\ inflight' = [inflight EXCEPT !.pending = inflight.pending \ {n}, !.got = got]
+    /\ UNCHANGED <<up, failed, nextVer, ops, gcVer, stale, wiped>>
 
-Delete == Apply(Tombstone)
+(* The fan-out is over. If the quorum was never reached the client saw a
+   failure, and nothing was acknowledged. *)
+FinishWrite ==
+    /\ inflight # NoWrite
+    /\ inflight.pending = {}
+    /\ inflight' = NoWrite
+    /\ UNCHANGED <<store, up, failed, hints, acked, nextVer, ops, gcVer, stale, wiped>>
+
+Write == \E v \in Values : StartWrite(v)
+
+Delete == StartWrite(Tombstone)
 
 (* A node becomes unreachable but keeps its data - a crash or a partition.
    Its store persists, which is exactly what makes resurrection possible. *)
 Crash(n) ==
     /\ n \in up
     /\ up' = up \ {n}
-    /\ UNCHANGED <<store, failed, hints, acked, nextVer, ops, gcVer, stale, wiped>>
+    /\ UNCHANGED <<store, failed, hints, acked, nextVer, ops, gcVer, stale, wiped, inflight>>
 
 (* A node returns. The downtime gate: a node that was down across a GC pass
    cannot trust its local data, so it discards it and re-bootstraps rather
@@ -157,7 +203,7 @@ Recover(n) ==
             /\ stale' = stale \ {n}
             /\ wiped' = wiped \cup {n}
        ELSE UNCHANGED <<store, hints, stale, wiped>>
-    /\ UNCHANGED <<failed, acked, nextVer, ops, gcVer>>
+    /\ UNCHANGED <<failed, acked, nextVer, ops, gcVer, inflight>>
 
 (* Permanent loss: the node is gone and its data with it. *)
 Fail(n) ==
@@ -167,7 +213,7 @@ Fail(n) ==
     /\ up' = up \ {n}
     /\ store' = [store EXCEPT ![n] = NoEntry]
     /\ hints' = [hints EXCEPT ![n] = {}]
-    /\ UNCHANGED <<acked, nextVer, ops, gcVer, stale, wiped>>
+    /\ UNCHANGED <<acked, nextVer, ops, gcVer, stale, wiped, inflight>>
 
 (* Hinted handoff: a buffered write is replayed to its target once the
    target is reachable again. *)
@@ -177,13 +223,13 @@ DeliverHint(n) ==
     /\ \E e \in hints[n] :
         /\ store' = [store EXCEPT ![n] = Merge(store[n], e)]
         /\ hints' = [hints EXCEPT ![n] = hints[n] \ {e}]
-    /\ UNCHANGED <<up, failed, acked, nextVer, ops, gcVer, stale, wiped>>
+    /\ UNCHANGED <<up, failed, acked, nextVer, ops, gcVer, stale, wiped, inflight>>
 
 (* Anti-entropy: two reachable replicas reconcile, newest version winning. *)
 AntiEntropy(a, b) ==
     /\ a \in up /\ b \in up /\ a # b
     /\ store' = [store EXCEPT ![b] = Merge(store[b], store[a])]
-    /\ UNCHANGED <<up, failed, hints, acked, nextVer, ops, gcVer, stale, wiped>>
+    /\ UNCHANGED <<up, failed, hints, acked, nextVer, ops, gcVer, stale, wiped, inflight>>
 
 (* Tombstone GC has two guards, and the model checker says both are load
    bearing. Delete either and NoResurrection fails; see the "Why both
@@ -220,11 +266,13 @@ CollectTombstone ==
                             THEN NoEntry ELSE store[m]]
             /\ hints' = [m \in Nodes |-> {e \in hints[m] : e.ver > d}]
     /\ stale' = stale \cup ((Nodes \ up) \ failed)
-    /\ UNCHANGED <<up, failed, acked, nextVer, ops, wiped>>
+    /\ UNCHANGED <<up, failed, acked, nextVer, ops, wiped, inflight>>
 
 Next ==
     \/ Write
     \/ Delete
+    \/ \E n \in Nodes : DeliverWrite(n)
+    \/ FinishWrite
     \/ \E n \in Nodes : Crash(n)
     \/ \E n \in Nodes : Recover(n)
     \/ \E n \in Nodes : Fail(n)

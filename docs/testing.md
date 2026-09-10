@@ -16,7 +16,7 @@ the heavier ones are opt-in behind build tags so the default loop stays fast.
 | Process-based E2E | `make e2e-integration` | real binaries, real signals | ~10s |
 | Fault injection | `make fault` | real binaries + fault proxies | ~2-3 min |
 | Seeded simulation | `make sim` | whole cluster, one process, in-memory network | ~20s (scales with `SIM_SEEDS`) |
-| TLA+ model checking | `make spec` | **no Continuum code at all** | ~20s |
+| TLA+ model checking | `make spec` | **no Continuum code at all** | ~75s |
 | Benchmarks | `make bench` | micro | varies |
 
 Supporting passes: `make test-race` (race detector across all packages),
