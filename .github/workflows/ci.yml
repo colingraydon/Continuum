@@ -157,9 +157,10 @@ jobs:
   # design, not the implementation, which is why it complements rather than
   # replaces the fault and simulation suites.
   #
-  # Both configurations finish in well under a minute at these bounds. Larger
-  # bounds are a documented manual run, not a CI gate - TLC state spaces grow
-  # fast enough that putting one on the critical path invites a timeout.
+  # Both configurations are exhaustive in about 75s at these bounds. Raising
+  # MaxOps by one costs roughly 30x the state space and does not terminate, so
+  # the bounds in specs/*.cfg are chosen for what CI can actually finish -
+  # see docs/tla-spec.md for why depth was traded for fidelity.
   spec:
     runs-on: ubuntu-latest
     steps:
