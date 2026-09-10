@@ -14,9 +14,24 @@
 set -euo pipefail
 
 TLA_VERSION="${TLA_VERSION:-v1.8.0}"
+# Pinned alongside the version. This script downloads a jar and then executes
+# it, so the version tag alone is not enough: a re-cut release, a compromised
+# asset, or a redirect that downgraded the transport would all go unnoticed
+# without checking what actually arrived. Same reasoning as --require-hashes in
+# requirements-docs.txt. Update both together when bumping TLA_VERSION.
+TLA_SHA256="${TLA_SHA256:-957b23b2bb31d08f19346e105e23585f93fea9a139a712b0ac347eedaf26afea}"
 CACHE_DIR="${TLC_CACHE_DIR:-.tlc}"
 JAR="$CACHE_DIR/tla2tools-${TLA_VERSION}.jar"
 SPEC_DIR="${SPEC_DIR:-specs}"
+
+# sha256 of a file, portable across the macOS and Linux toolchains.
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d' ' -f1
+    else
+        shasum -a 256 "$1" | cut -d' ' -f1
+    fi
+}
 
 if [[ $# -lt 1 ]]; then
     echo "usage: $0 <config-name> [tlc args...]" >&2
@@ -41,7 +56,18 @@ if [[ ! -f "$JAR" ]]; then
     mkdir -p "$CACHE_DIR"
     url="https://github.com/tlaplus/tlaplus/releases/download/${TLA_VERSION}/tla2tools.jar"
     echo "fetching tla2tools ${TLA_VERSION}..."
-    curl -sSL --fail -o "$JAR.tmp" "$url"
+    # --proto '=https' applies to redirects too, so -L cannot be walked down to
+    # plaintext by a redirect chain; the checksum below is the real guarantee.
+    curl -sSL --fail --proto '=https' --tlsv1.2 -o "$JAR.tmp" "$url"
+
+    got="$(sha256_of "$JAR.tmp")"
+    if [[ "$got" != "$TLA_SHA256" ]]; then
+        rm -f "$JAR.tmp"
+        echo "tla2tools ${TLA_VERSION} checksum mismatch - refusing to run it." >&2
+        echo "  expected: $TLA_SHA256" >&2
+        echo "  got:      $got" >&2
+        exit 1
+    fi
     mv "$JAR.tmp" "$JAR"
 fi
 

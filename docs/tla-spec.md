@@ -170,9 +170,16 @@ bash scripts/tlc.sh Replication   # one configuration
 bash scripts/tlc.sh Strict
 ```
 
-`scripts/tlc.sh` fetches a pinned `tla2tools.jar` into `.tlc/` on first use and
-needs a JDK 17+. TLC exits non-zero on a violated invariant, which is what
-allows the `spec` CI job to gate rather than merely report.
+`scripts/tlc.sh` fetches `tla2tools.jar` into `.tlc/` on first use and needs a
+JDK 17+. TLC exits non-zero on a violated invariant, which is what allows the
+`spec` CI job to gate rather than merely report.
+
+Both the version **and a SHA-256** of the jar are pinned in the script. The
+script downloads an archive and then executes it, so the release tag alone is
+not enough — a re-cut release or a tampered asset would run unnoticed. A
+mismatch refuses to run and caches nothing, the same reasoning behind
+`--require-hashes` in `requirements-docs.txt`. Bump `TLA_VERSION` and
+`TLA_SHA256` together.
 
 To explore further than CI does, raise the bounds in a config — `MaxOps = 4` or
 a fourth node. Expect the state space to grow sharply; that is why the CI job
