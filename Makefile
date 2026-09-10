@@ -1,4 +1,4 @@
-.PHONY: build run test test-race e2e e2e-integration fault sim sim-race bench bench-ci bench-report lint workflow-lint docker clean
+.PHONY: build run test test-race e2e e2e-integration fault sim sim-race bench bench-ci bench-report lint workflow-lint patch-coverage docker clean
 
 build:
 	go build -o bin/continuum ./cmd/continuum
@@ -59,6 +59,20 @@ workflow-lint:
 coverage:
 	go test -coverprofile=coverage.out ./...
 	go tool cover -html=coverage.out
+
+# Diff coverage against BASE (default origin/main), the same gate CI runs on a
+# pull request. Codecov reports this number but cannot block on it - its patch
+# status is informational - so the gate lives here instead.
+#
+# This target owns the git invocation for both CI and local runs, so the
+# merge-base semantics live in one place. The three dots matter: they diff
+# against the merge base, so commits landing on BASE after this branch forked
+# are not attributed to it.
+BASE ?= origin/main
+patch-coverage:
+	go test -coverprofile=coverage.out -covermode=atomic ./...
+	git diff --unified=0 $(BASE)...HEAD -- '*.go' | \
+		go run ./cmd/patchcov -profile coverage.out -min 80
 
 docker:
 	docker build -t continuum .

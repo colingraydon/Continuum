@@ -4,10 +4,15 @@ coverage:
       default:
         target: 90%
         threshold: 1%
-    # Patch (diff) coverage is reported but does not block: error paths such as
-    # fsync/rename/close failures in the storage engine are not exercisable
-    # without a filesystem-injection seam, so a changed file's diff coverage can
-    # dip below the project bar without the project itself regressing.
+    # Patch (diff) coverage is reported here but gated in CI, by the
+    # patch-coverage job (cmd/patchcov). An informational status always reports
+    # success, so requiring this context would block a merge only when Codecov
+    # fails to answer at all - an availability dependency carrying no signal.
+    # The CI job's floor is lower than the project target for the original
+    # reason this was made informational: error paths such as fsync/rename/close
+    # failures in the storage engine are not exercisable without a
+    # filesystem-injection seam, so a changed file's diff coverage can dip below
+    # the project bar without the project itself regressing.
     patch:
       default:
         informational: true
