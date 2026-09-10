@@ -90,7 +90,7 @@ explicit.
 ## Why both GC guards
 
 Tombstone collection has two preconditions, and the model checker shows **each
-is load-bearing** — removing either one alone reachs a resurrection in seconds:
+is load-bearing** — removing either one alone reaches a resurrection in seconds:
 
 **Guard 1 — reachable replicas have converged.** A tombstone is only collected
 once every reachable node holds it or something newer. This is what the TTL
