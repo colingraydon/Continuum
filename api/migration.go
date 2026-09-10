@@ -181,7 +181,7 @@ func (h *Handler) CleanupStaleKeys() {
 }
 
 func (h *Handler) migFetchBucketKeys(addr string, vnodeHash uint32, bucket int) ([]string, error) {
-	url := fmt.Sprintf("http://%s/sync/bucket-keys?vnode=%d&bucket=%d", addr, vnodeHash, bucket)
+	url := fmt.Sprintf("%s%s/sync/bucket-keys?vnode=%d&bucket=%d", schemeHTTP, addr, vnodeHash, bucket)
 	resp, err := h.replicaClient.Get(url)
 	if err != nil {
 		return nil, err
@@ -199,7 +199,7 @@ func (h *Handler) migFetchSyncKeys(addr string, keys []string) (map[string][]Syn
 	if err != nil {
 		return nil, err
 	}
-	resp, err := h.replicaClient.Post("http://"+addr+"/sync/keys", "application/json", bytes.NewReader(body))
+	resp, err := h.replicaClient.Post(schemeHTTP+addr+"/sync/keys", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +216,7 @@ func (h *Handler) migPushSyncEntries(addr string, entries map[string][]SyncSibli
 	if err != nil {
 		return err
 	}
-	resp, err := h.replicaClient.Post("http://"+addr+"/sync/push", "application/json", bytes.NewReader(body))
+	resp, err := h.replicaClient.Post(schemeHTTP+addr+"/sync/push", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}

@@ -81,19 +81,19 @@ func (hs *HintStore) Lost() map[string]int {
 }
 
 // noteLossLocked records dropped hints and returns a function to fire the
-// handler after the caller releases the lock — the handler escalates to a
-// bulk repair, which must not run under the hint store's mutex.
+// handler after the caller releases the lock — the handler escalates to a bulk
+// repair, which must not run under the hint store's mutex. Returns nil when no
+// handler is registered; callers must nil-check.
+//
+// Callers pass a positive count (an eviction drops one hint, an expiry sweep
+// drops the sequences it collected), and every constructor routes through New,
+// so this deliberately carries no guard for dropped <= 0 or a nil lost map —
+// both would be unreachable.
 func (hs *HintStore) noteLossLocked(nodeID string, dropped int) func() {
-	if dropped <= 0 {
-		return func() {}
-	}
-	if hs.lost == nil {
-		hs.lost = make(map[string]int)
-	}
 	hs.lost[nodeID] += dropped
 	fn := hs.onLoss
 	if fn == nil {
-		return func() {}
+		return nil
 	}
 	return func() { fn(nodeID, dropped) }
 }
@@ -205,7 +205,9 @@ func (hs *HintStore) ExpireOld() {
 	}
 	notify := make([]func(), 0, len(removed))
 	for nodeID, seqs := range removed {
-		notify = append(notify, hs.noteLossLocked(nodeID, len(seqs)))
+		if fn := hs.noteLossLocked(nodeID, len(seqs)); fn != nil {
+			notify = append(notify, fn)
+		}
 	}
 	hs.mu.Unlock()
 	for _, fn := range notify {

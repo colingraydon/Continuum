@@ -19,6 +19,13 @@ import (
 const (
 	syncInterval = 30 * time.Second
 	gcInterval   = 5 * time.Minute
+	// schemeHTTP is the scheme for every sync request this package makes.
+	// Node-to-node traffic is plaintext HTTP by design: Continuum assumes a
+	// trusted network, and transport security is a roadmap item rather than an
+	// oversight. See docs/security.md. Routing every "http://" through one
+	// constant gives that decision a single home, and the NOSONAR suppresses
+	// go:S5332 here instead of at each of the four call sites.
+	schemeHTTP = "http://" //NOSONAR
 	// defaultCrossDCEvery paces cross-DC repair at a quarter of the local
 	// cadence. Anti-entropy compares a Merkle root per vnode per round, so an
 	// unpaced loop pays a WAN round trip for every vnode of every remote
@@ -533,7 +540,7 @@ type syncKeysResponse struct {
 }
 
 func (m *Manager) fetchSyncState(addr string, vnodeHash uint32) (syncStateResponse, error) {
-	resp, err := m.client.Get(fmt.Sprintf("http://%s/sync?vnode=%d", addr, vnodeHash))
+	resp, err := m.client.Get(fmt.Sprintf("%s%s/sync?vnode=%d", schemeHTTP, addr, vnodeHash))
 	if err != nil {
 		return syncStateResponse{}, err
 	}
@@ -547,7 +554,7 @@ func (m *Manager) fetchSyncKeys(addr string, keys []string) (map[string][]syncSi
 	if err != nil {
 		return nil, err
 	}
-	resp, err := m.client.Post("http://"+addr+"/sync/keys", "application/json", bytes.NewReader(body))
+	resp, err := m.client.Post(schemeHTTP+addr+"/sync/keys", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -560,7 +567,7 @@ func (m *Manager) fetchSyncKeys(addr string, keys []string) (map[string][]syncSi
 // from the replica. Used to discover keys the replica has that the primary
 // does not, enabling the pull side of bidirectional sync.
 func (m *Manager) fetchBucketKeys(addr string, vnodeHash uint32, bucket int) ([]string, error) {
-	resp, err := m.client.Get(fmt.Sprintf("http://%s/sync/bucket-keys?vnode=%d&bucket=%d", addr, vnodeHash, bucket))
+	resp, err := m.client.Get(fmt.Sprintf("%s%s/sync/bucket-keys?vnode=%d&bucket=%d", schemeHTTP, addr, vnodeHash, bucket))
 	if err != nil {
 		return nil, err
 	}
@@ -578,7 +585,7 @@ func (m *Manager) pushSyncEntries(addr string, entries map[string][]syncSibling)
 	if err != nil {
 		return err
 	}
-	resp, err := m.client.Post("http://"+addr+"/sync/push", "application/json", bytes.NewReader(body))
+	resp, err := m.client.Post(schemeHTTP+addr+"/sync/push", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}

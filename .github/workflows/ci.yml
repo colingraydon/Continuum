@@ -150,6 +150,22 @@ jobs:
           go -C tools install github.com/rhysd/actionlint/cmd/actionlint
           actionlint -shellcheck= -pyflakes=
 
+  # Post-merge only. The required "SonarCloud Code Analysis" check validates a
+  # PR's diff; after the merge Sonar runs a second analysis against the branch,
+  # scoped to the project's new-code window, which can fail where the PR passed.
+  # That one gates nothing by construction - it only exists once the merge has
+  # happened - so main can sit red with every check on the merge commit green.
+  # It did, for three hours after #90, because nothing was watching. This job is
+  # the watcher; see scripts/sonar-branch-gate.sh for why it binds the verdict
+  # to a specific commit rather than asking whether the branch is red now.
+  sonar-branch-gate:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check the branch quality gate
+        run: bash scripts/sonar-branch-gate.sh "${{ github.sha }}"
+
   # Hard coverage floor, enforced in CI so it can gate merges deterministically
   # (Codecov's project status is advisory only). cmd/ is excluded to match the
   # ignore list in codecov.yml: main()'s process wiring is not unit-testable, so

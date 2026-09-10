@@ -23,12 +23,17 @@ import (
 )
 
 const (
-	contentTypeHeader    = "Content-Type"
-	contentTypeJSON      = "application/json"
-	keysPrefix           = "/keys/"
-	headerXProxiedFrom   = "X-Proxied-From"
-	headerXSessionClock  = "X-Session-Clock"
-	schemeHTTP           = "http://"
+	contentTypeHeader   = "Content-Type"
+	contentTypeJSON     = "application/json"
+	keysPrefix          = "/keys/"
+	headerXProxiedFrom  = "X-Proxied-From"
+	headerXSessionClock = "X-Session-Clock"
+	// Node-to-node and client traffic is plaintext HTTP by design: Continuum
+	// assumes a trusted network, and transport security is a roadmap item
+	// rather than an oversight. See docs/security.md. Every "http://" in this
+	// package routes through this constant so the decision has one home; the
+	// NOSONAR suppresses go:S5332 here rather than at each call site.
+	schemeHTTP           = "http://" //NOSONAR
 	errKeyRequired       = "key is required"
 	errInvalidBody       = "invalid request body"
 	errFailedWrite       = "failed to write response"
