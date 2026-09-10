@@ -19,6 +19,12 @@ import (
 const (
 	syncInterval = 30 * time.Second
 	gcInterval   = 5 * time.Minute
+	// defaultCrossDCEvery paces cross-DC repair at a quarter of the local
+	// cadence. Anti-entropy compares a Merkle root per vnode per round, so an
+	// unpaced loop pays a WAN round trip for every vnode of every remote
+	// replica — the overwhelming majority of which report "identical". Local
+	// repair keeps the full-speed cadence; the WAN pays it every 4th round.
+	defaultCrossDCEvery = 4
 	// GCTTL is the minimum age a tombstone must reach before it is eligible for
 	// garbage collection AND the maximum downtime a single node can tolerate
 	// while persisting state. The recovery driver in cmd/continuum uses the
@@ -48,6 +54,17 @@ type Manager struct {
 	replicationFactor int
 	client            *http.Client
 	syncEvery         time.Duration
+	// selfDC labels this node's data center; "" means unlabeled, in which case
+	// every replica is treated as local and the cross-DC cadence never engages.
+	selfDC string
+	// crossDCEvery paces WAN repair: a replica in another DC is synced only on
+	// every Nth round. 1 (or an unlabeled node) means every round, which is the
+	// pre-multi-DC behavior.
+	crossDCEvery int
+	// rounds counts sync rounds, independent of the vnode cursor, so the
+	// cross-DC cadence is a property of elapsed time rather than of which vnode
+	// happens to come up next.
+	rounds uint64
 }
 
 func New(r *ring.Ring, s *store.Store, selfID string, replicationFactor int, timeout time.Duration) *Manager {
@@ -64,7 +81,27 @@ func newBare(r *ring.Ring, s *store.Store, selfID string, replicationFactor int,
 		replicationFactor: replicationFactor,
 		client:            &http.Client{Timeout: timeout},
 		syncEvery:         syncInterval,
+		crossDCEvery:      defaultCrossDCEvery,
 	}
+}
+
+// SetSelfDC labels this node's data center, enabling the cross-DC sync cadence.
+// Unlabeled nodes treat every replica as local.
+func (m *Manager) SetSelfDC(dc string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.selfDC = dc
+}
+
+// SetCrossDCSyncEvery paces WAN repair: replicas in another DC are synced on
+// every nth round. Values below 1 are clamped to 1 (sync every round).
+func (m *Manager) SetCrossDCSyncEvery(n int) {
+	if n < 1 {
+		n = 1
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.crossDCEvery = n
 }
 
 // SetSyncInterval overrides how often the primary-driven sync round runs.
@@ -264,19 +301,99 @@ func (m *Manager) syncRound() {
 		return
 	}
 
-	m.mu.RLock()
+	m.mu.Lock()
 	tree := m.trees[end]
-	m.mu.RUnlock()
+	selfDC := m.selfDC
+	m.rounds++
+	// Offset by one so the first round after start crosses the WAN rather than
+	// waiting out a full multiple: a node that just came up is exactly when
+	// remote divergence is most likely.
+	crossDC := (m.rounds-1)%uint64(m.crossDCEvery) == 0
+	m.mu.Unlock()
 
 	nodes := m.r.GetReplicationNodesForHash(end, m.replicationFactor)
 	for _, node := range nodes {
 		if node.ID == m.selfID {
 			continue
 		}
+		if isRemoteDC(selfDC, node.DC) && !crossDC {
+			continue
+		}
 		if err := m.syncWithReplica(node.Address, end, tree); err != nil {
 			log.Printf("antientropy: sync with %s vnode %d: %v", node.ID, end, err)
 		}
 	}
+}
+
+// isRemoteDC reports whether a replica sits across the WAN from us. Either
+// label being empty means we cannot tell the two apart, so the replica is
+// treated as local and repaired at the full cadence — an unlabeled cluster
+// behaves exactly as it did before multi-DC.
+func isRemoteDC(selfDC, nodeDC string) bool {
+	return selfDC != "" && nodeDC != "" && selfDC != nodeDC
+}
+
+// ResyncWithNode drives an immediate anti-entropy pass with one node across
+// every vnode this node is primary for that the target also replicates.
+//
+// The round-robin loop repairs the same divergence eventually, but "eventually"
+// is len(order) rounds — 75 minutes at 150 vnodes and the 30s default, and
+// longer again for a remote DC now that the WAN runs on a slower cadence. That
+// is the right cost for background drift and the wrong one for a known,
+// bounded loss: when a target's buffered hints are dropped, the writes they
+// carried are gone from every fast path and only this pass will restore them
+// promptly.
+//
+// Unlike the background round this walks the node's **entire replica set**,
+// not the primary subset it normally drives sync for. The loss is known at the
+// coordinator that buffered the hints, and a coordinator is primary for only a
+// fraction of the keys it accepts - restricting the pass to its primary ranges
+// would leave most of the dropped writes unrepaired. Pushing from a non-primary
+// is safe here for the same reason the background sync is: syncWithReplica
+// reconciles by vector clock, so a redundant push is idempotent.
+//
+// Runs synchronously and is not cheap - it is one Merkle root comparison per
+// shared vnode. Callers drive it from a background goroutine.
+func (m *Manager) ResyncWithNode(nodeID, address string) {
+	m.maybeRebuild()
+
+	m.mu.RLock()
+	order := make([]uint32, 0, len(m.trees))
+	trees := make(map[uint32]*merkle.Tree, len(m.trees))
+	for end, tree := range m.trees {
+		order = append(order, end)
+		trees[end] = tree
+	}
+	m.mu.RUnlock()
+	sort.Slice(order, func(i, j int) bool { return order[i] < order[j] })
+
+	var synced, failed int
+	for _, end := range order {
+		if !m.replicates(nodeID, end) {
+			continue
+		}
+		tree := trees[end]
+		if tree == nil {
+			continue
+		}
+		if err := m.syncWithReplica(address, end, tree); err != nil {
+			log.Printf("antientropy: resync with %s vnode %d: %v", nodeID, end, err)
+			failed++
+			continue
+		}
+		synced++
+	}
+	log.Printf("antientropy: resync with %s complete: %d vnodes synced, %d failed", nodeID, synced, failed)
+}
+
+// replicates reports whether nodeID is in the replica set for this vnode.
+func (m *Manager) replicates(nodeID string, end uint32) bool {
+	for _, n := range m.r.GetReplicationNodesForHash(end, m.replicationFactor) {
+		if n.ID == nodeID {
+			return true
+		}
+	}
+	return false
 }
 
 // nextVnode returns the next vnode end hash in the round-robin order, or

@@ -344,6 +344,19 @@ func (r *Ring) NodeCount() int {
 	return len(r.nodes)
 }
 
+// NodeDC returns the data center label of the node with this ID, or "" if the
+// node is unknown or unlabeled. Callers use it to tell a local-DC peer from one
+// across the WAN when they hold only a node ID — hint delivery, for instance,
+// which must pick a WAN-tolerant timeout without a *Node in hand.
+func (r *Ring) NodeDC(id string) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if n, ok := r.nodes[id]; ok {
+		return n.DC
+	}
+	return ""
+}
+
 func (r *Ring) GetNodes() []*Node {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

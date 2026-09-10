@@ -42,12 +42,18 @@ type config struct {
 	replicaTimeout       time.Duration
 	syncInterval         time.Duration
 	hintDeliveryInterval time.Duration
-	selfWeight           float64
-	selfZone             string
-	selfDC               string
-	dataDir              string
-	memtableMaxBytes     int64
-	blockCacheBytes      int64
+	// crossDCReplicaTimeout bounds a replica hop across the WAN; a
+	// cross-continent round trip does not fit the same-DC budget.
+	crossDCReplicaTimeout time.Duration
+	// crossDCSyncEvery paces cross-DC anti-entropy: remote replicas are synced
+	// every nth round.
+	crossDCSyncEvery int
+	selfWeight       float64
+	selfZone         string
+	selfDC           string
+	dataDir          string
+	memtableMaxBytes int64
+	blockCacheBytes  int64
 }
 
 func getEnvInt(key string, dflt int) int {
@@ -201,12 +207,17 @@ func loadConfig() config {
 		replicaTimeout:       getEnvDurationMs("REPLICA_TIMEOUT_MS", 500*time.Millisecond),
 		syncInterval:         getEnvDurationMs("SYNC_INTERVAL_MS", 30*time.Second),
 		hintDeliveryInterval: getEnvDurationMs("HINT_DELIVERY_INTERVAL_MS", 30*time.Second),
-		selfWeight:           getEnvFloat64("SELF_WEIGHT", 1.0),
-		selfZone:             getEnvString("SELF_ZONE", ""),
-		selfDC:               selfDC,
-		dataDir:              getEnvString("DATA_DIR", ""),
-		memtableMaxBytes:     int64(getEnvPositiveInt("MEMTABLE_MAX_BYTES", 16<<20)),
-		blockCacheBytes:      int64(getEnvInt("BLOCK_CACHE_BYTES", 16<<20)), // <= 0 disables the cache
+		// Four times the same-DC budget: enough for a cross-continent round
+		// trip, still short enough that a genuinely dead remote replica is
+		// hinted rather than holding the fan-out goroutine open.
+		crossDCReplicaTimeout: getEnvDurationMs("CROSS_DC_REPLICA_TIMEOUT_MS", 2*time.Second),
+		crossDCSyncEvery:      getEnvPositiveInt("CROSS_DC_SYNC_EVERY", 4),
+		selfWeight:            getEnvFloat64("SELF_WEIGHT", 1.0),
+		selfZone:              getEnvString("SELF_ZONE", ""),
+		selfDC:                selfDC,
+		dataDir:               getEnvString("DATA_DIR", ""),
+		memtableMaxBytes:      int64(getEnvPositiveInt("MEMTABLE_MAX_BYTES", 16<<20)),
+		blockCacheBytes:       int64(getEnvInt("BLOCK_CACHE_BYTES", 16<<20)), // <= 0 disables the cache
 	}
 }
 
@@ -330,6 +341,9 @@ func runHintDelivery(ctx context.Context, h *api.Handler, interval time.Duration
 		select {
 		case <-ticker.C:
 			h.DeliverPendingHints()
+			// Same cadence, different failure: nodes whose hints were dropped
+			// entirely have nothing left to deliver and need a repair pass.
+			h.RunPendingResyncs()
 		case <-ctx.Done():
 			return
 		}
@@ -483,21 +497,31 @@ func main() {
 	}
 	ae := antientropy.NewWithSnapshot(r, s, cfg.selfID, cfg.replicationFactor, cfg.replicaTimeout, merklePath)
 	ae.SetSyncInterval(cfg.syncInterval)
+	ae.SetSelfDC(cfg.selfDC)
+	ae.SetCrossDCSyncEvery(cfg.crossDCSyncEvery)
 	s.SetOnUpdate(ae.Update)
 	s.SetOnEvict(ae.RemoveFromTrees)
 	ae.Start(ctx)
 
 	h := api.NewHandler(r, ml, s, api.HandlerConfig{
-		SelfID:            cfg.selfID,
-		SelfDC:            cfg.selfDC,
-		ReplicationFactor: cfg.replicationFactor,
-		WriteQuorum:       cfg.writeQuorum,
-		ReadQuorum:        cfg.readQuorum,
-		ReplicaTimeout:    cfg.replicaTimeout,
+		SelfID:                cfg.selfID,
+		SelfDC:                cfg.selfDC,
+		ReplicationFactor:     cfg.replicationFactor,
+		WriteQuorum:           cfg.writeQuorum,
+		ReadQuorum:            cfg.readQuorum,
+		ReplicaTimeout:        cfg.replicaTimeout,
+		CrossDCReplicaTimeout: cfg.crossDCReplicaTimeout,
 	}, hs)
 	// Serve anti-entropy sync state from the manager's incrementally-maintained
 	// Merkle trees instead of rescanning the store on every sync request.
 	h.SetSyncTreeProvider(ae)
+	// Dropped hints mean writes that will not reach a replica by the hint path.
+	// Escalate them to a targeted anti-entropy pass rather than leaving the
+	// background cycle to rediscover the divergence on its own schedule.
+	h.SetResyncTrigger(ae)
+	if hs != nil {
+		hs.SetLossHandler(h.OnHintLoss)
+	}
 
 	// With persistence enabled, paxos promises for conditional writes must
 	// survive a crash: an acceptor that forgets a promise can let two

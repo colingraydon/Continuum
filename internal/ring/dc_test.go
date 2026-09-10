@@ -516,3 +516,30 @@ func TestDCReplicationFactor(t *testing.T) {
 		t.Errorf("empty DC = %d, want 0", got)
 	}
 }
+
+// TestNodeDC covers the lookup callers use when they hold a node ID but no
+// *Node - hint delivery and read repair, which need the DC to pick a timeout
+// budget. An unknown or unlabeled node must report "" rather than guess, since
+// callers treat "" as local and an incorrect guess would apply a WAN budget to
+// a rack hop or vice versa.
+func TestNodeDC(t *testing.T) {
+	r := NewRing(4)
+	r.AddZonedNodeDC("labeled", "10.0.0.1:8080", "us-east", "rack1", 1.0)
+	r.AddNode("unlabeled", "10.0.0.2:8080")
+
+	if got := r.NodeDC("labeled"); got != "us-east" {
+		t.Errorf("NodeDC(labeled) = %q, want us-east", got)
+	}
+	if got := r.NodeDC("unlabeled"); got != "" {
+		t.Errorf("NodeDC(unlabeled) = %q, want empty", got)
+	}
+	if got := r.NodeDC("absent"); got != "" {
+		t.Errorf("NodeDC(absent) = %q, want empty", got)
+	}
+
+	// A removed node must stop reporting its old DC.
+	r.RemoveNode("labeled")
+	if got := r.NodeDC("labeled"); got != "" {
+		t.Errorf("NodeDC after removal = %q, want empty", got)
+	}
+}

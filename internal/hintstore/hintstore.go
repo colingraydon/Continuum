@@ -39,6 +39,16 @@ type HintStore struct {
 	ttl        time.Duration
 	nextSeq    uint64
 	log        *hintLog // nil = memory-only
+	// onLoss is notified when hints for a node are discarded without being
+	// delivered — cap eviction or TTL expiry. Both mean writes this node
+	// accepted will never reach that replica by the hint path, so the listener
+	// can escalate to a bulk repair instead of waiting for the background
+	// anti-entropy cycle to happen upon the same keys.
+	onLoss func(nodeID string, dropped int)
+	// lost counts undelivered hints dropped per node, for metrics. Kept
+	// separately from the callback so a restart-less operator view survives
+	// after the escalation has been handled.
+	lost map[string]int
 }
 
 func New(maxPerNode int, ttl time.Duration) *HintStore {
@@ -46,7 +56,46 @@ func New(maxPerNode int, ttl time.Duration) *HintStore {
 		hints:      make(map[string][]storedHint),
 		maxPerNode: maxPerNode,
 		ttl:        ttl,
+		lost:       make(map[string]int),
 	}
+}
+
+// SetLossHandler registers a callback invoked when buffered hints for a node
+// are dropped undelivered (cap eviction or TTL expiry). It is called without
+// the store lock held, so the handler may call back into the store.
+func (hs *HintStore) SetLossHandler(fn func(nodeID string, dropped int)) {
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	hs.onLoss = fn
+}
+
+// Lost returns the number of undelivered hints dropped per node since start.
+func (hs *HintStore) Lost() map[string]int {
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	out := make(map[string]int, len(hs.lost))
+	for id, n := range hs.lost {
+		out[id] = n
+	}
+	return out
+}
+
+// noteLossLocked records dropped hints and returns a function to fire the
+// handler after the caller releases the lock — the handler escalates to a
+// bulk repair, which must not run under the hint store's mutex.
+func (hs *HintStore) noteLossLocked(nodeID string, dropped int) func() {
+	if dropped <= 0 {
+		return func() {}
+	}
+	if hs.lost == nil {
+		hs.lost = make(map[string]int)
+	}
+	hs.lost[nodeID] += dropped
+	fn := hs.onLoss
+	if fn == nil {
+		return func() {}
+	}
+	return func() { fn(nodeID, dropped) }
 }
 
 // Store buffers a hint for nodeID. If the per-node cap is reached the oldest
@@ -77,7 +126,14 @@ func (hs *HintStore) Store(nodeID string, h Hint) {
 		}
 		walSeq = logRef.appendStore(nodeID, sh)
 	}
+	var notify func()
+	if evicted {
+		notify = hs.noteLossLocked(nodeID, 1)
+	}
 	hs.mu.Unlock()
+	if notify != nil {
+		notify()
+	}
 
 	// Group commit: batch this fsync with other concurrent writers. Hint
 	// durability is best-effort (anti-entropy backstops loss), so a failure is
@@ -147,7 +203,14 @@ func (hs *HintStore) ExpireOld() {
 	if logRef != nil {
 		walSeq = logRef.appendRemovals(removed)
 	}
+	notify := make([]func(), 0, len(removed))
+	for nodeID, seqs := range removed {
+		notify = append(notify, hs.noteLossLocked(nodeID, len(seqs)))
+	}
 	hs.mu.Unlock()
+	for _, fn := range notify {
+		fn()
+	}
 
 	if logRef != nil && len(removed) > 0 {
 		if err := logRef.syncUpTo(walSeq); err != nil {
