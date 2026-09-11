@@ -259,9 +259,22 @@ func TestSimCrossDCHintOverflow_ResyncRepairs(t *testing.T) {
 	c.waitFullRing(10 * time.Second)
 
 	// Assert: every write reaches the remote DC, including the ones whose
-	// hints were evicted.
+	// hints were evicted. This is the claim the escalation is responsible for,
+	// and removing SetResyncTrigger fails it with 20 of 30 keys missing.
 	waitKeysOnDC(t, c, keys, dcWest, 20*time.Second)
-	verifyConvergence(t, c, keys, 20*time.Second)
+
+	// Deliberately NOT verifyConvergence. Full-cluster agreement needs every
+	// western replica to hold every key, and this scenario has parked the
+	// mechanism that would do that: crossDCSyncEvery is 1000, so background
+	// cross-DC anti-entropy never runs inside the window. The escalation is
+	// one-shot per node - RunPendingResyncs clears a node before running it -
+	// so a key that settles after that node's single pass has nothing left to
+	// carry it, and the assertion fails perhaps one run in ten.
+	//
+	// That flakiness was real and this scenario shipped with it in #91. The
+	// fix is to assert what the setup actually supports rather than to widen a
+	// timeout: convergence here is anti-entropy's job, and anti-entropy is
+	// switched off on purpose.
 }
 
 // waitHintsDropped waits until coordinator has dropped at least one hint

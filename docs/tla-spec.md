@@ -19,11 +19,12 @@ crashes, recoveries, hint deliveries, repairs and GC passes — and either repor
 that an invariant held in all of them or prints the shortest trace that breaks
 it.
 
-The trade is exact and worth stating plainly: **this verifies the design, not
-the implementation.** A correct spec and a buggy Go implementation can coexist
-happily. Closing that gap is what the roadmap's trace-conformance item is for;
-it is not done. Until it is, this document describes a model that agrees with
-the code because a human kept it that way.
+The trade used to be stated plainly here as: this verifies the design, not the
+implementation, and a correct spec could coexist happily with a buggy Go
+function. **Trace conformance now closes part of that gap** — a recorded
+execution of the real cluster is replayed against the model, so the spec cannot
+drift away from the code unnoticed. See [Trace conformance](#trace-conformance)
+for what it does and does not establish.
 
 ## What is modelled
 
@@ -195,6 +196,7 @@ of a caveat a reader has to take on trust.
 
 ```bash
 make spec                      # both configurations, ~75s
+make spec-trace                # record a real execution and replay it
 bash scripts/tlc.sh Replication   # one configuration
 bash scripts/tlc.sh Strict
 ```
@@ -214,16 +216,90 @@ To explore further than CI does, raise the bounds in a config — `MaxOps = 4` o
 a fourth node. Expect the state space to grow sharply; that is why the CI job
 runs the small configurations and larger ones stay a manual exercise.
 
+## Trace conformance
+
+`make spec-trace` records what a real cluster does and makes TLC replay it
+against the model. Where the rest of this document asks *is the design
+correct*, this asks the question that connects the design to the code: **did
+the running system only ever do things the model permits?**
+
+`TestTraceConformance` in `tests/sim` drives a cluster through a write, a
+replica crash, a delete, hinted handoff on recovery, and a tombstone
+collection, recording every event it and the stores observe. The run is emitted
+as a TLA+ module and `specs/Trace.tla` replays it, requiring each observation
+to correspond to a legal step.
+
+The trace is **regenerated on every run, never committed** — the point is to
+check the implementation as it is now, not as it was when a fixture was
+recorded.
+
+### What it establishes, and what it does not
+
+The check is that *some* legal execution of the model explains the recorded
+observations. It is deliberately not a claim about which mechanism did what: a
+store callback reveals *that* a replica reached a version, not whether fan-out,
+a hinted handoff, or an anti-entropy repair delivered it. Those three are
+indistinguishable from the outside, so any of them may satisfy a delivery
+observation.
+
+The model's own safety property is evaluated at the same time, against states
+the real cluster actually reached — so `NoResurrection` is no longer checked
+only over hypothetical states.
+
+Its reach is bounded by the scenario. One key, one topology, one ordering of
+events. It is a conformance *check*, not a conformance *proof*, and widening it
+means more scenarios rather than a deeper search.
+
+### Reading the result
+
+Success looks like failure, and the inversion is worth understanding before
+trusting the check. Because an observation can have more than one explanation,
+the replay is a search, and the question — does *any* path explain the whole
+trace — is reachability rather than invariance. `TraceIncomplete` asserts the
+opposite of what should be true, so **TLC violating it is the witness of
+success**; TLC finding no violation means no path ever explained the final
+event. `scripts/trace-conformance.sh` interprets that in one documented place
+rather than leaving an inverted exit code in a CI step.
+
+### The scenario had to be made realistic first
+
+The first recorded run was rejected, and correctly so. It collected the
+tombstone immediately after the delete, while a hint carrying that tombstone
+was still buffered for the crashed replica — and the model drops hints at or
+below a collected version, because the hint TTL (1h) is far shorter than the GC
+TTL (24h). A live hint cannot outlive the tombstone it carries.
+
+So the rejection was the scenario describing an ordering the real system cannot
+reach, not the implementation misbehaving. The scenario now recovers the
+replica and lets the hint land before collecting. That the check caught an
+unrealistic ordering on its first run is the clearest evidence it is doing
+something.
+
+### Evidence it has teeth
+
+A conformance check that cannot fail is worse than none, so the rejection path
+is tested directly. Each of these corrupted traces is rejected, while the
+recorded one passes:
+
+| corrupted trace | result |
+| --------------- | ------ |
+| a replica serves the pre-delete value after collection | rejected |
+| a replica reaches a version nobody wrote | rejected |
+| the tombstone is collected before any replica holds it | rejected |
+
 ## Not covered
 
 Stated so the boundary is explicit rather than implied:
 
-- **Trace conformance** — checking that the running system's observed behavior
-  actually refines this spec. Still the open item, but no longer blocked: the
-  per-replica fan-out above removes the abstraction that made recorded
-  executions unreplayable. What remains is instrumenting the simulation harness
-  to emit spec-level events, generating a trace module from a run, and a
-  `Trace.tla` that constrains `Next` to follow it.
+- **Broader trace conformance.** One scenario is checked, not the seeded
+  simulation suite. Recording arbitrary runs needs every event attributable,
+  which a randomized background workload does not give; widening this means
+  writing more deterministic scenarios.
+- **The downtime gate is not trace-checked.** The simulation's nodes are
+  memory-only, so a crash destroys their data and a recovering replica can
+  never carry the stale value the gate exists to discard. Exercising that path
+  against a real implementation needs persistence in the harness, which the
+  simulation docs already list as deferred.
 - **Paxos CAS** — the conditional-write protocol has its own
   [design doc](paxos-cas-design.md) and porcupine coverage, but no spec.
 - **Sibling semantics** — excluded by the total-order abstraction above.

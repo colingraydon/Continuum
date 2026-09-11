@@ -82,6 +82,11 @@ type simConfig struct {
 	// hintCap is the per-node hint buffer cap. Defaults to hintCapPerNode; a
 	// scenario about hint overflow sets it low enough to overrun deliberately.
 	hintCap int
+	// observer, when set, watches every node's store. It belongs here rather
+	// than being assigned on the cluster afterwards: nodes start inside
+	// newSimCluster and their store callbacks fire immediately, so a later
+	// assignment would race with them.
+	observer storeObserver
 }
 
 func (c simConfig) withDefaults() simConfig {
@@ -124,11 +129,25 @@ func (c simConfig) dcOf(i int) string {
 	return ""
 }
 
+// storeObserver watches every node's local store. The trace recorder uses it
+// to see writes land replica by replica, which is the granularity the TLA+
+// model works at. nil in every scenario that is not recording a trace.
+//
+// It receives the entry hash rather than a store handle deliberately: the
+// store invokes onUpdate while holding its own mutex, so a callback that read
+// the store back would deadlock. The hash is what the callback has, and it
+// identifies the entry well enough to order versions after the fact.
+type storeObserver interface {
+	observeUpdate(nodeID, key string, hash uint32)
+	observeEvict(nodeID, key string)
+}
+
 type simCluster struct {
-	t      *testing.T
-	cfg    simConfig
-	net    *simNet
-	client *http.Client // rides the sim net on the never-faulted client edge
+	t        *testing.T
+	cfg      simConfig
+	net      *simNet
+	client   *http.Client  // rides the sim net on the never-faulted client edge
+	observer storeObserver // set once at construction; never mutated afterwards
 
 	mu    sync.Mutex
 	nodes []*simNode // guarded: restart swaps entries while workloads read
@@ -204,8 +223,20 @@ func (c *simCluster) startNode(id, dc string) *simNode {
 	ae.SetSelfDC(dc)
 	ae.SetCrossDCSyncEvery(c.cfg.crossDCSyncEvery)
 	ae.SetHTTPTransport(linkFrom{net: c.net, from: id})
-	s.SetOnUpdate(ae.Update)
-	s.SetOnEvict(ae.RemoveFromTrees)
+	// Chained rather than replaced: anti-entropy's tree maintenance is not
+	// optional, so an observer layers on top of it.
+	s.SetOnUpdate(func(key string, hash uint32) {
+		ae.Update(key, hash)
+		if c.observer != nil {
+			c.observer.observeUpdate(id, key, hash)
+		}
+	})
+	s.SetOnEvict(func(key string) {
+		ae.RemoveFromTrees(key)
+		if c.observer != nil {
+			c.observer.observeEvict(id, key)
+		}
+	})
 
 	h := api.NewHandler(r, ml, s, api.HandlerConfig{
 		SelfID:            id,
@@ -289,9 +320,10 @@ func newSimCluster(t *testing.T, cfg simConfig, seed int64) *simCluster {
 	cfg = cfg.withDefaults()
 	net := newSimNet(seed)
 	c := &simCluster{
-		t:   t,
-		cfg: cfg,
-		net: net,
+		t:        t,
+		cfg:      cfg,
+		net:      net,
+		observer: cfg.observer,
 		client: &http.Client{
 			Timeout:   clientTimeout,
 			Transport: linkFrom{net: net, from: clientID},

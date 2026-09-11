@@ -94,6 +94,28 @@ func (c *simCluster) put(n *simNode, key, value string, clocks map[string]uint64
 	return resp.StatusCode, nil
 }
 
+// del issues a client delete, which the coordinator replicates as a tombstone.
+func (c *simCluster) del(n *simNode, key string, clocks map[string]uint64) (int, error) {
+	payload := struct {
+		Clocks map[string]uint64 `json:"clocks,omitempty"`
+	}{Clocks: clocks}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return 0, err
+	}
+	req, err := http.NewRequest(http.MethodDelete, "http://"+n.httpAddr+"/keys/"+key, strings.NewReader(string(body)))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	resp.Body.Close()
+	return resp.StatusCode, nil
+}
+
 // --- causal read-modify-write workload (durability + convergence) -----------
 
 // keyState is the single-writer history for one key; sequence numbers give a

@@ -72,7 +72,16 @@ if [[ ! -f "$JAR" ]]; then
     mv "$JAR.tmp" "$JAR"
 fi
 
-echo "checking $config.cfg"
+# A config names its own module when one exists (Trace.cfg -> Trace.tla);
+# otherwise it is another configuration of the main spec (Strict.cfg ->
+# Replication.tla). Getting this wrong is quiet: TLC checks the module it was
+# given and reports the config's invariants as undefined.
+module="Replication.tla"
+if [[ -f "$SPEC_DIR/$config.tla" ]]; then
+    module="$config.tla"
+fi
+
+echo "checking $config.cfg against $module"
 # -workers auto uses every core; the parallel collector keeps the heap from
 # dominating on the larger configurations.
 ( cd "$SPEC_DIR" && exec java -XX:+UseParallelGC \
@@ -80,4 +89,4 @@ echo "checking $config.cfg"
     -config "$config.cfg" \
     -workers auto \
     "$@" \
-    Replication.tla )
+    "$module" )

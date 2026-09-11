@@ -170,8 +170,16 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: "go.mod"
       - name: Model-check the specification
         run: make spec
+      # Records a real cluster's execution and replays it against the model, so
+      # the spec cannot drift away from the implementation unnoticed.
+      - name: Check trace conformance
+        run: make spec-trace
 
   # Diff coverage, gated in CI so it can block a merge deterministically.
   # Codecov reports the same measure but cannot gate it: codecov.yml marks the
