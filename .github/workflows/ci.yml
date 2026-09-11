@@ -120,8 +120,21 @@ jobs:
           go-version-file: "go.mod"
       - name: Download dependencies
         run: go mod download
+      # Repeated deliberately. A single run is weak evidence for timing-sensitive
+      # scenarios: something that fails one run in five still looks green 80% of
+      # the time, which is how a ~20% flake in the cross-DC hint-overflow
+      # scenario survived three pull requests of a check that gates merges.
+      # -count=2 roughly doubles the chance of catching one per PR, and
+      # SIM_SEEDS widens the seeded schedules explored per scenario.
+      #
+      # This improves the odds rather than guaranteeing anything. The real
+      # defence is a scenario that asserts what its own setup supports - the
+      # flake above asserted cluster-wide convergence while deliberately
+      # switching off the mechanism that produces it.
       - name: Seeded cluster simulation
-        run: go test -v -tags sim -timeout 600s ./tests/sim/...
+        env:
+          SIM_SEEDS: "5"
+        run: go test -v -count=2 -tags sim -timeout 900s ./tests/sim/...
 
   docker:
     runs-on: ubuntu-latest

@@ -88,6 +88,8 @@ In Grafana, add `http://prometheus:9090` as a Prometheus data source.
 | `make e2e` | Run in-process cluster tests (`TestE2E*` in `api`) |
 | `make e2e-integration` | Run process-based end-to-end tests (spawns real binaries) |
 | `make fault` | Run the fault-injection suite (kills, hangs, partitions, packet loss) |
+| `make sim` | Run the seeded in-process cluster simulation (`SIM_SEEDS=n` widens the sweep) |
+| `make sim-race` | The same suite under the race detector |
 | `make bench` | Run all benchmarks with memory stats |
 | `make bench-ci` | Run the CPU-bound benchmark subset used by the CI regression gate |
 | `make bench-report` | Regenerate the published percentile dataset in `docs/data/` (run on a known machine) |
@@ -161,7 +163,13 @@ These jobs run on every push and pull request to `main` (see [docs/testing.md](t
 - **test** - `go vet` + `go test` with coverage upload to Codecov
 - **e2e-integration** - process-based end-to-end tests with a 120-second timeout
 - **fault-injection** - the fault-injection suite with a 900-second timeout
-- **simulation** - the seeded in-process cluster simulation with a 600-second timeout. It gets its own runner rather than sharing one with the fault suite: both are timing-sensitive, and run together they starve each other into spurious failures
+- **simulation** - the seeded in-process cluster simulation, run **twice** (`-count=2`) with `SIM_SEEDS=5`. It gets its own runner rather than sharing one with the fault suite: both are timing-sensitive, and run together they starve each other into spurious failures
+
+> **Why the simulation runs more than once**
+>
+> A single run is weak evidence for timing-sensitive scenarios. Something that fails one run in five still looks green 80% of the time — which is how a ~20% flake in the cross-DC hint-overflow scenario survived three pull requests of a check that gates merges. `-count=2` roughly doubles the chance of catching one per PR; `SIM_SEEDS` widens the seeded schedules explored per scenario.
+>
+> This improves the odds rather than guaranteeing anything, and it is not the main defence. The flake in question asserted cluster-wide convergence while deliberately switching off the mechanism that produces it — no amount of repetition fixes a scenario asserting something its own setup cannot deliver. Repetition catches the ones that slip through anyway.
 - **lint** - golangci-lint
 - **bench-regression** (pull requests only) - measures the CPU-bound benchmark subset at the PR's base commit and at its head **on the same runner, in alternating rounds** (`scripts/bench-ab.sh`), compares with `benchstat`, and fails on statistically significant time regressions above 20% (`scripts/benchguard.sh`, threshold via `BENCH_REGRESSION_THRESHOLD`). Interleaving matters: measured one side after the other, any drift during the job lands entirely on whichever ran second and reads as a one-sided regression. Only the `sec/op` table is gated - the ring's custom `variance` and `vnodes` units are not costs. Insignificant deltas (`~`) never fail the gate. fsync-bound, cluster-setup, and multi-millisecond benchmarks are excluded as too noisy or slow for CI - run `make bench` locally for those.
 - **spec** - model-checks the TLA+ specification (`specs/Replication.tla`) with TLC. Runs no Continuum code: it enumerates every interleaving of the modelled protocol within bounded constants, so it guards the design rather than the implementation. It also replays a recorded execution of a real cluster against the model (`make spec-trace`), so the spec cannot drift from the implementation unnoticed. See [the spec docs](tla-spec.md)
@@ -194,4 +202,16 @@ These jobs run on every push and pull request to `main` (see [docs/testing.md](t
 
 **Dependabot** opens grouped PRs weekly for Go module and GitHub Actions dependency updates. Patch and minor updates are approved and queued for auto-merge.
 
-Note what "auto-merge" waits on: GitHub holds the merge for the branch's **required** status checks, not for every job on this page. Only `coverage-gate` and SonarCloud are required today, so a red `bench-regression`, `lint`, or `fault-injection` does not block a Dependabot merge - PR #89 landed on `main` with `bench-regression` failing. Widening the required set is a repository-settings change, tracked separately from this file.
+Note what "auto-merge" waits on: GitHub holds the merge for the branch's **required** status checks, not for every job on this page. The required set is:
+
+| Required | Source |
+| -------- | ------ |
+| `test`, `lint`, `e2e-integration`, `fault-injection`, `simulation`, `docker`, `workflow-lint`, `patch-coverage` | repository ruleset |
+| `coverage-gate`, `SonarCloud Code Analysis` | branch protection |
+
+Two jobs are deliberately **advisory**:
+
+- **`bench-regression`** is statistical. Even measured in interleaved rounds it can flag a run, and blocking merges on noise is worse than reading the number.
+- **`spec`** postdates the ruleset and has not been added to it. Model checking is deterministic, so there is no noise argument for leaving it out - it is simply not wired in yet.
+
+This used to read "only `coverage-gate` and SonarCloud are required", which was true when written: PR #89 landed on `main` with `bench-regression` red because nothing else gated it.

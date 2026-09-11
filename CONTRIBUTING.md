@@ -57,10 +57,13 @@ them here saves a round trip:
 - [ ] **Docs updated** (see below)
 
 CI additionally runs `go vet`, the full test suite with coverage, e2e, fault
-injection, the seeded cluster simulation, CodeQL, `actionlint` over the workflow
-files, a benchmark regression guard
-(fails on >20% significant regressions), and a `mkdocs --strict` docs build. SonarCloud flags functions
-whose **cognitive complexity exceeds 15** — keep new functions under it.
+injection, the seeded cluster simulation (twice, with a wider seed sweep),
+CodeQL, `actionlint` over the workflow files, diff-coverage and project-coverage
+gates, TLA+ model checking plus trace conformance, a benchmark regression guard
+(fails on >20% significant regressions), and a `mkdocs --strict` docs build.
+SonarCloud flags functions whose **cognitive complexity exceeds 15** — keep new
+functions under it. The full job list, and which of them actually gate a merge,
+is in [`docs/operations.md`](docs/operations.md#ci-pipeline).
 
 ## Documentation is required
 

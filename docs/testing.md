@@ -15,7 +15,7 @@ the heavier ones are opt-in behind build tags so the default loop stays fast.
 | In-process cluster tests | `make e2e` | multiple nodes, one process, real HTTP | seconds |
 | Process-based E2E | `make e2e-integration` | real binaries, real signals | ~10s |
 | Fault injection | `make fault` | real binaries + fault proxies | ~2-3 min |
-| Seeded simulation | `make sim` | whole cluster, one process, in-memory network | ~20s (scales with `SIM_SEEDS`) |
+| Seeded simulation | `make sim` | whole cluster, one process, in-memory network | ~20s (scales with `SIM_SEEDS`; CI runs it twice) |
 | TLA+ model checking | `make spec` | **no Continuum code at all** | ~75s |
 | Trace conformance | `make spec-trace` | real cluster, replayed against the model | ~5s |
 | Benchmarks | `make bench` | micro | varies |
