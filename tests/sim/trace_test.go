@@ -223,6 +223,17 @@ func describe(e traceEvent) string {
 	}
 }
 
+// holdsState reports whether a node's local store holds the key in the state
+// the scenario is waiting for: the written value, or a tombstone.
+func holdsState(n *simNode, key string, wantDeleted bool) bool {
+	entry, ok, err := n.store.Get(key)
+	if err != nil || !ok || len(entry.Siblings) == 0 {
+		return false
+	}
+	sib := entry.Siblings[0]
+	return sib.Deleted == wantDeleted && (wantDeleted || sib.Value == traceValue)
+}
+
 // waitReplicas waits until at least `want` replicas hold the key in the given
 // state locally. Reading each store directly observes replication itself rather
 // than a coordinator read that could mask a replica which never received it.
@@ -232,12 +243,7 @@ func waitReplicas(t *testing.T, c *simCluster, key string, wantDeleted bool, wan
 	for {
 		got := 0
 		for _, n := range c.running() {
-			entry, ok, err := n.store.Get(key)
-			if err != nil || !ok || len(entry.Siblings) == 0 {
-				continue
-			}
-			sib := entry.Siblings[0]
-			if sib.Deleted == wantDeleted && (wantDeleted || sib.Value == traceValue) {
+			if holdsState(n, key, wantDeleted) {
 				got++
 			}
 		}

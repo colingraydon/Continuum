@@ -169,6 +169,24 @@ func (c *simCluster) snapshot() []*simNode {
 	return out
 }
 
+// wireStoreCallbacks attaches anti-entropy's tree maintenance to the store and
+// layers the trace observer on top when one is configured. Chained rather than
+// replaced: the tree maintenance is not optional.
+func (c *simCluster) wireStoreCallbacks(id string, s *store.Store, ae *antientropy.Manager) {
+	s.SetOnUpdate(func(key string, hash uint32) {
+		ae.Update(key, hash)
+		if c.observer != nil {
+			c.observer.observeUpdate(id, key, hash)
+		}
+	})
+	s.SetOnEvict(func(key string) {
+		ae.RemoveFromTrees(key)
+		if c.observer != nil {
+			c.observer.observeEvict(id, key)
+		}
+	})
+}
+
 // startNode builds and starts a node with the given identity, mirroring the
 // production wiring in cmd/continuum/main.go.
 func (c *simCluster) startNode(id, dc string) *simNode {
@@ -223,20 +241,7 @@ func (c *simCluster) startNode(id, dc string) *simNode {
 	ae.SetSelfDC(dc)
 	ae.SetCrossDCSyncEvery(c.cfg.crossDCSyncEvery)
 	ae.SetHTTPTransport(linkFrom{net: c.net, from: id})
-	// Chained rather than replaced: anti-entropy's tree maintenance is not
-	// optional, so an observer layers on top of it.
-	s.SetOnUpdate(func(key string, hash uint32) {
-		ae.Update(key, hash)
-		if c.observer != nil {
-			c.observer.observeUpdate(id, key, hash)
-		}
-	})
-	s.SetOnEvict(func(key string) {
-		ae.RemoveFromTrees(key)
-		if c.observer != nil {
-			c.observer.observeEvict(id, key)
-		}
-	})
+	c.wireStoreCallbacks(id, s, ae)
 
 	h := api.NewHandler(r, ml, s, api.HandlerConfig{
 		SelfID:            id,
