@@ -64,4 +64,9 @@ echo
 echo "FAIL: no execution of the model explains the recorded trace." >&2
 echo "The implementation did something specs/Replication.tla does not permit;" >&2
 echo "the states above are as far as any replay got." >&2
+echo >&2
+# The trace is regenerated per run and gitignored, so a CI failure is otherwise
+# undiagnosable after the runner is torn down.
+echo "The recorded trace was:" >&2
+sed -n '/TraceEvents/,/>>/p' specs/TraceData.tla >&2
 exit 1

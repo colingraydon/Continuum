@@ -70,16 +70,30 @@ ObservedStep ==
        \/ GCStep
     /\ ti' = ti + 1
 
-(* FinishWrite closes a fan-out and changes nothing a client or a replica can
-   observe, so the recorder never sees it and the trace never contains it. It
-   is allowed to happen between observed events without advancing the trace.
+(* Steps the recorder cannot see, allowed to happen between observed events
+   without advancing the trace.
 
-   This is the only unobservable step permitted, and that restraint is what
-   keeps the check meaningful: a model free to take arbitrary hidden steps
-   could explain almost any observation. *)
+   There are exactly two, and both are unobservable for the same concrete
+   reason: they change no replica's store, so no store callback fires.
+
+     - FinishWrite closes a fan-out.
+     - A leg of a fan-out aimed at a replica that has since become
+       unreachable. It buffers a hint and leaves every store untouched. This
+       one is easy to forget and its absence is not hypothetical: the first CI
+       run of this check failed because a replica crashed mid-fan-out, leaving
+       its leg outstanding forever, so `pending` never emptied and the next
+       write could not start. Locally every replica had received the write
+       before the crash and the gap never showed.
+
+   Restraint here is what keeps the check meaningful - a model free to take
+   arbitrary hidden steps could explain almost any observation - so the second
+   case is deliberately narrow: only for a replica that is actually down, and
+   only via DeliverWrite, which cannot alter a store in that state. *)
 InternalStep ==
-    /\ FinishWrite
-    /\ UNCHANGED ti
+    \/ /\ FinishWrite
+       /\ UNCHANGED ti
+    \/ /\ \E n \in Nodes : n \notin up /\ DeliverWrite(n)
+       /\ UNCHANGED ti
 
 (* Once every event is explained the behaviour may stutter, so reaching the
    end of the trace is not itself reported as a stuck state. *)

@@ -156,7 +156,11 @@ func TestTraceConformance(t *testing.T) {
 	if code, err := c.put(coordinator, traceKey, traceValue, nil, false); err != nil || code != http.StatusNoContent {
 		t.Fatalf("write got %d (err %v), want 204", code, err)
 	}
-	waitReplicas(t, c, traceKey, false, 2, 10*time.Second)
+	// Wait for all three, not just the quorum. Stopping at the quorum leaves it
+	// racy whether the third replica received the write before step 2 crashes
+	// it, so the recorded trace would differ run to run - which is how the
+	// first CI run of this check produced a shape local runs never did.
+	waitReplicas(t, c, traceKey, false, 3, 10*time.Second)
 
 	// 2. A replica drops out, so the delete below reaches only part of the set.
 	rec.add(traceEvent{Kind: "down", Node: victim.id})

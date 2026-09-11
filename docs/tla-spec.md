@@ -261,6 +261,25 @@ success**; TLC finding no violation means no path ever explained the final
 event. `scripts/trace-conformance.sh` interprets that in one documented place
 rather than leaving an inverted exit code in a CI step.
 
+### Two unobservable steps, and why the second was missed
+
+The replay lets the model take steps the recorder cannot see, but only two, and
+both for the same concrete reason: they change no replica's store, so no store
+callback fires. One closes a fan-out; the other is a leg of a fan-out aimed at a
+replica that has since become unreachable, which buffers a hint and touches no
+store.
+
+The second was missing at first, and CI found it. Locally every replica received
+the write before the crash, so every leg landed and the fan-out always closed.
+On a slower runner one replica crashed mid-fan-out, leaving its leg outstanding
+forever - so the model's `pending` never emptied, the next write could not
+start, and the replay stalled five events in. The check reported exactly that,
+which is the behaviour you want from it, but the cause was a gap in the replay
+rather than in the implementation.
+
+The scenario now waits for all three replicas before crashing one, so the
+recorded trace is the same shape every run rather than depending on timing.
+
 ### The scenario had to be made realistic first
 
 The first recorded run was rejected, and correctly so. It collected the
