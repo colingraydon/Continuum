@@ -17,6 +17,7 @@ the heavier ones are opt-in behind build tags so the default loop stays fast.
 | Fault injection | `make fault` | real binaries + fault proxies | ~2-3 min |
 | Seeded simulation | `make sim` | whole cluster, one process, in-memory network | ~20s (scales with `SIM_SEEDS`) |
 | TLA+ model checking | `make spec` | **no Continuum code at all** | ~75s |
+| Trace conformance | `make spec-trace` | real cluster, replayed against the model | ~5s |
 | Benchmarks | `make bench` | micro | varies |
 
 Supporting passes: `make test-race` (race detector across all packages),
@@ -98,10 +99,13 @@ Continuum code - it enumerates *every* interleaving of a mathematical model of
 the replication path within bounded constants, and reports the shortest trace
 that breaks an invariant if one exists.
 
-That makes it complementary rather than higher on the pyramid. It covers
-interleavings no seed would reach, and it covers none of the implementation:
-a correct spec and a buggy Go function coexist happily until trace conformance
-lands. See [TLA+ Specification](tla-spec.md).
+That makes it complementary rather than higher on the pyramid: it covers
+interleavings no seed would reach, and no implementation detail at all.
+
+`make spec-trace` bridges the two. It records a real cluster's execution and
+makes TLC replay it against the model, so a specification that drifts away from
+the code is caught rather than quietly becoming fiction. See [TLA+
+Specification](tla-spec.md#trace-conformance).
 
 ## Benchmarks
 

@@ -1,4 +1,4 @@
-.PHONY: build run test test-race e2e e2e-integration fault sim sim-race bench bench-ci bench-report lint workflow-lint patch-coverage spec docker clean
+.PHONY: build run test test-race e2e e2e-integration fault sim sim-race bench bench-ci bench-report lint workflow-lint patch-coverage spec spec-trace docker clean
 
 build:
 	go build -o bin/continuum ./cmd/continuum
@@ -56,6 +56,12 @@ lint:
 spec:
 	bash scripts/tlc.sh Replication
 	bash scripts/tlc.sh Strict
+
+# Trace conformance: record a real cluster's execution and make TLC replay it
+# against the model. Where `spec` asks whether the design is correct, this asks
+# whether the implementation stayed inside it.
+spec-trace:
+	bash scripts/trace-conformance.sh
 
 # Workflow files are configuration GitHub parses on its own: a syntax error in
 # one does not fail a run, it makes the workflow unreadable, so no job starts

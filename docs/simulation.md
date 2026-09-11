@@ -98,6 +98,27 @@ That second precondition exists because of how the earlier multi-DC scenarios
 went wrong: a scenario about overflow that never overflowed would pass while
 proving nothing.
 
+## Trace conformance
+
+One scenario in this harness exists to serve the TLA+ specification rather than
+its own assertions. `TestTraceConformance` drives a cluster through a write, a
+replica crash, a delete, hinted handoff on recovery and a tombstone collection,
+recording every event and every store transition, and emits the run as a TLA+
+module for TLC to replay against the model.
+
+It is deliberately scripted rather than seeded. Trace validation needs every
+event attributable to a step, and a randomized background workload would only
+add events nothing can explain.
+
+Two limits are worth knowing. The recorder learns *that* a replica reached a
+version, not *which* mechanism delivered it - fan-out, hinted handoff, and
+anti-entropy are indistinguishable from a store callback - so the replay
+accepts any legal explanation. And because this harness's nodes are
+memory-only, a crash destroys their data, so a recovering replica can never
+carry the stale value the downtime gate exists to discard: that path cannot be
+trace-checked until the harness grows persistence. See [TLA+
+Specification](tla-spec.md#trace-conformance).
+
 ## Design Decisions
 
 ### Seeded, not bit-deterministic
