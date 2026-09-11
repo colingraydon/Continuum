@@ -198,6 +198,11 @@ list](fault-injection.md#findings-the-harness-surfaced):
 
 ## Running it
 
+CI runs this suite **twice** with `SIM_SEEDS=5`, rather than once. A single run
+says little about a timing-sensitive scenario: something failing one run in five
+still looks green 80% of the time, which is how a ~20% flake survived three pull
+requests of a gating check. See [operations](operations.md#ci-pipeline).
+
 ```bash
 make sim               # default: 3 seeds per scenario
 make sim-race          # same suite under the race detector

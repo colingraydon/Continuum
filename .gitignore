@@ -32,6 +32,14 @@ go.work.sum
 # .vscode/
 /bin
 
+# Binaries that `go build ./cmd/<name>` drops in the repo root. The Makefile
+# builds into /bin, but a bare `go build` writes here - and a 2.6 MB patchcov
+# binary was committed that way before this rule existed.
+/benchreport
+/continuum
+/histbisect
+/patchcov
+
 .DS_Store
 
 coverage.out
