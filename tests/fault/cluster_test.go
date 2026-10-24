@@ -37,14 +37,51 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func freePort(t *testing.T) string {
-	t.Helper()
+// portReserver hands out ports for a cluster's processes and keeps each one
+// bound until release. Probing a port and closing it straight away lets the
+// kernel return the same number to the next probe, so two nodes in a cluster
+// could be given one port and the second to bind would fail at startup. Each
+// port is also reserved on the protocol the node will bind (HTTP is TCP,
+// gossip is UDP): a TCP probe says nothing about whether the UDP port is free.
+type portReserver struct {
+	t    *testing.T
+	held []interface{ Close() error }
+}
+
+func newPortReserver(t *testing.T) *portReserver {
+	r := &portReserver{t: t}
+	t.Cleanup(r.release)
+	return r
+}
+
+func (r *portReserver) tcp() string {
+	r.t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("free port: %v", err)
+		r.t.Fatalf("reserve tcp port: %v", err)
 	}
-	defer l.Close()
+	r.held = append(r.held, l)
 	return fmt.Sprintf("%d", l.Addr().(*net.TCPAddr).Port)
+}
+
+func (r *portReserver) udp() string {
+	r.t.Helper()
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		r.t.Fatalf("reserve udp port: %v", err)
+	}
+	r.held = append(r.held, conn)
+	return fmt.Sprintf("%d", conn.LocalAddr().(*net.UDPAddr).Port)
+}
+
+// release frees every reserved port so the processes can bind them. Call it
+// only once nothing else in the harness will ask the kernel for a port, or a
+// proxy could be handed one a node is about to bind.
+func (r *portReserver) release() {
+	for _, h := range r.held {
+		h.Close()
+	}
+	r.held = nil
 }
 
 // clusterConfig parameterizes a fault-injection cluster. Zero values take the
@@ -169,9 +206,12 @@ func newCluster(t *testing.T, cfg clusterConfig) *cluster {
 	cfg = cfg.withDefaults()
 	c := &cluster{t: t, cfg: cfg, client: &http.Client{Timeout: 3 * time.Second}}
 
+	// Proxies are created while the reservations are held, so their own :0
+	// binds cannot land on a port promised to a node.
+	ports := newPortReserver(t)
 	for i := 0; i < cfg.nodes; i++ {
-		bindPort := freePort(t)
-		gossipPort := freePort(t)
+		bindPort := ports.tcp()
+		gossipPort := ports.udp()
 		n := &node{
 			id:         fmt.Sprintf("node%d", i+1),
 			dc:         cfg.dcOf(i),
@@ -183,6 +223,7 @@ func newCluster(t *testing.T, cfg clusterConfig) *cluster {
 		}
 		c.nodes = append(c.nodes, n)
 	}
+	ports.release()
 	t.Cleanup(func() {
 		for _, n := range c.nodes {
 			c.killQuiet(n)
