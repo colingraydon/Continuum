@@ -13,13 +13,16 @@
 # lets this be a CI gate rather than a report.
 set -euo pipefail
 
-TLA_VERSION="${TLA_VERSION:-v1.8.0}"
+# A stable release, not v1.8.0: upstream publishes that tag as a pre-release
+# and re-cuts its jar in place, so any hash pinned against it goes stale on the
+# next rebuild. Stick to tags GitHub does not mark as pre-releases.
+TLA_VERSION="${TLA_VERSION:-v1.7.4}"
 # Pinned alongside the version. This script downloads a jar and then executes
 # it, so the version tag alone is not enough: a re-cut release, a compromised
 # asset, or a redirect that downgraded the transport would all go unnoticed
 # without checking what actually arrived. Same reasoning as --require-hashes in
 # requirements-docs.txt. Update both together when bumping TLA_VERSION.
-TLA_SHA256="${TLA_SHA256:-957b23b2bb31d08f19346e105e23585f93fea9a139a712b0ac347eedaf26afea}"
+TLA_SHA256="${TLA_SHA256:-936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88}"
 CACHE_DIR="${TLC_CACHE_DIR:-.tlc}"
 JAR="$CACHE_DIR/tla2tools-${TLA_VERSION}.jar"
 SPEC_DIR="${SPEC_DIR:-specs}"
