@@ -210,7 +210,9 @@ script downloads an archive and then executes it, so the release tag alone is
 not enough — a re-cut release or a tampered asset would run unnoticed. A
 mismatch refuses to run and caches nothing, the same reasoning behind
 `--require-hashes` in `requirements-docs.txt`. Bump `TLA_VERSION` and
-`TLA_SHA256` together.
+`TLA_SHA256` together, and only to a stable release: TLA+ publishes its newer
+versions as pre-releases whose jar is rebuilt under the same tag, so a hash
+pinned against one stops matching without anything in this repo changing.
 
 To explore further than CI does, raise the bounds in a config — `MaxOps = 4` or
 a fourth node. Expect the state space to grow sharply; that is why the CI job
