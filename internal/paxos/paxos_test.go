@@ -269,18 +269,17 @@ func TestPromiseSurvivesZeroFilledLogTail(t *testing.T) {
 	}
 }
 
+// zeroFillNewestSegment extends the log's newest segment with zeros, as a
+// crash can leave it.
 func zeroFillNewestSegment(t *testing.T, dir string) {
 	t.Helper()
-	segs, err := filepath.Glob(filepath.Join(dir, "*.wal"))
-	if err != nil || len(segs) == 0 {
-		t.Fatalf("no log segments in %s: %v", dir, err)
-	}
+	segs, _ := filepath.Glob(filepath.Join(dir, "*.wal"))
 	f, err := os.OpenFile(segs[len(segs)-1], os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		_, err = f.Write(make([]byte, 4096))
+		f.Close()
 	}
-	defer f.Close()
-	if _, err := f.Write(make([]byte, 4096)); err != nil {
-		t.Fatal(err)
+	if err != nil {
+		t.Fatalf("zero-fill log tail: %v", err)
 	}
 }
