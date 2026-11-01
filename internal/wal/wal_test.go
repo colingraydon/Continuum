@@ -547,8 +547,8 @@ func TestReadFrame_BadLength(t *testing.T) {
 	crc := crc32.ChecksumIEEE(hdr[4:])
 	binary.BigEndian.PutUint32(hdr[0:4], crc)
 	_, err := readFrame(bytes.NewReader(hdr[:]))
-	if err == nil || !strings.Contains(err.Error(), "invalid length") {
-		t.Fatalf("expected invalid length, got %v", err)
+	if !errors.Is(err, errBadLength) {
+		t.Fatalf("expected errBadLength, got %v", err)
 	}
 }
 
@@ -881,5 +881,119 @@ func TestSyncUpTo_FsyncErrorSurfaces(t *testing.T) {
 	}
 	if got := w.FsyncCount(); got != 1 {
 		t.Fatalf("FsyncCount = %d, want 1 (the failed attempt is still counted)", got)
+	}
+}
+
+// zeroFillTail appends n zero bytes to seg, the shape a crash can leave when
+// the file's size was extended but the data blocks were never written.
+func zeroFillTail(t *testing.T, seg string, n int) {
+	t.Helper()
+	f, err := os.OpenFile(seg, os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatalf("open seg: %v", err)
+	}
+	defer f.Close()
+	if _, err := f.Write(make([]byte, n)); err != nil {
+		t.Fatalf("zero-fill: %v", err)
+	}
+}
+
+// readPayloads returns every payload a Reader yields from dir, failing the
+// test on any error other than the clean io.EOF.
+func readPayloads(t *testing.T, dir string) []string {
+	t.Helper()
+	r, err := NewReader(dir)
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	defer r.Close()
+	var got []string
+	for {
+		rec, err := r.Next()
+		if err == io.EOF {
+			return got
+		}
+		if err != nil {
+			t.Fatalf("Next after %v: %v", got, err)
+		}
+		got = append(got, string(rec.Payload))
+	}
+}
+
+// A zero-filled tail used to decode as a frame of length 0, a hard error
+// that failed Open and so blocked startup of every WAL-backed component.
+func TestZeroFilledTail_TruncatedByWriterOpen(t *testing.T) {
+	dir := t.TempDir()
+	w, _ := Open(dir)
+	w.Append([]byte("first"))
+	w.Append([]byte("second"))
+	w.Close()
+	segs, _ := listSegments(dir)
+	zeroFillTail(t, segs[0], 4096)
+
+	w2, err := Open(dir)
+	if err != nil {
+		t.Fatalf("reopen after zero-filled tail: %v", err)
+	}
+	if got := w2.NextSeq(); got != 3 {
+		t.Fatalf("NextSeq after zero-filled tail = %d, want 3", got)
+	}
+	w2.Append([]byte("third"))
+	w2.Close()
+
+	if got := strings.Join(readPayloads(t, dir), ","); got != "first,second,third" {
+		t.Fatalf("records after recovery = %q, want first,second,third", got)
+	}
+}
+
+func TestZeroFilledTail_ReaderReportsTorn(t *testing.T) {
+	dir := t.TempDir()
+	w, _ := Open(dir)
+	w.Append([]byte("first"))
+	w.Close()
+	segs, _ := listSegments(dir)
+	zeroFillTail(t, segs[0], headerSize)
+
+	r, _ := NewReader(dir)
+	defer r.Close()
+	if _, err := r.Next(); err != nil {
+		t.Fatalf("Next first: %v", err)
+	}
+	if _, err := r.Next(); err != io.EOF {
+		t.Fatalf("expected EOF at zero-filled tail, got %v", err)
+	}
+	if !r.TornTail() {
+		t.Fatalf("expected TornTail")
+	}
+}
+
+// Only the newest segment can hold a torn write: rotation fsyncs a segment
+// before closing it. A bad length in an older one is corruption and must
+// still surface rather than silently ending the log.
+func TestBadLength_NonNewestSegmentIsError(t *testing.T) {
+	dir := t.TempDir()
+	w, _ := Open(dir)
+	w.SetMaxSegmentBytes(50)
+	for range 6 {
+		w.Append([]byte("aaaaaaaa"))
+	}
+	w.Close()
+	segs, _ := listSegments(dir)
+	if len(segs) < 2 {
+		t.Fatalf("need at least 2 segments, got %d", len(segs))
+	}
+	f, err := os.OpenFile(segs[0], os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := f.WriteAt(make([]byte, headerSize), 0); err != nil {
+		t.Fatalf("zero header: %v", err)
+	}
+	f.Close()
+
+	r, _ := NewReader(dir)
+	defer r.Close()
+	if _, err := r.Next(); !errors.Is(err, errBadLength) {
+		t.Fatalf("expected errBadLength, got %v", err)
 	}
 }

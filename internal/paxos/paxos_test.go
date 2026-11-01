@@ -2,6 +2,8 @@ package paxos
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -238,6 +240,47 @@ func TestMemoryAcceptorCloseIsNoop(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A crash can leave the log's tail zero-filled. The acceptor must still open,
+// keeping every promise made before it: a WAL that refused to open blocked
+// the node from starting at all.
+func TestPromiseSurvivesZeroFilledLogTail(t *testing.T) {
+	dir := t.TempDir()
+	a, err := OpenAcceptor(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Prepare("k", b(9, "n2")); err != nil {
+		t.Fatal(err)
+	}
+	a.Close()
+	zeroFillNewestSegment(t, dir)
+
+	a2, err := OpenAcceptor(dir)
+	if err != nil {
+		t.Fatalf("open after zero-filled tail: %v", err)
+	}
+	defer a2.Close()
+	if p, err := a2.Prepare("k", b(5, "n1")); err != nil || p.OK {
+		t.Fatalf("promise for ballot 9 lost: lower prepare got %+v err=%v", p, err)
+	}
+}
+
+func zeroFillNewestSegment(t *testing.T, dir string) {
+	t.Helper()
+	segs, err := filepath.Glob(filepath.Join(dir, "*.wal"))
+	if err != nil || len(segs) == 0 {
+		t.Fatalf("no log segments in %s: %v", dir, err)
+	}
+	f, err := os.OpenFile(segs[len(segs)-1], os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.Write(make([]byte, 4096)); err != nil {
 		t.Fatal(err)
 	}
 }
