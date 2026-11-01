@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -937,4 +938,91 @@ func seedDirectWrite(t *testing.T, srvURL, value, clocksJSON string) {
 		t.Fatalf("seed write: %v", err)
 	}
 	defer resp.Body.Close()
+}
+
+// TestE2EReplicaPathsPreserveKeysWithURLMetacharacters pins that replica
+// sub-requests address the exact key the client wrote. The coordinator reads
+// the key from the decoded request path; built into the replica URL without
+// re-escaping, "a?b" reached the replica as key "a" (query "b") and "x#y" as
+// "x" — acked toward quorum while writing the wrong key — and "50%off" failed
+// to parse at all.
+func TestE2EReplicaPathsPreserveKeysWithURLMetacharacters(t *testing.T) {
+	srv1 := newNamedTestServerQ(t, "node1", 2, 2, 2)
+	srv2 := newNamedTestServerQ(t, "node2", 2, 2, 2)
+	for _, srv := range []*httptest.Server{srv1, srv2} {
+		for id, s := range map[string]*httptest.Server{"node1": srv1, "node2": srv2} {
+			resp := postNode(t, srv.URL+"/nodes", fmt.Sprintf(`{"id": %q, "address": %q}`, id, serverAddress(s)))
+			resp.Body.Close()
+		}
+	}
+
+	do := func(method, base, key, body string, proxied bool) *http.Response {
+		t.Helper()
+		req, err := http.NewRequest(method, base+"/keys/"+url.PathEscape(key), strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("%s %q: %v", method, key, err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if proxied {
+			req.Header.Set(headerXProxiedFrom, "test")
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s %q: %v", method, key, err)
+		}
+		return resp
+	}
+	// local reads one node's own store, bypassing the coordinator.
+	local := func(base, key string) NodeResponse {
+		t.Helper()
+		resp := do(http.MethodGet, base, key, "", true)
+		defer resp.Body.Close()
+		var nr NodeResponse
+		if err := json.NewDecoder(resp.Body).Decode(&nr); err != nil {
+			t.Fatalf("local read %q: %v", key, err)
+		}
+		return nr
+	}
+
+	keys := []string{"a?b", "x#y", "50%off", "a%3Fb", "dir/file", "sp ace", "ünï"}
+	for _, key := range keys {
+		want := "v:" + key
+		resp := do(http.MethodPut, srv1.URL, key, fmt.Sprintf(`{"value": %q}`, want), false)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("PUT %q: expected 204 with W=2, got %d", key, resp.StatusCode)
+		}
+		for _, srv := range []*httptest.Server{srv1, srv2} {
+			if got := local(srv.URL, key).Value; got != want {
+				t.Errorf("%s holds %q = %q, want %q", srv.URL, key, got, want)
+			}
+		}
+
+		// R=2: the coordinator's read of the other replica goes over the wire.
+		resp = do(http.MethodGet, srv1.URL, key, "", false)
+		var nr NodeResponse
+		if err := json.NewDecoder(resp.Body).Decode(&nr); err != nil {
+			t.Fatalf("GET %q: %v", key, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || nr.Value != want {
+			t.Errorf("quorum GET %q: status %d value %q, want 200 %q", key, resp.StatusCode, nr.Value, want)
+		}
+
+		resp = do(http.MethodDelete, srv1.URL, key, `{}`, false)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("DELETE %q: expected 204 with W=2, got %d", key, resp.StatusCode)
+		}
+		if nr := local(srv2.URL, key); !nr.Deleted {
+			t.Errorf("node2 did not receive the tombstone for %q: %+v", key, nr)
+		}
+	}
+
+	// The truncated keys the unescaped URLs used to hit must stay untouched.
+	for _, stray := range []string{"a", "x"} {
+		if nr := local(srv2.URL, stray); nr.Value != "" || nr.Deleted {
+			t.Errorf("stray write landed on %q: %+v", stray, nr)
+		}
+	}
 }

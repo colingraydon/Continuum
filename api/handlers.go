@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -1336,7 +1337,7 @@ func (h *Handler) replicateWriteToSync(address, dc, key string, wr keyWrite, clo
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(method, schemeHTTP+address+keysPrefix+key, bytes.NewReader(body))
+	req, err := http.NewRequest(method, replicaKeyURL(address, key), bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -1363,10 +1364,21 @@ func (h *Handler) replicateDeleteToSync(address, dc, key string, clocks map[stri
 	return h.replicateWriteToSync(address, dc, key, keyWrite{deleted: true}, clocks)
 }
 
+// replicaKeyURL is the /keys/ URL for key on the node at address. The key is
+// the decoded path the client sent, so it must be escaped again on the way
+// out: concatenated raw, a "?" or "#" in it ends the path early and the
+// replica stores the write under a truncated key (an ack that counts toward
+// quorum for the wrong key), and a "%" fails to parse at all. "/" is left
+// as-is, which the replica's TrimPrefix reads back unchanged.
+func replicaKeyURL(address, key string) string {
+	u := url.URL{Scheme: "http", Host: address, Path: keysPrefix + key}
+	return u.String()
+}
+
 // readFromReplica fetches the local entry for key from a replica node. The
 // response includes the vector clock so the coordinator can merge versions.
 func (h *Handler) readFromReplica(address, key string) (NodeResponse, error) {
-	req, err := http.NewRequest(http.MethodGet, schemeHTTP+address+keysPrefix+key, nil)
+	req, err := http.NewRequest(http.MethodGet, replicaKeyURL(address, key), nil)
 	if err != nil {
 		return NodeResponse{}, err
 	}
