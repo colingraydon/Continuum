@@ -371,7 +371,7 @@ func (r *Reader) Next() (Record, error) {
 			r.f = nil
 			continue
 		}
-		if (errors.Is(err, errTornTail) || errors.Is(err, errCRC)) && r.idx == len(r.segments)-1 {
+		if isDamagedFrame(err) && r.idx == len(r.segments)-1 {
 			r.tornTail = true
 			_ = r.f.Close()
 			r.f = nil
@@ -395,7 +395,7 @@ func (r *Reader) openNextSegment() error {
 }
 
 // TornTail reports whether iteration ended because the last segment had a
-// torn or CRC-failed record at its tail.
+// torn, CRC-failed, or impossible-length record at its tail.
 func (r *Reader) TornTail() bool { return r.tornTail }
 
 // Close releases the current file handle if any.
@@ -411,7 +411,18 @@ func (r *Reader) Close() error {
 var (
 	errTornTail = errors.New("wal: torn record")
 	errCRC      = errors.New("wal: crc mismatch")
+	// errBadLength is a header whose length cannot cover even the seq. It is
+	// what a zero-filled tail decodes as: after a crash, ext4 and XFS can
+	// leave a file's extended size backed by zeros the write never reached.
+	errBadLength = errors.New("wal: invalid frame length")
 )
+
+// isDamagedFrame reports whether err means the frame's bytes are not a
+// complete, valid record. At the tail of the newest segment that is a torn
+// write to truncate; anywhere else it is corruption to surface.
+func isDamagedFrame(err error) bool {
+	return errors.Is(err, errTornTail) || errors.Is(err, errCRC) || errors.Is(err, errBadLength)
+}
 
 // encodeFrame builds one on-disk frame. The caller (Append) guarantees
 // len(payload) <= maxPayloadBytes, so headerSize+len(payload) cannot overflow
@@ -427,8 +438,9 @@ func encodeFrame(seq uint64, payload []byte) []byte {
 }
 
 // readFrame reads a single record from r. Returns io.EOF at clean end,
-// errTornTail if the frame is incomplete at end-of-file, errCRC on CRC
-// failure, or another error on IO failure.
+// errTornTail if the frame is incomplete at end-of-file, errBadLength if the
+// header's length is too small to be a frame, errCRC on CRC failure, or
+// another error on IO failure.
 func readFrame(r io.Reader) (Record, error) {
 	var hdr [headerSize]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
@@ -444,7 +456,7 @@ func readFrame(r io.Reader) (Record, error) {
 	length := binary.BigEndian.Uint32(hdr[4:8])
 	seq := binary.BigEndian.Uint64(hdr[8:16])
 	if length < 8 {
-		return Record{}, fmt.Errorf("wal: invalid length %d", length)
+		return Record{}, fmt.Errorf("%w: %d", errBadLength, length)
 	}
 	payload := make([]byte, length-8)
 	if _, err := io.ReadFull(r, payload); err != nil {
@@ -463,9 +475,9 @@ func readFrame(r io.Reader) (Record, error) {
 }
 
 // scanSegment returns the highest sequence number in the segment at path
-// and the offset immediately after the last valid record. A torn tail or
-// CRC failure at the end is silently absorbed; the caller truncates to
-// validEnd.
+// and the offset immediately after the last valid record. A damaged frame
+// at the end (torn, CRC-failed, or zero-filled) is silently absorbed; the
+// caller truncates to validEnd.
 func scanSegment(path string) (lastSeq uint64, validEnd int64, err error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -479,7 +491,7 @@ func scanSegment(path string) (lastSeq uint64, validEnd int64, err error) {
 			validEnd += int64(headerSize + len(rec.Payload))
 			continue
 		}
-		if errors.Is(rerr, io.EOF) || errors.Is(rerr, errTornTail) || errors.Is(rerr, errCRC) {
+		if errors.Is(rerr, io.EOF) || isDamagedFrame(rerr) {
 			return lastSeq, validEnd, nil
 		}
 		return 0, 0, fmt.Errorf("wal: scan %s at %d: %w", path, validEnd, rerr)

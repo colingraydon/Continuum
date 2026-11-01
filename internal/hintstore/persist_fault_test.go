@@ -217,12 +217,16 @@ func TestReplayHintLog_ReaderError(t *testing.T) {
 
 func TestReplayHintLog_InvalidFrameLength(t *testing.T) {
 	dir := t.TempDir()
-	// Hand-write a 16-byte WAL frame header whose length field is < 8, which the
-	// reader rejects as a hard (non-torn) error mid-stream.
+	// Hand-write a 16-byte WAL frame header whose length field is < 8 into an
+	// older segment, with a newer one after it. At the newest segment's tail
+	// that is a torn write and is truncated; mid-stream it is corruption, which
+	// the reader rejects as a hard error.
 	hdr := make([]byte, 16)
 	binary.BigEndian.PutUint32(hdr[4:8], 3)
-	name := filepath.Join(dir, "00000000000000000001.wal")
-	if err := os.WriteFile(name, hdr, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "00000000000000000001.wal"), hdr, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "00000000000000000002.wal"), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := replayHintLog(dir, time.Hour); err == nil {

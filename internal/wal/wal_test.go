@@ -244,55 +244,44 @@ func TestRotation(t *testing.T) {
 	}
 }
 
+// tailDamage is a way a crash can leave the end of the newest segment: a
+// write cut off partway through its header, or a size extension whose data
+// blocks were never written and so read back as zeros (ext4, XFS). A zero
+// header used to decode as a hard length-0 error that failed Open.
+var tailDamage = []struct {
+	name string
+	tail []byte
+}{
+	{"partial header", []byte{0, 0, 0, 0, 0, 0, 0, 99}},
+	{"zero-filled", make([]byte, 4096)},
+}
+
 func TestTornTail_TruncatedByWriterOpen(t *testing.T) {
+	for _, tc := range tailDamage {
+		t.Run(tc.name, func(t *testing.T) { checkTruncatedByWriterOpen(t, tc.tail) })
+	}
+}
+
+func checkTruncatedByWriterOpen(t *testing.T, tail []byte) {
 	dir := t.TempDir()
-	w, _ := Open(dir)
-	w.Append([]byte("first"))
-	w.Append([]byte("second"))
-	w.Close()
-
-	// Simulate a torn write by appending a partial frame to the segment.
+	appendRecords(t, dir, "first", "second")
 	segs, _ := listSegments(dir)
-	f, err := os.OpenFile(segs[0], os.O_RDWR|os.O_APPEND, 0o644)
-	if err != nil {
-		t.Fatalf("open seg: %v", err)
-	}
-	if _, err := f.Write([]byte{0, 0, 0, 0, 0, 0, 0, 99}); err != nil { // partial header
-		t.Fatalf("write garbage: %v", err)
-	}
-	f.Close()
+	appendBytes(t, segs[0], tail)
 
-	w2, err := Open(dir)
+	w, err := Open(dir)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
-	if got := w2.NextSeq(); got != 3 {
+	if got := w.NextSeq(); got != 3 {
 		t.Fatalf("NextSeq after torn tail = %d, want 3", got)
 	}
-	w2.Append([]byte("third"))
-	w2.Close()
+	w.Append([]byte("third"))
+	w.Close()
 
 	r, _ := NewReader(dir)
 	defer r.Close()
-	var got []string
-	for {
-		rec, err := r.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			t.Fatalf("Next: %v", err)
-		}
-		got = append(got, string(rec.Payload))
-	}
-	want := []string{"first", "second", "third"}
-	if len(got) != len(want) {
-		t.Fatalf("got %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("got %v, want %v", got, want)
-		}
+	if got := strings.Join(readPayloads(t, r), ","); got != "first,second,third" {
+		t.Fatalf("records after recovery = %q, want first,second,third", got)
 	}
 	if r.TornTail() {
 		t.Fatalf("TornTail should be false after writer truncation")
@@ -300,62 +289,126 @@ func TestTornTail_TruncatedByWriterOpen(t *testing.T) {
 }
 
 func TestTornTail_ReaderReports(t *testing.T) {
-	dir := t.TempDir()
-	w, _ := Open(dir)
-	w.Append([]byte("first"))
-	w.Close()
-
-	segs, _ := listSegments(dir)
-	f, err := os.OpenFile(segs[0], os.O_RDWR|os.O_APPEND, 0o644)
-	if err != nil {
-		t.Fatalf("open seg: %v", err)
+	for _, tc := range tailDamage {
+		t.Run(tc.name, func(t *testing.T) { checkReaderReportsTorn(t, tc.tail) })
 	}
-	f.Write([]byte{0, 0, 0, 99}) // partial header
-	f.Close()
+}
+
+func checkReaderReportsTorn(t *testing.T, tail []byte) {
+	dir := t.TempDir()
+	appendRecords(t, dir, "first")
+	segs, _ := listSegments(dir)
+	appendBytes(t, segs[0], tail)
 
 	r, _ := NewReader(dir)
 	defer r.Close()
-	if _, err := r.Next(); err != nil {
-		t.Fatalf("Next first: %v", err)
-	}
-	if _, err := r.Next(); err != io.EOF {
-		t.Fatalf("expected EOF, got %v", err)
+	if got := readPayloads(t, r); len(got) != 1 || got[0] != "first" {
+		t.Fatalf("records before torn tail = %v, want [first]", got)
 	}
 	if !r.TornTail() {
 		t.Fatalf("expected TornTail")
 	}
 }
 
-func TestMidStreamCRCFailure_NonNewestSegment(t *testing.T) {
+// Only the newest segment can hold a torn write: rotation fsyncs a segment
+// before closing it. Damage in an older one is corruption and must surface
+// rather than silently ending the log.
+func TestMidStreamDamage_NonNewestSegment(t *testing.T) {
+	cases := []struct {
+		name string
+		off  int64
+		data []byte
+		want error
+	}{
+		{"crc", headerSize + 1, []byte{0xff}, errCRC}, // a byte of the first payload
+		{"zero header", 0, make([]byte, headerSize), errBadLength},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			segs := writeRotatedLog(t)
+			overwriteAt(t, segs[0], tc.off, tc.data)
+			r, _ := NewReader(filepath.Dir(segs[0]))
+			defer r.Close()
+			if _, err := r.Next(); !errors.Is(err, tc.want) {
+				t.Fatalf("expected %v, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+// writeRotatedLog writes enough small records under a tiny rotation
+// threshold to span several segments, and returns their paths.
+func writeRotatedLog(t *testing.T) []string {
+	t.Helper()
 	dir := t.TempDir()
 	w, _ := Open(dir)
-	w.SetMaxSegmentBytes(50) // force frequent rotation
+	w.SetMaxSegmentBytes(50)
 	for range 6 {
 		w.Append([]byte("aaaaaaaa"))
 	}
 	w.Close()
-
 	segs, _ := listSegments(dir)
 	if len(segs) < 2 {
 		t.Fatalf("need at least 2 segments, got %d", len(segs))
 	}
-	// Corrupt a byte in the first segment's first record's payload.
-	f, err := os.OpenFile(segs[0], os.O_RDWR, 0o644)
+	return segs
+}
+
+// appendRecords opens the log in dir, appends payloads, and closes it.
+func appendRecords(t *testing.T, dir string, payloads ...string) {
+	t.Helper()
+	w, err := Open(dir)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if _, err := f.Seek(headerSize+1, io.SeekStart); err != nil {
-		t.Fatalf("seek: %v", err)
+	for _, p := range payloads {
+		if _, err := w.Append([]byte(p)); err != nil {
+			t.Fatalf("append %q: %v", p, err)
+		}
 	}
-	if _, err := f.Write([]byte{0xff}); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	f.Close()
+	w.Close()
+}
 
-	r, _ := NewReader(dir)
-	defer r.Close()
-	if _, err := r.Next(); !errors.Is(err, errCRC) {
-		t.Fatalf("expected errCRC, got %v", err)
+// appendBytes writes raw bytes after the end of the segment at path.
+func appendBytes(t *testing.T, path string, data []byte) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatalf("open seg: %v", err)
+	}
+	defer f.Close()
+	if _, err := f.Write(data); err != nil {
+		t.Fatalf("append bytes: %v", err)
+	}
+}
+
+// overwriteAt replaces bytes of the segment at path starting at off.
+func overwriteAt(t *testing.T, path string, off int64, data []byte) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatalf("open seg: %v", err)
+	}
+	defer f.Close()
+	if _, err := f.WriteAt(data, off); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+}
+
+// readPayloads drains r, failing the test on any error other than the clean
+// io.EOF that also ends iteration at a torn tail.
+func readPayloads(t *testing.T, r *Reader) []string {
+	t.Helper()
+	var got []string
+	for {
+		rec, err := r.Next()
+		if err == io.EOF {
+			return got
+		}
+		if err != nil {
+			t.Fatalf("Next after %v: %v", got, err)
+		}
+		got = append(got, string(rec.Payload))
 	}
 }
 
@@ -547,8 +600,8 @@ func TestReadFrame_BadLength(t *testing.T) {
 	crc := crc32.ChecksumIEEE(hdr[4:])
 	binary.BigEndian.PutUint32(hdr[0:4], crc)
 	_, err := readFrame(bytes.NewReader(hdr[:]))
-	if err == nil || !strings.Contains(err.Error(), "invalid length") {
-		t.Fatalf("expected invalid length, got %v", err)
+	if !errors.Is(err, errBadLength) {
+		t.Fatalf("expected errBadLength, got %v", err)
 	}
 }
 
