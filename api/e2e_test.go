@@ -949,80 +949,95 @@ func seedDirectWrite(t *testing.T, srvURL, value, clocksJSON string) {
 func TestE2EReplicaPathsPreserveKeysWithURLMetacharacters(t *testing.T) {
 	srv1 := newNamedTestServerQ(t, "node1", 2, 2, 2)
 	srv2 := newNamedTestServerQ(t, "node2", 2, 2, 2)
-	for _, srv := range []*httptest.Server{srv1, srv2} {
-		for id, s := range map[string]*httptest.Server{"node1": srv1, "node2": srv2} {
-			resp := postNode(t, srv.URL+"/nodes", fmt.Sprintf(`{"id": %q, "address": %q}`, id, serverAddress(s)))
-			resp.Body.Close()
-		}
-	}
+	meshNodes(t, map[string]*httptest.Server{"node1": srv1, "node2": srv2})
 
-	do := func(method, base, key, body string, proxied bool) *http.Response {
-		t.Helper()
-		req, err := http.NewRequest(method, base+"/keys/"+url.PathEscape(key), strings.NewReader(body))
-		if err != nil {
-			t.Fatalf("%s %q: %v", method, key, err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		if proxied {
-			req.Header.Set(headerXProxiedFrom, "test")
-		}
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatalf("%s %q: %v", method, key, err)
-		}
-		return resp
-	}
-	// local reads one node's own store, bypassing the coordinator.
-	local := func(base, key string) NodeResponse {
-		t.Helper()
-		resp := do(http.MethodGet, base, key, "", true)
-		defer resp.Body.Close()
-		var nr NodeResponse
-		if err := json.NewDecoder(resp.Body).Decode(&nr); err != nil {
-			t.Fatalf("local read %q: %v", key, err)
-		}
-		return nr
-	}
-
-	keys := []string{"a?b", "x#y", "50%off", "a%3Fb", "dir/file", "sp ace", "ünï"}
-	for _, key := range keys {
-		want := "v:" + key
-		resp := do(http.MethodPut, srv1.URL, key, fmt.Sprintf(`{"value": %q}`, want), false)
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusNoContent {
-			t.Fatalf("PUT %q: expected 204 with W=2, got %d", key, resp.StatusCode)
-		}
-		for _, srv := range []*httptest.Server{srv1, srv2} {
-			if got := local(srv.URL, key).Value; got != want {
-				t.Errorf("%s holds %q = %q, want %q", srv.URL, key, got, want)
-			}
-		}
-
-		// R=2: the coordinator's read of the other replica goes over the wire.
-		resp = do(http.MethodGet, srv1.URL, key, "", false)
-		var nr NodeResponse
-		if err := json.NewDecoder(resp.Body).Decode(&nr); err != nil {
-			t.Fatalf("GET %q: %v", key, err)
-		}
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK || nr.Value != want {
-			t.Errorf("quorum GET %q: status %d value %q, want 200 %q", key, resp.StatusCode, nr.Value, want)
-		}
-
-		resp = do(http.MethodDelete, srv1.URL, key, `{}`, false)
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusNoContent {
-			t.Fatalf("DELETE %q: expected 204 with W=2, got %d", key, resp.StatusCode)
-		}
-		if nr := local(srv2.URL, key); !nr.Deleted {
-			t.Errorf("node2 did not receive the tombstone for %q: %+v", key, nr)
-		}
+	for _, key := range []string{"a?b", "x#y", "50%off", "a%3Fb", "dir/file", "sp ace", "ünï"} {
+		assertKeyRoundTrips(t, srv1, srv2, key)
 	}
 
 	// The truncated keys the unescaped URLs used to hit must stay untouched.
 	for _, stray := range []string{"a", "x"} {
-		if nr := local(srv2.URL, stray); nr.Value != "" || nr.Deleted {
+		if nr := localEntry(t, srv2.URL, stray); nr.Value != "" || nr.Deleted {
 			t.Errorf("stray write landed on %q: %+v", stray, nr)
 		}
+	}
+}
+
+// meshNodes registers every node with every other node's ring.
+func meshNodes(t *testing.T, nodes map[string]*httptest.Server) {
+	t.Helper()
+	for _, srv := range nodes {
+		for id, s := range nodes {
+			resp := postNode(t, srv.URL+"/nodes", fmt.Sprintf(`{"id": %q, "address": %q}`, id, serverAddress(s)))
+			resp.Body.Close()
+		}
+	}
+}
+
+// keyRequest sends method to key on base with the key path-escaped as a
+// client would. proxied marks it as a replica sub-request, which serves or
+// applies it against that node's local store only.
+func keyRequest(t *testing.T, method, base, key, body string, proxied bool) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(method, base+"/keys/"+url.PathEscape(key), strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("%s %q: %v", method, key, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if proxied {
+		req.Header.Set(headerXProxiedFrom, "test")
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("%s %q: %v", method, key, err)
+	}
+	return resp
+}
+
+// localEntry reads key from one node's own store, bypassing the coordinator.
+func localEntry(t *testing.T, base, key string) NodeResponse {
+	t.Helper()
+	resp := keyRequest(t, http.MethodGet, base, key, "", true)
+	defer resp.Body.Close()
+	var nr NodeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&nr); err != nil {
+		t.Fatalf("local read %q: %v", key, err)
+	}
+	return nr
+}
+
+// assertKeyRoundTrips writes key through coord with W=2, then checks both
+// replicas hold it under the exact key, a quorum read through coord returns
+// it, and a delete leaves a tombstone on peer.
+func assertKeyRoundTrips(t *testing.T, coord, peer *httptest.Server, key string) {
+	t.Helper()
+	want := "v:" + key
+	resp := keyRequest(t, http.MethodPut, coord.URL, key, fmt.Sprintf(`{"value": %q}`, want), false)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("PUT %q: expected 204 with W=2, got %d", key, resp.StatusCode)
+	}
+	for _, srv := range []*httptest.Server{coord, peer} {
+		if got := localEntry(t, srv.URL, key).Value; got != want {
+			t.Errorf("%s holds %q = %q, want %q", srv.URL, key, got, want)
+		}
+	}
+
+	// R=2: the coordinator's read of the other replica goes over the wire.
+	resp = keyRequest(t, http.MethodGet, coord.URL, key, "", false)
+	var nr NodeResponse
+	err := json.NewDecoder(resp.Body).Decode(&nr)
+	resp.Body.Close()
+	if err != nil || resp.StatusCode != http.StatusOK || nr.Value != want {
+		t.Errorf("quorum GET %q: status %d value %q err %v, want 200 %q", key, resp.StatusCode, nr.Value, err, want)
+	}
+
+	resp = keyRequest(t, http.MethodDelete, coord.URL, key, `{}`, false)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("DELETE %q: expected 204 with W=2, got %d", key, resp.StatusCode)
+	}
+	if nr := localEntry(t, peer.URL, key); !nr.Deleted {
+		t.Errorf("%s did not receive the tombstone for %q: %+v", peer.URL, key, nr)
 	}
 }
