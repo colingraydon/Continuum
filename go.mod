@@ -6,10 +6,10 @@ require github.com/emirpasic/gods v1.18.1
 
 require (
 	github.com/anishathalye/porcupine v1.3.1
-	github.com/klauspost/compress v1.20.3
+	github.com/klauspost/compress v1.20.4
 	github.com/prometheus/client_golang v1.25.0
 	github.com/twmb/murmur3 v1.2.2
-	golang.org/x/sys v0.49.0
+	golang.org/x/sys v0.50.0
 )
 
 require (
